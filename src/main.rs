@@ -2,6 +2,7 @@
 mod agent;
 mod compact;
 mod llm;
+mod render;
 mod session;
 mod ui;
 mod worker;
@@ -12,7 +13,7 @@ use rustyline::error::ReadlineError;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-/// Minimal code-mode coding agent. Without a task it starts a REPL (/compact, /cost).
+/// Minimal code-mode coding agent. Without a task it starts a REPL (/compact, /cost, /think).
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
@@ -84,6 +85,10 @@ async fn main() -> Result<()> {
             "/compact" => agent.compact(),
             "/cost" => {
                 agent.cost();
+                Ok(())
+            }
+            "/think" => {
+                agent.think();
                 Ok(())
             }
             task => {

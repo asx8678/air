@@ -44,6 +44,9 @@ impl Agent {
             result = self.turn(task) => Some(result),
             _ = tokio::signal::ctrl_c() => None,
         };
+        // The stream can end while the thinking box is live (error or Ctrl-C); erase it before any
+        // more log, or the next redraw moves up into lines that have nothing to do with it.
+        ui::clear_live();
         if let Some(result) = finished {
             return result;
         }
@@ -108,7 +111,13 @@ impl Agent {
             serde_json::from_str(call["function"]["arguments"].as_str().unwrap_or_default()).unwrap_or_default();
         match (call["function"]["name"].as_str(), args["code"].as_str()) {
             (Some("run"), Some(code)) => self.run_code(code).await,
-            _ => ("error: the only tool is run(code)".into(), json!({"tool": "run", "error": true})),
+            (name, _) => {
+                ui::note(&format!(
+                    "the model called {}, but the only tool is run(code)",
+                    name.unwrap_or("a nameless tool")
+                ));
+                ("error: the only tool is run(code)".into(), json!({"tool": "run", "error": true}))
+            }
         }
     }
 
@@ -123,6 +132,7 @@ impl Agent {
             Err(e) => {
                 self.worker = None;
                 let out = format!("error: {e:#}; the worker was restarted and its variables are gone");
+                println!();
                 ui::note(&out);
                 return (out, json!({"tool": "run", "error": true}));
             }
@@ -213,6 +223,14 @@ impl Agent {
         println!("{runs} runs · {rejected} rejected before acting (syntax, unknown name, wrong arguments)");
     }
 
+    /// The model's last full reasoning, rendered.
+    pub fn think(&self) {
+        let last = self.session.entries.iter().rev().find_map(|e| e["reasoning_content"].as_str());
+        let mut markdown = crate::render::Markdown::default();
+        markdown.push(last.unwrap_or("no reasoning recorded yet"));
+        markdown.finish();
+    }
+
     pub fn compact(&mut self) -> Result<()> {
         let prev = self.session.keep();
         let keep = compact::cut(&self.session.entries, prev);
@@ -275,5 +293,5 @@ fn changes(root: &Path) -> String {
         })
         .collect();
     out.extend(git(root, &["ls-files", "-o", "--exclude-standard"]).lines().map(|f| format!("{f} (new)")));
-    if out.is_empty() { "none".into() } else { out.join(" · ") }
+    if out.is_empty() { "none".into() } else { out.join("\n") }
 }

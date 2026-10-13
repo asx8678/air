@@ -40,7 +40,8 @@ impl Session {
 
     /// The newest session started in this repo.
     pub fn resume(home: &Path, root: &Path) -> Result<Self> {
-        let mut paths: Vec<PathBuf> = fs::read_dir(home.join(".air/sessions"))?.flatten().map(|e| e.path()).collect();
+        let mut paths: Vec<PathBuf> =
+            fs::read_dir(home.join(".air/sessions")).into_iter().flatten().flatten().map(|e| e.path()).collect();
         paths.sort();
         for path in paths.into_iter().rev() {
             let first = BufReader::new(File::open(&path)?).lines().next().transpose()?.unwrap_or_default();

@@ -60,6 +60,14 @@ impl Llm {
         let mut response = self.send(&body.to_string()).await?;
         let (mut buf, mut text, mut thinking, mut usage) = (Vec::new(), String::new(), String::new(), Value::Null);
         let mut calls: Vec<[String; 3]> = vec![]; // id, name, arguments
+        let (mut markdown, mut began) = (crate::render::Markdown::default(), None);
+        // Prose is held back until it is clearly an answer (long, or structured) or a tool call
+        // arrives, which makes it narration for that step.
+        let (mut held, mut answering, mut narrated) = (String::new(), false, false);
+        // Always ends the reasoning block, so its live box is erased even for an empty one.
+        let thought = |thinking: &str, began: Option<std::time::Instant>| {
+            crate::ui::thought(thinking, began.map_or(0, |b: std::time::Instant| b.elapsed().as_secs()));
+        };
         while let Some(chunk) = response.chunk().await? {
             buf.extend_from_slice(&chunk);
             while let Some(end) = buf.iter().position(|&b| b == b'\n') {
@@ -75,17 +83,33 @@ impl Llm {
                 let delta = &event["choices"][0]["delta"];
                 if let Some(t) = delta["reasoning_content"].as_str().or(delta["reasoning"].as_str()) {
                     thinking += t;
-                    crate::ui::activity(&format!("thinking… {} chars", thinking.len()));
-                }
-                if let Some(t) = delta["content"].as_str() {
+                    let began = *began.get_or_insert_with(std::time::Instant::now);
                     if text.is_empty() {
-                        if !thinking.is_empty() {
-                            crate::ui::thought(&thinking);
-                        }
-                        crate::ui::activity("writing");
+                        crate::ui::thinking(&thinking, began.elapsed().as_secs());
                     }
-                    print!("{t}");
+                }
+                if let Some(t) = delta["content"].as_str().filter(|t| !t.is_empty()) {
                     text += t;
+                    if answering {
+                        markdown.push(t);
+                    } else if !narrated {
+                        held += t;
+                        crate::ui::activity("writing");
+                        if held.len() > 400 || held.contains("\n\n") || held.trim_start().starts_with(['#', '-', '|']) {
+                            thought(&thinking, began);
+                            crate::ui::prose();
+                            markdown.push(&std::mem::take(&mut held));
+                            answering = true;
+                        }
+                    }
+                }
+                if !answering && !narrated && delta["tool_calls"].is_array() {
+                    narrated = true;
+                    let secs = began.map_or(0, |b: std::time::Instant| b.elapsed().as_secs());
+                    match held.trim() {
+                        "" => crate::ui::thought(&thinking, secs),
+                        prose => crate::ui::narration(prose, &thinking, secs),
+                    }
                 }
                 for call in delta["tool_calls"].as_array().into_iter().flatten() {
                     let i = call["index"].as_u64().unwrap_or(0) as usize;
@@ -100,15 +124,22 @@ impl Llm {
                     }
                     if let Some(args) = call["function"]["arguments"].as_str() {
                         calls[i][2] += args;
+                        crate::ui::writing(calls.iter().map(|c| c[2].matches("\\n").count() + 1).sum());
                     }
                 }
                 std::io::stdout().flush()?;
             }
         }
-        if text.is_empty() && !thinking.is_empty() {
-            crate::ui::thought(&thinking);
-        } else if !text.is_empty() {
-            println!();
+        if answering {
+            markdown.finish();
+        } else if !narrated {
+            // No tool call came: whatever was held back is the answer.
+            thought(&thinking, began);
+            if !held.trim().is_empty() {
+                crate::ui::prose();
+                markdown.push(&held);
+                markdown.finish();
+            }
         }
         let mut message = json!({"role": "assistant", "content": text, "meta": {"usage": usage}});
         if !thinking.is_empty() {
