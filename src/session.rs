@@ -22,11 +22,13 @@ pub struct State {
     pub check: Option<String>,
     /// carry() notes, kept in every compaction summary until cleared
     pub carry: Vec<String>,
+    /// plan() steps and which are done, for the current user turn
+    pub plan: Value,
 }
 
 impl Session {
     pub fn create(home: &Path, root: &Path, model: &str, system: &str) -> Result<Self> {
-        let dir = home.join(".mini/sessions");
+        let dir = home.join(".air/sessions");
         fs::create_dir_all(&dir)?;
         let secs = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let path = dir.join(format!("{secs}-{}.jsonl", std::process::id()));
@@ -38,7 +40,7 @@ impl Session {
 
     /// The newest session started in this repo.
     pub fn resume(home: &Path, root: &Path) -> Result<Self> {
-        let mut paths: Vec<PathBuf> = fs::read_dir(home.join(".mini/sessions"))?.flatten().map(|e| e.path()).collect();
+        let mut paths: Vec<PathBuf> = fs::read_dir(home.join(".air/sessions"))?.flatten().map(|e| e.path()).collect();
         paths.sort();
         for path in paths.into_iter().rev() {
             let first = BufReader::new(File::open(&path)?).lines().next().transpose()?.unwrap_or_default();
@@ -105,10 +107,14 @@ impl Session {
         for entry in &self.entries {
             if entry["role"] == "user" && entry["meta"]["host"].is_null() {
                 state.accepted = None;
+                state.plan = Value::Null;
             }
             let meta = &entry["meta"];
             if let Some(criteria) = meta["accepted"].as_str() {
                 state.accepted = Some(criteria.into());
+            }
+            if meta["plan"].is_object() {
+                state.plan = meta["plan"].clone();
             }
             if let Some(notes) = meta["carry"].as_array() {
                 state.carry = notes.iter().filter_map(|n| n.as_str().map(String::from)).collect();

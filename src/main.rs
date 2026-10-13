@@ -1,8 +1,9 @@
-//! mini: a minimal code-mode coding agent.
+//! air: a minimal code-mode coding agent.
 mod agent;
 mod compact;
 mod llm;
 mod session;
+mod ui;
 mod worker;
 
 use anyhow::{Context, Result, bail};
@@ -50,15 +51,15 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let top = std::process::Command::new("git").args(["rev-parse", "--show-toplevel"]).output()?;
     if !top.status.success() {
-        bail!("mini works inside a git repository (git is the undo)");
+        bail!("air works inside a git repository (git is the undo)");
     }
     let root = PathBuf::from(String::from_utf8(top.stdout)?.trim()).canonicalize()?;
     let home = PathBuf::from(std::env::var("HOME")?);
-    // A repo's mini.toml may set check and fmt only: model and base_url decide where your key goes.
-    let user = load(&home.join(".config/mini/config.toml"))?;
-    let repo = load(&root.join("mini.toml"))?;
+    // A repo's air.toml may set check and fmt only: model and base_url decide where your key goes.
+    let user = load(&home.join(".config/air/config.toml"))?;
+    let repo = load(&root.join("air.toml"))?;
     if repo.model.is_some() || repo.base_url.is_some() {
-        eprintln!("mini.toml: model and base_url are ignored; set them in ~/.config/mini/config.toml");
+        eprintln!("air.toml: model and base_url are ignored; set them in ~/.config/air/config.toml");
     }
     let config = Config {
         model: cli.model.or(user.model),

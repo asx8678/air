@@ -1,10 +1,10 @@
-# mini's code-mode worker: persistent, standard library only, Python 3.9+.
-import contextlib, difflib, inspect, json, linecache, os, re, shlex, signal, subprocess, sys, tempfile, traceback
+# air's code-mode worker: persistent, standard library only, Python 3.9+.
+import contextlib, difflib, inspect, json, types, linecache, os, re, shlex, signal, subprocess, sys, tempfile, traceback
 
 ROOT = os.getcwd()
-CHECK = os.environ.pop("MINI_CHECK", "")
-FMT = os.environ.pop("MINI_FMT", "")
-LOG = os.environ.pop("MINI_LOG", "")
+CHECK = os.environ.pop("AIR_CHECK", "")
+FMT = os.environ.pop("AIR_FMT", "")
+LOG = os.environ.pop("AIR_LOG", "")
 HALF = 4000  # characters of output kept from each end
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\r(?!\n)")
 
@@ -15,7 +15,8 @@ _outbox = os.fdopen(os.dup(1), "w", encoding="utf-8")
 _null = os.open(os.devnull, os.O_RDWR)
 os.dup2(_null, 0)
 _report = {}  # what this run did, for the host
-_state = {}  # accepted criteria and carry notes, derived by the host from its log
+_state = {}  # accepted criteria, carry notes and the plan, derived by the host from its log
+_checked = None  # the tree the last passing check() saw
 
 
 def _exec(cmd, timeout):
@@ -45,7 +46,8 @@ def _change(tool, path, make):
             raise ValueError(f"{path} is outside the repo")
         if not (_report.get("accepted") or _state.get("accepted")):
             raise ValueError("call accept(criteria) before changing files")
-        written = make(os.path.join(ROOT, rel), rel)
+        before, written = make(os.path.join(ROOT, rel), rel)
+        delta = [l[0] for l in difflib.unified_diff(before.splitlines(), written.splitlines(), lineterm="")][2:]
         note = ""
         if FMT:
             out, code = _exec(f"{FMT} {shlex.quote(rel)}", 60)
@@ -58,7 +60,8 @@ def _change(tool, path, make):
     except Exception as e:
         _report.setdefault("actions", []).append({"tool": tool, "path": rel, "ok": False, "error": str(e)})
         raise
-    _report.setdefault("actions", []).append({"tool": tool, "path": rel, "ok": True})
+    _report.setdefault("actions", []).append(
+        {"tool": tool, "path": rel, "ok": True, "added": delta.count("+"), "removed": delta.count("-")})
     print(f"{tool} {rel}: ok{note}")
 
 
@@ -72,7 +75,7 @@ def edit(path, old, new):
             raise ValueError(f"old text {'not found' if n == 0 else f'occurs {n} times'} in {rel}")
         with open(full, "w", encoding="utf-8") as f:
             f.write(text.replace(old, new, 1))
-        return text.replace(old, new, 1)
+        return text, text.replace(old, new, 1)
     _change("edit", path, make)
 
 
@@ -84,7 +87,7 @@ def write(path, content):
         os.makedirs(os.path.dirname(full), exist_ok=True)
         with open(full, "x", encoding="utf-8") as f:
             f.write(content)
-        return content
+        return "", content
     _change("write", path, make)
 
 
@@ -102,7 +105,7 @@ def accept(criteria):
 def check():
     """Run the project's check command, print its output, return True when it passes."""
     if not CHECK:
-        print("no check command configured (set check in mini.toml)")
+        print("no check command configured (set check in air.toml)")
         return None
     before = _tree()
     out, code = _exec(CHECK, 1800)
@@ -110,6 +113,8 @@ def check():
     changed = sorted(f for f in before.keys() | after.keys() if before.get(f) != after.get(f))
     ok = code == 0 and not changed
     why = f"check changed the working tree: {', '.join(changed[:10])}" if changed else CHECK
+    global _checked
+    _checked = after if ok else None
     _report["check"] = ok
     _report.setdefault("actions", []).append({"tool": "check", "ok": ok})
     print(f"{out.rstrip()}\n[check {'passed' if ok else 'FAILED'}: {why}]".lstrip("\n"))
@@ -141,6 +146,24 @@ def carry(note=None, clear=False):
     if clear or note is not None:
         _report["carry"] = notes
     return notes
+
+def plan(steps):
+    """Set this task's steps, replacing any earlier plan. The UI shows them; mark progress with done()."""
+    _report["plan"] = {"steps": [str(s) for s in steps], "done": []}
+
+
+def done(step=None):
+    """Mark a step done (1-based; default: the current one). Returns the next step, or None when all are done."""
+    p = _report.get("plan") or _state.get("plan")
+    if not p:
+        raise ValueError("call plan([...]) first")
+    left = [i for i in range(1, len(p["steps"]) + 1) if i not in p["done"]]
+    n = step or (left[0] if left else 0)
+    if not 1 <= n <= len(p["steps"]):
+        raise ValueError(f"no step {n}; the plan has {len(p['steps'])}")
+    _report["plan"] = {"steps": p["steps"], "done": sorted(set(p["done"]) | {n})}
+    rest = [i for i in left if i != n]
+    return p["steps"][rest[0] - 1] if rest else None
 
 def recall(n):
     """Session log entry #n exactly as recorded; summaries cite entries as #n."""
@@ -176,8 +199,18 @@ def _hint(e, misuse):
             return advice
     return None
 
-G = {"__name__": "__main__", "_last": "", "sh": sh, "edit": edit, "write": write, "accept": accept, "carry": carry, "check": check, "recall": recall}
+G = {"__name__": "__main__", "_last": "", "sh": sh, "edit": edit, "write": write, "accept": accept, "carry": carry, "plan": plan, "done": done, "check": check, "recall": recall}
 HELPERS = tuple(f"{name}()" for name in G if not name.startswith("_"))
+
+
+class _Helper(types.ModuleType):  # models often write `import sh`; let that mean the helper
+    def __call__(self, *args, **kwargs):
+        return G[self.__name__](*args, **kwargs)
+
+
+for _name in ("sh",):
+    sys.modules[_name] = _Helper(_name)
+    setattr(sys.modules[_name], _name, G[_name])  # from sh import sh
 signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C only interrupts a running script
 for request in _inbox:
     request = json.loads(request)
@@ -206,6 +239,9 @@ for request in _inbox:
         if hint:
             print(f"hint: {hint}")
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if _report.get("check") and _tree() != _checked:  # changed after it passed: the pass no longer applies
+        _report["check"] = False
+        print("[check no longer applies: files changed after it passed; run check() again]")
     sys.stdout.flush()
     os.dup2(_null, 1)
     os.dup2(_null, 2)

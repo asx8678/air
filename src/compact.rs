@@ -24,7 +24,10 @@ pub fn cut(entries: &[Value], prev: usize) -> usize {
             keep = i;
         }
     }
-    keep
+    // Never cut past the newest user direction: its full text must reach the model.
+    let newest =
+        (prev + 1..entries.len()).rev().find(|&i| entries[i]["role"] == "user" && entries[i]["meta"]["host"].is_null());
+    newest.map_or(keep, |u| keep.min(u))
 }
 
 /// Summary of entries #1..keep, read straight from the raw log.

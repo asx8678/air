@@ -23,9 +23,9 @@ pub struct Worker {
 impl Worker {
     pub fn start(root: &Path, yolo: bool, check: Option<&str>, fmt: Option<&str>, log: &Path) -> Result<Self> {
         let mut child = sandboxed(root, yolo, "python3", &["-I", "-B", "-u", "-c", include_str!("worker.py")])
-            .env("MINI_CHECK", check.unwrap_or_default())
-            .env("MINI_FMT", fmt.unwrap_or_default())
-            .env("MINI_LOG", log)
+            .env("AIR_CHECK", check.unwrap_or_default())
+            .env("AIR_FMT", fmt.unwrap_or_default())
+            .env("AIR_LOG", log)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()

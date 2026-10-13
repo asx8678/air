@@ -2,11 +2,12 @@
 use crate::llm::{self, Llm};
 use crate::session::Session;
 use crate::worker::Worker;
-use crate::{Config, compact};
+use crate::{Config, compact, ui};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 /// Prompt tokens of the last request at which the history is compacted before the next one.
 const COMPACT_AT: u64 = 100_000;
@@ -28,16 +29,17 @@ impl Agent {
             Session::resume(home, root)?
         } else {
             let model =
-                config.model.as_deref().context("no model: pass -m or set model in ~/.config/mini/config.toml")?;
+                config.model.as_deref().context("no model: pass -m or set model in ~/.config/air/config.toml")?;
             Session::create(home, root, model, &system_prompt(root))?
         };
-        let base_url = config.base_url.as_deref().context("set base_url in ~/.config/mini/config.toml")?;
+        let base_url = config.base_url.as_deref().context("set base_url in ~/.config/air/config.toml")?;
         let llm = Llm::new(base_url, &session.entries[0]);
         Ok(Self { root: root.into(), config, yolo, llm, session, worker: None })
     }
 
     /// One user turn; Ctrl-C stops it. True when the result is verified or nothing changed.
     pub async fn run(&mut self, task: &str) -> Result<bool> {
+        let _bar = ui::Turn::start();
         let finished = tokio::select! {
             result = self.turn(task) => Some(result),
             _ = tokio::signal::ctrl_c() => None,
@@ -45,7 +47,8 @@ impl Agent {
         if let Some(result) = finished {
             return result;
         }
-        eprintln!("\n[interrupted]");
+        println!();
+        ui::note("interrupted");
         // Keep the worker (and its variables) when its interrupted run reports back; else restart it.
         if let Some(worker) = &mut self.worker
             && !worker.settle().await
@@ -56,6 +59,7 @@ impl Agent {
     }
 
     async fn turn(&mut self, task: &str) -> Result<bool> {
+        let (began, clock) = (self.session.entries.len(), Instant::now());
         self.session.push(json!({"role": "user", "content": task}))?;
         let start = self.fingerprint();
         let (mut nudged, mut overflowed) = (false, false);
@@ -67,12 +71,13 @@ impl Agent {
                 // Too long for this model: compact and retry once.
                 Err(e) if e.is::<llm::ContextOverflow>() && !overflowed => {
                     overflowed = true;
-                    eprintln!("[context window exceeded; compacting and retrying]");
+                    ui::note("context window exceeded; compacting and retrying");
                     self.compact()?;
                     continue;
                 }
                 result => result?,
             };
+            ui::usage(&message["meta"]["usage"]);
             let calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
             self.session.push(message)?;
             for call in &calls {
@@ -81,6 +86,7 @@ impl Agent {
                     .push(json!({"role": "tool", "tool_call_id": call["id"], "content": content, "meta": meta}))?;
             }
             if !calls.is_empty() {
+                ui::activity("waiting for the model");
                 continue;
             }
             // The verify gate: a turn that changed the tree is done only when check() passed on this tree.
@@ -88,10 +94,12 @@ impl Agent {
             let (changed, checked) = (now != start, self.session.state().check == Some(now));
             if changed && !checked && self.config.check.is_some() && !nudged {
                 nudged = true;
+                ui::note("changes not verified yet: asking the model to run check()");
+                ui::activity("waiting for the model");
                 self.session.push(json!({"role": "user", "content": GATE, "meta": {"host": true}}))?;
                 continue;
             }
-            return Ok(self.report(changed, checked));
+            return Ok(self.report(changed, checked, began, clock));
         }
     }
 
@@ -105,22 +113,22 @@ impl Agent {
     }
 
     async fn run_code(&mut self, code: &str) -> (String, Value) {
-        show("run", code);
+        ui::run(code);
         // The worker enforces accept-before-edit with state derived from the log.
         let state = self.session.state();
-        let state = json!({"accepted": state.accepted, "carry": state.carry});
+        let state = json!({"accepted": state.accepted, "carry": state.carry, "plan": state.plan});
         let reply = async { self.worker()?.run(code, &state).await }.await;
         let mut meta = match reply {
             Ok(meta) => meta,
             Err(e) => {
                 self.worker = None;
                 let out = format!("error: {e:#}; the worker was restarted and its variables are gone");
-                show("run failed", &out);
+                ui::note(&out);
                 return (out, json!({"tool": "run", "error": true}));
             }
         };
         let out = meta["out"].as_str().unwrap_or_default().to_string();
-        show("output", &out);
+        ui::ran(&meta, &out);
         if meta["check"].is_boolean() {
             meta["fp"] = self.fingerprint().into();
         }
@@ -151,20 +159,39 @@ impl Agent {
     }
 
     /// The fixed-shape final report, written by the host rather than the model.
-    fn report(&self, changed: bool, checked: bool) -> bool {
-        let (check, result) = match (changed, checked, &self.config.check) {
+    fn report(&self, changed: bool, checked: bool, began: usize, clock: Instant) -> bool {
+        let (check, verdict) = match (changed, checked, &self.config.check) {
             (false, _, _) => ("-", "NO CHANGES"),
             (true, true, _) => ("passed on the final tree", "VERIFIED"),
             (true, false, None) => ("none configured", "UNVERIFIED"),
             (true, false, Some(_)) => ("not passed after the last change", "UNVERIFIED"),
         };
-        let criteria = self.session.state().accepted.unwrap_or_else(|| "-".into());
-        let tree = git(&self.root, &["status", "--short", "-uall"]);
-        let tree = if tree.trim().is_empty() { "clean".into() } else { tree.trim_end().replace('\n', "\n          ") };
-        let criteria = criteria.replace('\n', "\n          ");
-        println!(
-            "\n── report ──────────────\ncriteria  {criteria}\ncheck     {check}\nresult    {result}\ngit       {tree}"
+        let state = self.session.state();
+        let task = self.session.entries[began]["content"].as_str().unwrap_or_default();
+        let mut rows = vec![("task", task.lines().next().unwrap_or_default().to_string())];
+        rows.push(("criteria", state.accepted.unwrap_or_else(|| "-".into())));
+        if let Some(steps) = state.plan["steps"].as_array() {
+            let done = state.plan["done"].as_array().map_or(0, Vec::len);
+            rows.push(("plan", format!("{done}/{} steps done", steps.len())));
+        }
+        rows.push(("check", check.into()));
+        rows.push(("changes", changes(&self.root)));
+        let turn = &self.session.entries[began..];
+        let usage: Vec<&Value> = turn.iter().map(|e| &e["meta"]["usage"]).filter(|u| u.is_object()).collect();
+        let prompt: u64 = usage.iter().filter_map(|u| u["prompt_tokens"].as_u64()).sum();
+        let out: u64 = usage.iter().filter_map(|u| u["completion_tokens"].as_u64()).sum();
+        let runs = turn.iter().filter(|e| e["meta"]["tool"] == "run").count();
+        let secs = clock.elapsed().as_secs();
+        let cost = format!(
+            "{} requests · {runs} runs · {} in · {} out · {}:{:02}",
+            usage.len(),
+            ui::tokens(prompt),
+            ui::tokens(out),
+            secs / 60,
+            secs % 60
         );
+        rows.push(("cost", cost));
+        ui::report(&rows, verdict, !changed || checked);
         !changed || checked
     }
 
@@ -190,11 +217,11 @@ impl Agent {
         let prev = self.session.keep();
         let keep = compact::cut(&self.session.entries, prev);
         if keep <= prev {
-            println!("[nothing to compact]");
+            ui::note("nothing to compact");
             return Ok(());
         }
         let summary = compact::summary(&self.session.entries, keep);
-        println!("[compacted entries #1-#{} into a {} byte summary]", keep - 1, summary.len());
+        ui::note(&format!("compacted entries #1-#{} into a {} byte summary", keep - 1, summary.len()));
         self.session.push(json!({"compact": {"keep": keep, "summary": summary}}))
     }
 }
@@ -238,14 +265,15 @@ fn git(root: &Path, args: &[&str]) -> String {
     out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
 }
 
-/// A tool step for the human: a heading and the first lines of its body.
-fn show(head: &str, body: &str) {
-    println!("\x1b[36m▸ {head}\x1b[0m");
-    let lines: Vec<&str> = body.lines().collect();
-    for line in lines.iter().take(12) {
-        println!("  \x1b[2m{line}\x1b[0m");
-    }
-    if lines.len() > 12 {
-        println!("  \x1b[2m… {} more lines\x1b[0m", lines.len() - 12);
-    }
+/// Changed files with line counts, from git: "src/a.rs +3 −1 · notes.md (new)".
+fn changes(root: &Path) -> String {
+    let mut out: Vec<String> = git(root, &["diff", "--numstat", "HEAD"])
+        .lines()
+        .filter_map(|l| match l.splitn(3, '\t').collect::<Vec<_>>()[..] {
+            [added, removed, path] => Some(format!("{path} +{added} −{removed}")),
+            _ => None,
+        })
+        .collect();
+    out.extend(git(root, &["ls-files", "-o", "--exclude-standard"]).lines().map(|f| format!("{f} (new)")));
+    if out.is_empty() { "none".into() } else { out.join(" · ") }
 }

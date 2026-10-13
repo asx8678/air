@@ -22,9 +22,9 @@ impl std::fmt::Display for ContextOverflow {
 
 impl std::error::Error for ContextOverflow {}
 
-/// Where the API key lives when MINI_API_KEY is unset; the sandbox denies reading it.
+/// Where the API key lives when AIR_API_KEY is unset; the sandbox denies reading it.
 pub fn key_file() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/mini/api_key")
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/air/api_key")
 }
 
 pub struct Llm {
@@ -41,7 +41,7 @@ impl Llm {
         Self {
             http: reqwest::Client::new(),
             url: format!("{}/chat/completions", base_url.trim_end_matches('/')),
-            key: std::env::var("MINI_API_KEY")
+            key: std::env::var("AIR_API_KEY")
                 .ok()
                 .or_else(|| std::fs::read_to_string(key_file()).ok())
                 .map(|k| k.trim().into()),
@@ -74,12 +74,15 @@ impl Llm {
                 }
                 let delta = &event["choices"][0]["delta"];
                 if let Some(t) = delta["reasoning_content"].as_str().or(delta["reasoning"].as_str()) {
-                    print!("\x1b[2m{t}\x1b[0m");
                     thinking += t;
+                    crate::ui::activity(&format!("thinking… {} chars", thinking.len()));
                 }
                 if let Some(t) = delta["content"].as_str() {
-                    if text.is_empty() && !thinking.is_empty() {
-                        println!();
+                    if text.is_empty() {
+                        if !thinking.is_empty() {
+                            crate::ui::thought(&thinking);
+                        }
+                        crate::ui::activity("writing");
                     }
                     print!("{t}");
                     text += t;
@@ -102,7 +105,9 @@ impl Llm {
                 std::io::stdout().flush()?;
             }
         }
-        if !text.is_empty() || !thinking.is_empty() {
+        if text.is_empty() && !thinking.is_empty() {
+            crate::ui::thought(&thinking);
+        } else if !text.is_empty() {
             println!();
         }
         let mut message = json!({"role": "assistant", "content": text, "meta": {"usage": usage}});
@@ -142,7 +147,7 @@ impl Llm {
             if attempt == 5 {
                 bail!("giving up after {attempt} attempts: {problem}");
             }
-            eprintln!("[{problem}; retrying]");
+            crate::ui::note(&format!("{problem}; retrying"));
             tokio::time::sleep(Duration::from_secs(2 << attempt)).await;
         }
         unreachable!()
