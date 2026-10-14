@@ -5,7 +5,7 @@ sys.path.append(ROOT)
 CHECK = os.environ.pop("AIR_CHECK", "")
 FMT = os.environ.pop("AIR_FMT", "")
 LOG = os.environ.pop("AIR_LOG", "")
-HALF = 4000
+HALF = 8000
 LIMIT = 8 << 20
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\r(?!\n)")
 
@@ -242,8 +242,9 @@ def _hint(e, misuse):
     return None
 
 
-G = {"__name__": "__main__", "_last": "", "sh": sh, "edit": edit, "write": write, "accept": accept, "carry": carry, "plan": plan, "done": done, "check": check, "recall": recall}
-HELPERS = tuple(f"{name}()" for name in G if not name.startswith("_"))
+TOOLS = {"sh": sh, "edit": edit, "write": write, "accept": accept, "carry": carry, "plan": plan, "done": done, "check": check, "recall": recall}
+G = {"__name__": "__main__", "_last": "", **TOOLS}
+HELPERS = tuple(f"{name}()" for name in TOOLS)
 
 
 sh.sh = sys.modules["sh"] = sh
@@ -252,6 +253,8 @@ for request in _inbox:
     request = json.loads(request)
     code, _state = request["code"], request.get("state") or {}
     _report.clear()
+    os.chdir(ROOT)
+    G.update(TOOLS)
     capture = tempfile.TemporaryFile()
     os.dup2(capture.fileno(), 1)
     os.dup2(capture.fileno(), 2)
@@ -272,6 +275,9 @@ for request in _inbox:
         hint = _hint(e, misuse)
         if hint:
             print(f"hint: {hint}")
+    shadowed = [name for name, tool in TOOLS.items() if G.get(name) is not tool]
+    if shadowed:
+        print(f"[{', '.join(shadowed)}: air's helpers, restored before the next run]")
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     if _report.get("check") and _tree() != _checked:
         _report["check"] = False
