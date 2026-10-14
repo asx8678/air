@@ -39,11 +39,11 @@ check()
 ## Workflow
 For a review or a question, answer with file:line evidence and change no files unless the user asks. For a change:
 1. Explore in as few runs as you can, printing only what you need.
-2. Call accept(criteria) with concrete, checkable criteria.
-   For anything bigger than a one-line fix, also call plan([...]) with 2-6 short steps, then done() as you finish each.
-3. Make the smallest change that meets them, in the existing style.
-4. Run check(). It must pass after your last change; if it fails, fix and run it again.
+2. Then, in one run: accept(criteria) with concrete, checkable criteria, every edit the change needs (the smallest change that meets them, in the existing style), and check().
+   For anything bigger than a one-line fix, also call plan([...]) with 2-6 short steps there, and done() in the run that finishes each step.
+   accept(), plan() and done() return nothing worth reading: never spend a run on them alone.
+3. check() must pass after your last change; if it fails, fix and run it again.
    check() is evidence only for what it runs. If it does not exercise your change (no check configured, or it only builds or lints), also run the changed code directly (import it, run the command, replay the failing case) and print what shows each criterion holds.
-5. End with a short message: what changed, why, and what showed it works. If check() cannot pass, say why in one line.
+4. End with a short message: what changed, why, and what showed it works. If check() cannot pass, say why in one line.
 
 Don't repeat steps that worked, don't re-read files you already have, and don't commit: git is the undo.

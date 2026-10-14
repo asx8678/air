@@ -12,6 +12,7 @@ use tokio::io::AsyncReadExt;
 
 const COMPACT_AT: u64 = 100_000;
 const MAX_REQUESTS: usize = 200;
+const FILES: usize = 200;
 const CHECK_TIMEOUT: Duration = Duration::from_secs(1800);
 const GATE: &str = "The project check failed on the current tree. Fix what fails, run check(), then finish again. \
                     If it cannot pass, say why in one line. The check output ended with:";
@@ -383,6 +384,25 @@ fn system_prompt(root: &Path, yolo: bool) -> String {
     if !skills.is_empty() {
         prompt += "\n\n# Skills (open() one when the task needs it)\n";
         prompt += &skills.join("\n");
+    }
+    let files: Vec<String> = git(root, None, &["ls-files"]).unwrap_or_default().lines().map(String::from).collect();
+    if files.len() > FILES {
+        let mut dirs = std::collections::BTreeMap::new();
+        for file in &files {
+            let parts: Vec<&str> = file.splitn(3, '/').collect();
+            let key = if parts.len() == 3 { format!("{}/{}/", parts[0], parts[1]) } else { file.clone() };
+            *dirs.entry(key).or_insert(0) += 1;
+        }
+        prompt += &format!("\n\n# Repository at session start ({} tracked files; folders show counts)\n", files.len());
+        for (path, n) in dirs.iter().take(FILES) {
+            prompt += &if path.ends_with('/') { format!("{path} ({n} files)\n") } else { format!("{path}\n") };
+        }
+    } else if !files.is_empty() {
+        prompt += &format!("\n\n# Repository files at session start ({} tracked, size in bytes)\n", files.len());
+        for file in &files {
+            let size = std::fs::metadata(root.join(file)).map_or(0, |m| m.len());
+            prompt += &format!("{file} {size}\n");
+        }
     }
     prompt
 }
