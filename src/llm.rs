@@ -4,6 +4,7 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 pub const TEMPERATURE: f64 = 0.0;
+const LONG: Duration = Duration::from_secs(240);
 const OVERFLOW: &[&str] =
     &["context_length", "context length", "context window", "maximum context", "prompt is too long", "too many tokens"];
 
@@ -19,7 +20,7 @@ impl std::fmt::Display for ContextOverflow {
 impl std::error::Error for ContextOverflow {}
 
 #[derive(Debug)]
-struct Interrupted(String);
+pub struct Interrupted(String);
 
 impl std::fmt::Display for Interrupted {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -28,6 +29,13 @@ impl std::fmt::Display for Interrupted {
 }
 
 impl std::error::Error for Interrupted {}
+
+pub fn params(header: &Value) -> Value {
+    match &header["params"] {
+        Value::Object(params) => params.clone().into(),
+        _ => json!({"temperature": header["temperature"].as_f64().unwrap_or(TEMPERATURE)}),
+    }
+}
 
 fn overflow(text: &str) -> bool {
     let lower = text.to_lowercase();
@@ -43,7 +51,7 @@ pub struct Llm {
     url: String,
     key: Option<String>,
     model: String,
-    temperature: f64,
+    params: Value,
     marked: std::cell::Cell<bool>,
 }
 
@@ -61,23 +69,34 @@ impl Llm {
                 .or_else(|| std::fs::read_to_string(key_file()).ok())
                 .map(|k| k.trim().into()),
             model: header["model"].as_str().unwrap_or_default().into(),
-            temperature: header["temperature"].as_f64().unwrap_or(TEMPERATURE),
+            params: params(header),
             marked: Default::default(),
         }
     }
 
     pub async fn complete(&self, messages: &[Value], tools: &Value) -> Result<Value> {
-        let body = json!({
-            "model": self.model, "messages": messages, "tools": tools, "temperature": self.temperature,
+        let mut body = self.params.clone();
+        let fixed = json!({
+            "model": self.model, "messages": messages, "tools": tools,
             "stream": true, "stream_options": {"include_usage": true},
-        })
-        .to_string();
+        });
+        if let (Some(body), Value::Object(fixed)) = (body.as_object_mut(), fixed) {
+            body.extend(fixed);
+        }
+        let body = body.to_string();
         let start = Instant::now();
         for attempt in 1.. {
+            let began = Instant::now();
             match self.stream(&body).await {
-                Err(e) if attempt < 4 && e.is::<Interrupted>() => {
+                Err(e) if e.is::<Interrupted>() && (attempt == 4 || began.elapsed() > LONG) => {
+                    let extra = json!({"attempt": attempt, "ms": began.elapsed().as_millis() as u64});
+                    crate::ui::event("interrupted", &e.to_string(), extra);
+                    return Err(e);
+                }
+                Err(e) if e.is::<Interrupted>() => {
                     let text = format!("{e}; retrying from the start");
-                    crate::ui::event("interrupted", &text, json!({"attempt": attempt}));
+                    let extra = json!({"attempt": attempt, "ms": began.elapsed().as_millis() as u64});
+                    crate::ui::event("interrupted", &text, extra);
                     tokio::time::sleep(Duration::from_secs(2 << attempt)).await;
                 }
                 Ok(mut message) => {
@@ -94,7 +113,7 @@ impl Llm {
     async fn stream(&self, body: &str) -> Result<Value> {
         let (mut response, sent) = self.send(body).await?;
         let (mut first, mut spoke) = (None, None);
-        let mut finished = false;
+        let (mut finished, mut reason) = (false, Value::Null);
         let (mut buf, mut text, mut thinking, mut usage) = (Vec::new(), String::new(), String::new(), Value::Null);
         let mut calls: Vec<[String; 3]> = vec![];
         let mut slots = std::collections::HashMap::new();
@@ -128,7 +147,9 @@ impl Llm {
                 if event["usage"].is_object() {
                     usage = event["usage"].clone();
                 }
-                finished |= event["choices"][0]["finish_reason"].is_string();
+                if let Some(why) = event["choices"][0]["finish_reason"].as_str() {
+                    (finished, reason) = (true, why.into());
+                }
                 let delta = &event["choices"][0]["delta"];
                 if let Some(t) = delta["reasoning_content"].as_str().or(delta["reasoning"].as_str()) {
                     thinking += t;
@@ -225,7 +246,8 @@ impl Llm {
         let ms = |a: Instant, b: Option<Instant>| b.map(|b| b.duration_since(a).as_millis() as u64);
         let timing =
             json!({"ttft_ms": ms(sent, first), "think_ms": began.and_then(|b| ms(b, spoke.or(Some(Instant::now()))))});
-        let mut message = json!({"role": "assistant", "content": text, "meta": {"usage": usage, "timing": timing}});
+        let mut message =
+            json!({"role": "assistant", "content": text, "meta": {"usage": usage, "timing": timing, "finish": reason}});
         if !thinking.is_empty() {
             message["reasoning_content"] = thinking.into();
         }

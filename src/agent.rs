@@ -12,10 +12,15 @@ use tokio::io::AsyncReadExt;
 
 const COMPACT_AT: u64 = 100_000;
 const MAX_REQUESTS: usize = 200;
+const REPEAT_WARN: usize = 3;
+const REPEAT_BLOCK: usize = 6;
 const FILES: usize = 200;
 const CHECK_TIMEOUT: Duration = Duration::from_secs(1800);
 const GATE: &str = "The project check failed on the current tree. Fix what fails, run check(), then finish again. \
                     If it cannot pass, say why in one line. The check output ended with:";
+const NUDGE: &str = "Don't work out every change in advance: send one run() now with the next concrete step, \
+                     and adjust after you see its output.";
+const HELPERS: &[&str] = &["sh", "show", "accept", "edit", "write", "check", "carry", "plan", "done", "recall"];
 const SANDBOX: &str = "\n\n## Sandbox\nYour code runs in a sandbox. Internet and DNS are off (localhost works), and writes \
                        outside the repo and temp dirs fail, as do writes into .git; on macOS so does nested \
                        sandbox-exec, and Unix sockets work only under the repo's tmp/ directory. These failures \
@@ -32,6 +37,7 @@ pub struct Agent {
     worker: Option<Worker>,
     compact_at: u64,
     pending: Option<Value>,
+    repeat: (u64, usize),
 }
 
 impl Agent {
@@ -41,12 +47,16 @@ impl Agent {
         } else {
             let model =
                 config.model.as_deref().context("no model: pass -m or set model in ~/.config/air/config.toml")?;
-            Session::create(home, root, model, &system_prompt(root, yolo))?
+            let profile = config.models.get(model).cloned().unwrap_or_default();
+            let system = system_prompt(root, yolo, profile.get("guidance").and_then(Value::as_str));
+            Session::create(home, root, model, &system, profile)?
         };
         let base_url = config.base_url.as_deref().context("set base_url in ~/.config/air/config.toml")?;
         let llm = Llm::new(base_url, &session.entries[0]);
-        let compact_at = session.entries.iter().rev().find_map(|e| e["compact"]["at"].as_u64()).unwrap_or(COMPACT_AT);
-        Ok(Self { root: root.into(), config, yolo, llm, session, worker: None, compact_at, pending: None })
+        let learned = session.entries.iter().rev().find_map(|e| e["compact"]["at"].as_u64());
+        let compact_at = learned.or(session.entries[0]["compact_at"].as_u64()).unwrap_or(COMPACT_AT);
+        let repeat = (0, 0);
+        Ok(Self { root: root.into(), config, yolo, llm, session, worker: None, compact_at, pending: None, repeat })
     }
 
     pub fn path(&self) -> &Path {
@@ -95,7 +105,7 @@ impl Agent {
     }
 
     async fn turn(&mut self, task: &str) -> Result<bool> {
-        self.pending = None;
+        (self.pending, self.repeat) = (None, (0, 0));
         if self.session.last_prompt_tokens() >= self.compact_at / 2 {
             self.compact_to(self.compact_at as usize / 10)?;
         }
@@ -104,7 +114,7 @@ impl Agent {
         let snapshot = self.snapshot();
         self.session.push(json!({"role": "user", "content": task, "meta": {"snapshot": snapshot}}))?;
         let start = self.fingerprint();
-        let (mut nudged, mut overflowed, mut retried) = (false, false, false);
+        let (mut nudged, mut overflowed, mut nudges) = (false, false, 0);
         for _ in 0..MAX_REQUESTS {
             if self.session.last_prompt_tokens() >= self.compact_at {
                 self.compact()?;
@@ -120,15 +130,22 @@ impl Agent {
                     self.compact()?;
                     continue;
                 }
+                Err(e) if e.is::<llm::Interrupted>() && nudges < 2 => {
+                    nudges += 1;
+                    self.nudge("Your last reply was lost: the provider cut the stream during long reasoning.")?;
+                    continue;
+                }
                 result => result?,
             };
             overflowed = false;
             ui::usage(&message["meta"]["usage"]);
             let calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
-            if calls.is_empty() && message["content"].as_str().is_none_or(|c| c.trim().is_empty()) && !retried {
-                retried = true;
-                let extra = json!({"usage": message["meta"]["usage"], "timing": message["meta"]["timing"]});
-                ui::event("empty", "the model sent an empty reply; asking again", extra);
+            if calls.is_empty() && message["content"].as_str().is_none_or(|c| c.trim().is_empty()) && nudges < 2 {
+                nudges += 1;
+                let meta = &message["meta"];
+                let extra = json!({"usage": meta["usage"], "timing": meta["timing"], "finish": meta["finish"]});
+                ui::event("empty", "the model sent an empty reply; asking it to act", extra);
+                self.nudge("Your last reply was empty: you reasoned at length and sent nothing.")?;
                 continue;
             }
             self.session.push(message)?;
@@ -167,6 +184,15 @@ impl Agent {
         Ok(false)
     }
 
+    fn nudge(&mut self, why: &str) -> Result<()> {
+        let last = self.session.entries.iter().rev().find_map(|e| e["role"].as_str());
+        if last == Some("user") {
+            return Ok(());
+        }
+        ui::event("nudge", why, Value::Null);
+        self.session.push(json!({"role": "user", "content": format!("{why} {NUDGE}"), "meta": {"host": true}}))
+    }
+
     async fn call(&mut self, call: &Value) -> (String, Value) {
         let args: Value =
             serde_json::from_str(call["function"]["arguments"].as_str().unwrap_or_default()).unwrap_or_default();
@@ -182,6 +208,12 @@ impl Agent {
                            send it again in smaller steps";
                 (out.into(), json!({"tool": "run", "error": true}))
             }
+            (Some(name), _) if HELPERS.contains(&name) => {
+                let args = call["function"]["arguments"].as_str().unwrap_or("{}");
+                let literal = serde_json::to_string(args).unwrap_or_default();
+                ui::event("bad_call", &format!("the model called {name} as a tool; running it in run()"), Value::Null);
+                self.run_code(&format!("{name}(**__import__('json').loads({literal}))")).await
+            }
             (name, _) => {
                 let text =
                     format!("the model called {}, but the only tool is run(code)", name.unwrap_or("a nameless tool"));
@@ -192,13 +224,30 @@ impl Agent {
     }
 
     async fn run_code(&mut self, code: &str) -> (String, Value) {
+        let mut hasher = std::hash::DefaultHasher::new();
+        code.hash(&mut hasher);
+        let key = hasher.finish();
+        self.repeat = (key, if self.repeat.0 == key { self.repeat.1 + 1 } else { 1 });
+        if self.repeat.1 >= REPEAT_BLOCK {
+            let out = format!(
+                "error: this exact code already ran {} times in a row, so it was blocked: change the approach or finish",
+                self.repeat.1 - 1
+            );
+            ui::event("repeat", &out, Value::Null);
+            return (out, json!({"tool": "run", "error": true, "rejected": true}));
+        }
         ui::run(code);
         let state = self.session.state();
         let state = json!({"accepted": state.accepted, "carry": state.carry, "plan": state.plan});
         let clock = Instant::now();
         match async { self.worker()?.run(code, &state).await }.await {
             Ok(reply) => {
-                let (out, mut meta) = finish(reply);
+                let (mut out, mut meta) = finish(reply);
+                if self.repeat.1 >= REPEAT_WARN {
+                    let n = self.repeat.1;
+                    out +=
+                        &format!("\n[the same code has now run {n} times in a row; at {REPEAT_BLOCK} it is blocked]");
+                }
                 meta["ms"] = (clock.elapsed().as_millis() as u64).into();
                 ui::ran(&meta, &out);
                 (out, meta)
@@ -393,10 +442,14 @@ fn finish(mut meta: Value) -> (String, Value) {
     (out, meta)
 }
 
-fn system_prompt(root: &Path, yolo: bool) -> String {
+fn system_prompt(root: &Path, yolo: bool, notes: Option<&str>) -> String {
     let mut prompt = include_str!("prompt.md").to_string();
     if !yolo {
         prompt += SANDBOX;
+    }
+    if let Some(notes) = notes.map(str::trim).filter(|n| !n.is_empty()) {
+        prompt += "\n\n## Notes for this model\n";
+        prompt += notes;
     }
     if let Ok(agents) = std::fs::read_to_string(root.join("AGENTS.md")) {
         prompt += "\n\n# Project instructions (AGENTS.md)\n\n";

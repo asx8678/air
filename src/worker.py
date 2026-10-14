@@ -238,6 +238,11 @@ def _hint(e, misuse):
         return 'read files with show(path, start, end); explore with plain Python: open(), re, pathlib and sh("git ls-files")'
     if isinstance(e, SyntaxError) and sys.version_info < (3, 10) and (e.text or "").lstrip().startswith(("match ", "case ")):
         return f"the worker runs Python {sys.version_info[0]}.{sys.version_info[1]}: no match statements or X | Y types"
+    code = "".join(linecache.cache.get("<run>", (0, None, [], ""))[2])
+    calls = [code.count("\n", 0, m.start()) + 1 for m in re.finditer(r"(?<![\w.])(edit|write)\(", code)]
+    if isinstance(e, SyntaxError) and calls and (e.lineno or 0) >= calls[0] and ('"""' in code or "'''" in code):
+        return ("a raw triple-quoted string cannot end with a backslash or contain its own quotes: "
+                "switch to the other quote style (''' or \"\"\") or use a plain string with escapes")
     if misuse:
         name = text.split("(")[0]
         return f"signature: {name}{inspect.signature(G[name])}"
@@ -304,6 +309,9 @@ for request in _inbox:
         hint = _hint(e, misuse)
         if hint:
             print(f"hint: {hint}")
+        applied = [f"{a['tool']} {a['path']}" for a in _report.get("actions", []) if a.get("ok") and a.get("path")]
+        if applied:
+            print(f"[applied before the error: {', '.join(applied)}; inspect before repeating them]")
     shadowed = [name for name, tool in TOOLS.items() if G.get(name) is not tool]
     if shadowed:
         _report["shadowed"] = shadowed
