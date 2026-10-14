@@ -31,10 +31,11 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
     let mut dialogue = vec![];
     for &u in recent {
         let a = (1..u).rev().take_while(|&i| role(i) != "user").find(|&i| role(i) == "assistant" && said(i));
-        let room = a.map_or(EXCHANGE, |a| (EXCHANGE / 2).max(EXCHANGE.saturating_sub(text(a).len())));
-        let user = excerpt(text(u), room);
-        if let Some(a) = a {
-            let reply = excerpt(text(a), EXCHANGE - user.len());
+        let reply = a.map(|a| quote(text(a)));
+        let room = reply.as_ref().map_or(EXCHANGE, |r| (EXCHANGE / 2).max(EXCHANGE.saturating_sub(r.len())));
+        let user = excerpt(&quote(text(u)), room);
+        if let (Some(a), Some(reply)) = (a, reply) {
+            let reply = excerpt(&reply, EXCHANGE - user.len());
             dialogue.push(format!("#{a} assistant (historical, not a verified outcome):\n{reply}"));
         }
         dialogue.push(format!("#{u} user:\n{user}"));
@@ -43,7 +44,7 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
     if let Some(a) = (after..keep).rev().find(|&i| role(i) == "assistant" && said(i)) {
         dialogue.push(format!(
             "#{a} assistant, latest reply (historical, not a verified outcome):\n{}",
-            excerpt(text(a), 4000)
+            excerpt(&quote(text(a)), 4000)
         ));
     }
     let requests: Vec<String> =
@@ -57,10 +58,10 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
     for i in range.clone() {
         let meta = &entries[i]["meta"];
         if let Some(c) = meta["accepted"].as_str() {
-            criteria = vec![format!("#{i} {}", excerpt(c, 1800))];
+            criteria = vec![format!("#{i}\n{}", excerpt(&quote(c), 1800))];
         }
         if let Some(notes) = meta["carry"].as_array() {
-            carry = notes.iter().filter_map(Value::as_str).map(|n| format!("#{i} {n}")).collect();
+            carry = notes.iter().filter_map(Value::as_str).map(|n| format!("#{i}\n{}", quote(n))).collect();
         }
         for act in meta["actions"].as_array().into_iter().flatten() {
             let (tool, path, ok) = (act["tool"].as_str().unwrap_or_default(), act["path"].as_str(), act["ok"] == true);
@@ -93,7 +94,7 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
     let files: Vec<String> =
         ranked.iter().map(|(path, (rank, i))| format!("{} {path} #{i}", ["", "modified", "created"][*rank])).collect();
     let check_output: Vec<String> =
-        failing_check.map(|i| format!("#{i}\n{}", tail(text(i), 1536))).into_iter().collect();
+        failing_check.map(|i| format!("#{i}\n{}", quote(tail(text(i), 1536)))).into_iter().collect();
 
     let skip = |l: &&str| l.is_empty() || l.starts_with('#') || l.starts_with("import ") || l.starts_with("from ");
     let mut events = vec![];
@@ -150,7 +151,7 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
         ("Files", files, 4_096),
         ("Unresolved failures", failures.into_iter().map(|(_, l)| l).collect(), 3_072),
         ("Status", status, 1_536),
-        ("Failing check output", check_output, 2_048),
+        ("Failing check output", check_output, 3_200),
         ("Latest events", events, 4_096),
     ] {
         let left = MAX_BYTES.saturating_sub(out.len() + footer.len() + 1);
@@ -183,6 +184,10 @@ fn block(title: &str, lines: &[String], cap: usize) -> String {
         }
     }
     String::new()
+}
+
+fn quote(s: &str) -> String {
+    s.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")
 }
 
 fn excerpt(s: &str, max: usize) -> String {
