@@ -186,7 +186,7 @@ fn block(title: &str, lines: &[String], cap: usize) -> String {
     String::new()
 }
 
-fn quote(s: &str) -> String {
+pub fn quote(s: &str) -> String {
     s.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")
 }
 

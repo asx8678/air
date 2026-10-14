@@ -105,17 +105,24 @@ def _forget():
                 del G[key]
 
 
-def edit(path, old, new):
+def edit(path, old, new=None):
+    pairs = [(old, new)] if new is not None else old
+    if isinstance(pairs, str) or not pairs or not all(
+            isinstance(p, (list, tuple)) and len(p) == 2 and all(isinstance(s, str) for s in p) for p in pairs):
+        raise TypeError("edit() takes (path, old, new) or (path, [(old, new), ...]) with string old and new")
     def make(full, rel):
         with open(full, encoding="utf-8", newline="") as f:
             raw = f.read()
         crlf = "\r\n" in raw and raw.count("\r\n") == raw.count("\n")
         eol = (lambda s: s.replace("\r\n", "\n")) if crlf else (lambda s: s)
-        text, find, put = eol(raw), eol(old), eol(new)
-        n = text.count(find)
-        if n != 1:
-            raise ValueError(f"old text {'not found' if n == 0 else f'occurs {n} times'} in {rel}")
-        result = text.replace(find, put, 1)
+        text = result = eol(raw)
+        for k, (o, n) in enumerate(pairs, 1):
+            find = eol(o)
+            count = result.count(find)
+            if count != 1:
+                which = f" (pair {k} of {len(pairs)}; nothing was changed)" if len(pairs) > 1 else ""
+                raise ValueError(f"old text {'not found' if count == 0 else f'occurs {count} times'} in {rel}{which}")
+            result = result.replace(find, eol(n), 1)
         with open(full, "w", encoding="utf-8", newline="\r\n" if crlf else "") as f:
             f.write(result)
         return text, result

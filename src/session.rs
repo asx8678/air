@@ -96,6 +96,8 @@ impl Session {
             for u in newest.filter(|&u| u < keep).into_iter().chain(folded) {
                 let task = self.entries[u]["content"].as_str().unwrap_or_default();
                 let label = if Some(u) == newest { "Current task" } else { "User" };
+                let quoted = format!("#{u} user:\n{}", crate::compact::quote(task));
+                content = content.replacen(&quoted, &format!("#{u} user: [the current task, in full below]"), 1);
                 content += &format!("\n\n[{label}, entry #{u}]\n{task}");
             }
             out.push(json!({"role": "user", "content": content}));

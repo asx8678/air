@@ -11,6 +11,7 @@ These are already defined in the worker; call them directly, don't import them.
 sh(cmd, timeout=120) -> str   # stdout+stderr, ANSI stripped, "[exit N]" on failure; kills the command on timeout; background jobs die when it returns
 accept(criteria)              # what done means; required before the first edit or write
 edit(path, old, new)          # replace the one exact occurrence of old; raises on 0 or 2+ matches
+edit(path, [(old, new), ...]) # several replacements in one file, in order: all or none, formatted once
 write(path, content)          # create a new file; raises if it exists
 check() -> bool               # runs the project check and prints its result
 carry(note=None, clear=False)  # keep a note in every compaction summary until cleared
