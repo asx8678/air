@@ -17,11 +17,11 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(1800);
 const GATE: &str = "The project check failed on the current tree. Fix what fails, run check(), then finish again. \
                     If it cannot pass, say why in one line. The check output ended with:";
 const SANDBOX: &str = "\n\n## Sandbox\nYour code runs in a sandbox. Internet and DNS are off (localhost works), and writes \
-                       outside the repo and temp dirs fail, as do writes into .git; on macOS so do Unix sockets and \
-                       nested sandbox-exec. These failures (Operation not permitted, EPERM, Read-only file system, DNS \
-                       lookup errors) are permanent. Don't retry them and don't search the machine for another copy \
-                       of what was blocked: skip that step, finish the rest, and say in your final message what you \
-                       could not run.";
+                       outside the repo and temp dirs fail, as do writes into .git; on macOS so does nested \
+                       sandbox-exec, and Unix sockets work only under the repo's tmp/ directory. These failures \
+                       (Operation not permitted, EPERM, Read-only file system, DNS lookup errors) are permanent. \
+                       Don't retry them and don't search the machine for another copy of what was blocked: skip that \
+                       step, finish the rest, and say in your final message what you could not run.";
 
 pub struct Agent {
     root: PathBuf,
@@ -94,7 +94,7 @@ impl Agent {
         let snapshot = self.snapshot();
         self.session.push(json!({"role": "user", "content": task, "meta": {"snapshot": snapshot}}))?;
         let start = self.fingerprint();
-        let (mut nudged, mut overflowed) = (false, false);
+        let (mut nudged, mut overflowed, mut retried) = (false, false, false);
         for _ in 0..MAX_REQUESTS {
             if self.session.last_prompt_tokens() >= self.compact_at {
                 self.compact()?;
@@ -115,6 +115,11 @@ impl Agent {
             overflowed = false;
             ui::usage(&message["meta"]["usage"]);
             let calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
+            if calls.is_empty() && message["content"].as_str().is_none_or(|c| c.trim().is_empty()) && !retried {
+                retried = true;
+                ui::note("the model sent an empty reply; asking again");
+                continue;
+            }
             self.session.push(message)?;
             for call in &calls {
                 self.pending = Some(call["id"].clone());
