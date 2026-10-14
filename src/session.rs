@@ -46,16 +46,22 @@ impl Session {
         for path in paths.into_iter().rev() {
             let first = BufReader::new(File::open(&path)?).lines().next().transpose()?.unwrap_or_default();
             if serde_json::from_str::<Value>(&first).is_ok_and(|header| header["cwd"] == json!(root)) {
-                let entries = fs::read_to_string(&path)?.lines().map(serde_json::from_str).collect::<Result<_, _>>()?;
+                // A crash can leave a partial last line: drop it, so line n stays entry #n.
+                let text = fs::read_to_string(&path)?;
+                let whole = text.rfind('\n').map_or(0, |i| i + 1);
+                let file = OpenOptions::new().append(true).open(&path)?;
+                file.set_len(whole as u64)?;
+                let entries = text[..whole].lines().map(serde_json::from_str).collect::<Result<_, _>>()?;
                 eprintln!("[resumed {}]", path.display());
-                return Ok(Self { file: OpenOptions::new().append(true).open(&path)?, path, entries });
+                return Ok(Self { file, path, entries });
             }
         }
         bail!("no session to resume for {}", root.display())
     }
 
     pub fn push(&mut self, entry: Value) -> Result<()> {
-        writeln!(self.file, "{entry}")?;
+        // One write per entry: serde_json's Display would issue one per JSON fragment.
+        self.file.write_all(format!("{entry}\n").as_bytes())?;
         self.entries.push(entry);
         Ok(())
     }

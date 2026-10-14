@@ -11,6 +11,8 @@ use std::time::Instant;
 
 /// Prompt tokens of the last request at which the history is compacted before the next one.
 const COMPACT_AT: u64 = 100_000;
+/// Model requests in one user turn before it is stopped, so a looping model cannot spend without end.
+const MAX_REQUESTS: usize = 200;
 const GATE: &str = "check() has not passed on the current tree. Run check(), fix what fails, then finish again. \
                     If it cannot pass, say why in one line.";
 
@@ -66,7 +68,7 @@ impl Agent {
         self.session.push(json!({"role": "user", "content": task}))?;
         let start = self.fingerprint();
         let (mut nudged, mut overflowed) = (false, false);
-        loop {
+        for _ in 0..MAX_REQUESTS {
             if self.session.last_prompt_tokens() >= COMPACT_AT {
                 self.compact()?;
             }
@@ -104,6 +106,11 @@ impl Agent {
             }
             return Ok(self.report(changed, checked, began, clock));
         }
+        ui::note(&format!("stopped after {MAX_REQUESTS} model requests in one turn"));
+        let now = self.fingerprint();
+        let checked = self.session.state().check.as_ref() == Some(&now);
+        self.report(now != start, checked, began, clock);
+        Ok(false) // the model never finished
     }
 
     async fn call(&mut self, call: &Value) -> (String, Value) {
@@ -111,6 +118,12 @@ impl Agent {
             serde_json::from_str(call["function"]["arguments"].as_str().unwrap_or_default()).unwrap_or_default();
         match (call["function"]["name"].as_str(), args["code"].as_str()) {
             (Some("run"), Some(code)) => self.run_code(code).await,
+            (Some("run"), None) => {
+                ui::note("the model's run() came without code (cut off by the output limit?)");
+                let out = "error: run() arrived without a code argument, probably cut off by the output limit; \
+                           send it again in smaller steps";
+                (out.into(), json!({"tool": "run", "error": true}))
+            }
             (name, _) => {
                 ui::note(&format!(
                     "the model called {}, but the only tool is run(code)",

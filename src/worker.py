@@ -44,6 +44,8 @@ def _change(tool, path, make):
     try:
         if rel.startswith("..") or not os.path.realpath(os.path.join(ROOT, rel)).startswith(ROOT + os.sep):
             raise ValueError(f"{path} is outside the repo")
+        if rel.split(os.sep)[0] == ".git":
+            raise ValueError("files under .git are off limits")
         if not (_report.get("accepted") or _state.get("accepted")):
             raise ValueError("call accept(criteria) before changing files")
         before, written = make(os.path.join(ROOT, rel), rel)
@@ -68,14 +70,22 @@ def _change(tool, path, make):
 def edit(path, old, new):
     """Replace the one exact occurrence of old with new."""
     def make(full, rel):
-        with open(full, encoding="utf-8") as f:
-            text = f.read()
+        with open(full, encoding="utf-8", newline="") as f:
+            raw = f.read()
+        # Match on \n line ends, as the model reads them, but write back the file's own CRLF.
+        crlf = "\r\n" in raw
+        text = raw.replace("\r\n", "\n") if crlf else raw
         n = text.count(old)
         if n != 1:
             raise ValueError(f"old text {'not found' if n == 0 else f'occurs {n} times'} in {rel}")
-        with open(full, "w", encoding="utf-8") as f:
-            f.write(text.replace(old, new, 1))
-        return text, text.replace(old, new, 1)
+        result = text.replace(old, new, 1)
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})  # Ctrl-C must not leave it truncated
+        try:
+            with open(full, "w", encoding="utf-8", newline="\r\n" if crlf else "") as f:
+                f.write(result)
+        finally:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+        return text, result
     _change("edit", path, make)
 
 

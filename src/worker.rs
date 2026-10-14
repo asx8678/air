@@ -22,7 +22,7 @@ pub struct Worker {
 
 impl Worker {
     pub fn start(root: &Path, yolo: bool, check: Option<&str>, fmt: Option<&str>, log: &Path) -> Result<Self> {
-        let mut child = sandboxed(root, yolo, "python3", &["-I", "-B", "-u", "-c", include_str!("worker.py")])
+        let mut child = sandboxed(root, yolo, log, "python3", &["-I", "-B", "-u", "-c", include_str!("worker.py")])
             .env("AIR_CHECK", check.unwrap_or_default())
             .env("AIR_FMT", fmt.unwrap_or_default())
             .env("AIR_LOG", log)
@@ -55,19 +55,32 @@ impl Worker {
     }
 }
 
-/// `program` inside the sandbox unless --yolo: no network beyond localhost, writes only to the repo,
-/// temp dirs and tool caches, and the inherited environment minus secrets plus the hermetic pins.
-fn sandboxed(root: &Path, yolo: bool, program: &str, args: &[&str]) -> Command {
+/// Credentials under $HOME the sandbox may not read. ~/.air holds every session log; the worker gets
+/// its own back. ~/.config/air holds the API key.
+const SECRETS: &str = ".air .config/air .ssh .gnupg .aws .azure .kube .docker .netrc .pi .config/gh .config/gcloud \
+                       .password-store Library/Keychains";
+
+/// `program` inside the sandbox unless --yolo: no network beyond localhost, writes only to the repo
+/// (but never its .git, which runs code outside the sandbox through hooks and config), temp dirs and
+/// tool caches, no reading of credentials, and the inherited environment minus secrets plus the
+/// hermetic pins.
+fn sandboxed(root: &Path, yolo: bool, log: &Path, program: &str, args: &[&str]) -> Command {
     let writable = writable(root);
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let home = home.canonicalize().unwrap_or(home);
+    let secrets = SECRETS.split_whitespace().map(|s| home.join(s));
+    let log = log.canonicalize().unwrap_or_else(|_| log.into());
     let mut cmd = if yolo {
         Command::new(program)
     } else if cfg!(target_os = "macos") {
         let dirs: String = writable.iter().map(|d| format!(" (subpath {d:?})")).collect();
+        let secrets: String = secrets.map(|d| format!(" (subpath {d:?})")).collect();
         let profile = format!(
             "(version 1)(allow default)(deny network*)\
              (allow network* (local ip \"localhost:*\") (remote ip \"localhost:*\"))\
-             (deny file-write*)(allow file-write*{dirs} (subpath \"/dev\"))(deny file-read* (literal {:?}))",
-            crate::llm::key_file()
+             (deny file-write*)(allow file-write*{dirs} (subpath \"/dev\"))(deny file-write* (subpath {:?}))\
+             (deny file-read-data{secrets})(allow file-read-data (literal {log:?}))",
+            root.join(".git")
         );
         let mut cmd = Command::new("/usr/bin/sandbox-exec");
         cmd.arg("-p").arg(profile).arg(program);
@@ -78,6 +91,15 @@ fn sandboxed(root: &Path, yolo: bool, program: &str, args: &[&str]) -> Command {
         for dir in &writable {
             cmd.arg("--bind").arg(dir).arg(dir);
         }
+        for path in secrets.filter(|p| p.exists()) {
+            if path.is_dir() {
+                cmd.arg("--tmpfs").arg(&path);
+            } else {
+                cmd.arg("--ro-bind").arg("/dev/null").arg(&path);
+            }
+        }
+        let git = root.join(".git");
+        cmd.arg("--ro-bind").arg(&git).arg(&git).arg("--ro-bind").arg(&log).arg(&log);
         cmd.args(["--unshare-all", "--die-with-parent", "--new-session", "--chdir"]).arg(root).arg(program);
         cmd
     };
@@ -93,13 +115,6 @@ fn sandboxed(root: &Path, yolo: bool, program: &str, args: &[&str]) -> Command {
 
 fn writable(root: &Path) -> Vec<PathBuf> {
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    let dirs = [
-        root.into(),
-        std::env::temp_dir(),
-        "/tmp".into(),
-        home.join(".cache"),
-        home.join("Library/Caches"),
-        home.join(".cargo"),
-    ];
+    let dirs = [root.into(), std::env::temp_dir(), "/tmp".into(), home.join(".cache"), home.join("Library/Caches")];
     dirs.into_iter().filter_map(|d| d.canonicalize().ok()).collect()
 }

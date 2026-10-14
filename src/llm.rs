@@ -22,6 +22,18 @@ impl std::fmt::Display for ContextOverflow {
 
 impl std::error::Error for ContextOverflow {}
 
+/// The stream broke off before the model finished; nothing was logged, so the request is retried.
+#[derive(Debug)]
+struct Interrupted(String);
+
+impl std::fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "stream interrupted: {}", self.0)
+    }
+}
+
+impl std::error::Error for Interrupted {}
+
 /// Where the API key lives when AIR_API_KEY is unset; the sandbox denies reading it.
 pub fn key_file() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/air/api_key")
@@ -39,7 +51,12 @@ impl Llm {
     /// `header` is the session's first log entry, which pins model and sampling.
     pub fn new(base_url: &str, header: &Value) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            // No overall timeout (a long answer is fine), but a connection silent for 5 minutes is dead.
+            http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(30))
+                .read_timeout(Duration::from_secs(300))
+                .build()
+                .expect("a plain rustls client builds"),
             url: format!("{}/chat/completions", base_url.trim_end_matches('/')),
             key: std::env::var("AIR_API_KEY")
                 .ok()
@@ -56,8 +73,23 @@ impl Llm {
         let body = json!({
             "model": self.model, "messages": messages, "tools": tools, "temperature": self.temperature,
             "stream": true, "stream_options": {"include_usage": true},
-        });
-        let mut response = self.send(&body.to_string()).await?;
+        })
+        .to_string();
+        for attempt in 1.. {
+            match self.stream(&body).await {
+                Err(e) if attempt < 4 && e.is::<Interrupted>() => {
+                    crate::ui::note(&format!("{e}; retrying"));
+                    tokio::time::sleep(Duration::from_secs(2 << attempt)).await;
+                }
+                result => return result,
+            }
+        }
+        unreachable!()
+    }
+
+    async fn stream(&self, body: &str) -> Result<Value> {
+        let mut response = self.send(body).await?;
+        let mut finished = false; // a finish_reason or [DONE] arrived: the model ended the reply
         let (mut buf, mut text, mut thinking, mut usage) = (Vec::new(), String::new(), String::new(), Value::Null);
         let mut calls: Vec<[String; 3]> = vec![]; // id, name, arguments
         let (mut markdown, mut began) = (crate::render::Markdown::default(), None);
@@ -68,18 +100,20 @@ impl Llm {
         let thought = |thinking: &str, began: Option<std::time::Instant>| {
             crate::ui::thought(thinking, began.map_or(0, |b: std::time::Instant| b.elapsed().as_secs()));
         };
-        while let Some(chunk) = response.chunk().await? {
+        while let Some(chunk) = response.chunk().await.map_err(|e| Interrupted(format!("{e:#}")))? {
             buf.extend_from_slice(&chunk);
             while let Some(end) = buf.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = buf.drain(..=end).collect();
                 let Some(data) = std::str::from_utf8(&line)?.trim().strip_prefix("data:") else { continue };
-                let Ok(event) = serde_json::from_str::<Value>(data.trim()) else { continue }; // [DONE]
+                finished |= data.trim() == "[DONE]";
+                let Ok(event) = serde_json::from_str::<Value>(data.trim()) else { continue };
                 if let Some(error) = event.get("error") {
                     bail!("provider error: {error}");
                 }
                 if event["usage"].is_object() {
                     usage = event["usage"].clone();
                 }
+                finished |= event["choices"][0]["finish_reason"].is_string();
                 let delta = &event["choices"][0]["delta"];
                 if let Some(t) = delta["reasoning_content"].as_str().or(delta["reasoning"].as_str()) {
                     thinking += t;
@@ -112,7 +146,12 @@ impl Llm {
                     }
                 }
                 for call in delta["tool_calls"].as_array().into_iter().flatten() {
-                    let i = call["index"].as_u64().unwrap_or(0) as usize;
+                    // Some providers (Gemini) omit index: then a call that names its function is a new one.
+                    let i = match call["index"].as_u64() {
+                        Some(i) => i as usize,
+                        None if call["function"]["name"].is_string() => calls.len(),
+                        None => calls.len().saturating_sub(1),
+                    };
                     if calls.len() <= i {
                         calls.resize(i + 1, Default::default());
                     }
@@ -129,6 +168,9 @@ impl Llm {
                 }
                 std::io::stdout().flush()?;
             }
+        }
+        if !finished {
+            return Err(Interrupted("the stream ended before the model finished".into()).into());
         }
         if answering {
             markdown.finish();
@@ -148,7 +190,14 @@ impl Llm {
         if !calls.is_empty() {
             message["tool_calls"] = calls
                 .into_iter()
-                .map(|[id, name, args]| json!({"id": id, "type": "function", "function": {"name": name, "arguments": args}}))
+                .enumerate()
+                .map(|(i, [id, name, args])| {
+                    // The log is replayed on every request, so it keeps only valid JSON arguments; a call
+                    // whose arguments were cut off is logged with none, and its result says so.
+                    let args = if serde_json::from_str::<Value>(&args).is_ok() { args } else { "{}".into() };
+                    let id = if id.is_empty() { format!("call_{i}") } else { id };
+                    json!({"id": id, "type": "function", "function": {"name": name, "arguments": args}})
+                })
                 .collect();
         }
         Ok(message)
