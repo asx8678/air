@@ -44,6 +44,7 @@ pub struct Llm {
     key: Option<String>,
     model: String,
     temperature: f64,
+    marked: std::cell::Cell<bool>,
 }
 
 impl Llm {
@@ -61,6 +62,7 @@ impl Llm {
                 .map(|k| k.trim().into()),
             model: header["model"].as_str().unwrap_or_default().into(),
             temperature: header["temperature"].as_f64().unwrap_or(TEMPERATURE),
+            marked: Default::default(),
         }
     }
 
@@ -87,6 +89,7 @@ impl Llm {
         let mut finished = false;
         let (mut buf, mut text, mut thinking, mut usage) = (Vec::new(), String::new(), String::new(), Value::Null);
         let mut calls: Vec<[String; 3]> = vec![];
+        let mut slots = std::collections::HashMap::new();
         let mut lines = 0;
         let (mut markdown, mut began) = (crate::render::Markdown::default(), None);
         let (mut held, mut answering, mut narrated) = (String::new(), false, false);
@@ -95,15 +98,15 @@ impl Llm {
         };
         let mut broken = None;
         'read: loop {
-            let chunk = match response.chunk().await {
-                Ok(Some(chunk)) => chunk,
+            match response.chunk().await {
+                Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
+                Ok(None) if buf.last().is_some_and(|&b| b != b'\n') => buf.push(b'\n'),
                 Ok(None) => break,
                 Err(e) => {
                     broken = Some(format!("{e:#}"));
                     break;
                 }
-            };
-            buf.extend_from_slice(&chunk);
+            }
             while let Some(end) = buf.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = buf.drain(..=end).collect();
                 let line = String::from_utf8_lossy(&line);
@@ -150,19 +153,18 @@ impl Llm {
                     }
                 }
                 for call in delta["tool_calls"].as_array().into_iter().flatten() {
-                    let i = match (call["index"].as_u64(), calls.last()) {
-                        (Some(i), _) => i as usize,
-                        (None, None) => 0,
-                        (None, Some([id, name, args])) => {
-                            let new_id =
-                                call["id"].as_str().is_some_and(|i| !i.is_empty() && !id.is_empty() && i != id);
-                            let complete = !name.is_empty() && serde_json::from_str::<Value>(args).is_ok();
-                            calls.len() - 1 + usize::from(new_id || call["function"]["name"].is_string() && complete)
-                        }
-                    };
-                    if calls.len() <= i {
-                        calls.resize(i + 1, Default::default());
+                    let key = call["index"].as_u64();
+                    let fresh = slots.get(&key).is_none_or(|&i: &usize| {
+                        let [id, name, args] = &calls[i];
+                        let new_id = call["id"].as_str().is_some_and(|i| !i.is_empty() && !id.is_empty() && i != id);
+                        let complete = !name.is_empty() && serde_json::from_str::<Value>(args).is_ok();
+                        new_id || key.is_none() && call["function"]["name"].is_string() && complete
+                    });
+                    if fresh {
+                        calls.push(Default::default());
+                        slots.insert(key, calls.len() - 1);
                     }
+                    let i = slots[&key];
                     if let Some(id) = call["id"].as_str() {
                         calls[i][0] = id.into();
                     }
@@ -184,7 +186,11 @@ impl Llm {
             }
             return Err(ContextOverflow(problem.to_string()).into());
         }
+        if finished {
+            self.marked.set(true);
+        }
         finished |= broken.is_none()
+            && !self.marked.get()
             && !(text.is_empty() && calls.is_empty())
             && calls.iter().all(|c| serde_json::from_str::<Value>(&c[2]).is_ok());
         if !finished {

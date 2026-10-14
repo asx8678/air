@@ -2,6 +2,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 const MAX_BYTES: usize = 32 * 1024;
+const EXCHANGE: usize = 3968;
 
 pub fn cut(entries: &[Value], prev: usize, keep_tokens: usize) -> usize {
     let (mut tail, mut keep) = (0, entries.len());
@@ -11,7 +12,7 @@ pub fn cut(entries: &[Value], prev: usize, keep_tokens: usize) -> usize {
         if tail > keep_tokens {
             break;
         }
-        if role != "tool" {
+        if role == "assistant" {
             keep = i;
         }
     }
@@ -29,10 +30,22 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
 
     let mut dialogue = vec![];
     for &u in recent {
-        if let Some(a) = (1..u).rev().take_while(|&i| role(i) != "user").find(|&i| role(i) == "assistant" && said(i)) {
-            dialogue.push(format!("#{a} assistant (historical, not a verified outcome):\n{}", excerpt(text(a), 1000)));
+        let a = (1..u).rev().take_while(|&i| role(i) != "user").find(|&i| role(i) == "assistant" && said(i));
+        let reply = a.map(|a| quote(text(a)));
+        let room = reply.as_ref().map_or(EXCHANGE, |r| (EXCHANGE / 2).max(EXCHANGE.saturating_sub(r.len())));
+        let user = excerpt(&quote(text(u)), room);
+        if let (Some(a), Some(reply)) = (a, reply) {
+            let reply = excerpt(&reply, EXCHANGE - user.len());
+            dialogue.push(format!("#{a} assistant (historical, not a verified outcome):\n{reply}"));
         }
-        dialogue.push(format!("#{u} user:\n{}", excerpt(text(u), 2000)));
+        dialogue.push(format!("#{u} user:\n{user}"));
+    }
+    let after = users.last().map_or(1, |&u| u + 1);
+    if let Some(a) = (after..keep).rev().find(|&i| role(i) == "assistant" && said(i)) {
+        dialogue.push(format!(
+            "#{a} assistant, latest reply (historical, not a verified outcome):\n{}",
+            excerpt(&quote(text(a)), 4000)
+        ));
     }
     let requests: Vec<String> =
         users[..users.len() - recent.len()].iter().map(|&i| format!("#{i} {}", line(text(i), 160))).collect();
@@ -45,10 +58,10 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
     for i in range.clone() {
         let meta = &entries[i]["meta"];
         if let Some(c) = meta["accepted"].as_str() {
-            criteria = vec![format!("#{i} {}", excerpt(c, 1800))];
+            criteria = vec![format!("#{i}\n{}", excerpt(&quote(c), 1800))];
         }
         if let Some(notes) = meta["carry"].as_array() {
-            carry = notes.iter().filter_map(Value::as_str).map(|n| format!("#{i} {n}")).collect();
+            carry = notes.iter().filter_map(Value::as_str).map(|n| format!("#{i}\n{}", quote(n))).collect();
         }
         for act in meta["actions"].as_array().into_iter().flatten() {
             let (tool, path, ok) = (act["tool"].as_str().unwrap_or_default(), act["path"].as_str(), act["ok"] == true);
@@ -81,7 +94,7 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
     let files: Vec<String> =
         ranked.iter().map(|(path, (rank, i))| format!("{} {path} #{i}", ["", "modified", "created"][*rank])).collect();
     let check_output: Vec<String> =
-        failing_check.map(|i| format!("#{i}\n{}", tail(text(i), 1536))).into_iter().collect();
+        failing_check.map(|i| format!("#{i}\n{}", quote(tail(text(i), 1536)))).into_iter().collect();
 
     let skip = |l: &&str| l.is_empty() || l.starts_with('#') || l.starts_with("import ") || l.starts_with("from ");
     let mut events = vec![];
@@ -125,28 +138,30 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
     }
     let events = events.split_off(events.len().saturating_sub(40));
 
+    let footer = format!(
+        "\n[Entries #1-#{} are summarized here; recall(n) returns entry #n exactly. Continue the task.]",
+        keep - 1
+    );
     let mut out = String::from("[Summary of earlier work, rebuilt from the session log. Newer messages follow it.]\n");
     for (title, lines, cap) in [
-        ("Recent user directions", dialogue, 8_192),
+        ("Recent user directions", dialogue, 16_384),
         ("Accepted criteria", criteria, 2_048),
         ("Carry forward", carry, 3_072),
         ("Earlier requests", requests, 3_072),
         ("Files", files, 4_096),
         ("Unresolved failures", failures.into_iter().map(|(_, l)| l).collect(), 3_072),
         ("Status", status, 1_536),
-        ("Failing check output", check_output, 2_048),
+        ("Failing check output", check_output, 3_200),
         ("Latest events", events, 4_096),
     ] {
-        if !lines.is_empty() {
-            out += &block(&format!("\n## {title}"), &lines, cap);
+        let left = MAX_BYTES.saturating_sub(out.len() + footer.len() + 1);
+        let section = block(&format!("\n## {title}"), &lines, cap.min(left));
+        if !lines.is_empty() && !section.is_empty() {
+            out += &section;
             out += "\n";
         }
     }
-    out += &format!(
-        "\n[Entries #1-#{} are summarized here; recall(n) returns entry #n exactly. Continue the task.]",
-        keep - 1
-    );
-    clip(&out, MAX_BYTES).to_string()
+    out + &footer
 }
 
 fn touch<'a>(files: &mut BTreeMap<&'a str, (usize, usize)>, path: &'a str, rank: usize, i: usize) {
@@ -168,7 +183,11 @@ fn block(title: &str, lines: &[String], cap: usize) -> String {
             return block;
         }
     }
-    clip(title, cap).to_string()
+    String::new()
+}
+
+pub fn quote(s: &str) -> String {
+    s.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")
 }
 
 fn excerpt(s: &str, max: usize) -> String {

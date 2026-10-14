@@ -53,6 +53,10 @@ impl Turn {
             tokens: (0, 0),
         });
         draw();
+        unsafe {
+            libc::signal(libc::SIGTERM, quit as *const () as libc::sighandler_t);
+            libc::signal(libc::SIGHUP, quit as *const () as libc::sighandler_t);
+        }
         Turn(Some(tokio::spawn(async {
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -67,11 +71,23 @@ impl Drop for Turn {
     fn drop(&mut self) {
         if let Some(ticker) = self.0.take() {
             ticker.abort();
+            unsafe {
+                libc::signal(libc::SIGTERM, libc::SIG_DFL);
+                libc::signal(libc::SIGHUP, libc::SIG_DFL);
+            }
             if let Some(bar) = BAR.lock().unwrap().take() {
                 print!("\x1b7\x1b[{};1H\x1b[2K\x1b[r\x1b8", bar.rows);
                 let _ = std::io::stdout().flush();
             }
         }
+    }
+}
+
+extern "C" fn quit(signal: libc::c_int) {
+    let reset = b"\x1b7\x1b[999;1H\x1b[2K\x1b[r\x1b8\n";
+    unsafe {
+        libc::write(1, reset.as_ptr().cast(), reset.len());
+        libc::_exit(128 + signal);
     }
 }
 
@@ -383,7 +399,7 @@ pub fn plan(plan: &Value) {
 
 pub fn note(text: &str) {
     clear_live();
-    println!("{}", paint("33", &format!("· {text}")));
+    println!("{}", paint("33", &format!("· {}", printable(text))));
 }
 
 pub fn report(rows: &[(&str, String)], verdict: &str, good: bool) {

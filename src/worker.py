@@ -1,10 +1,12 @@
-import contextlib, difflib, inspect, json, types, linecache, os, re, shlex, signal, subprocess, sys, tempfile, traceback
+import contextlib, difflib, inspect, json, linecache, os, re, shlex, signal, subprocess, sys, tempfile, traceback
 
 ROOT = os.getcwd()
+sys.path.append(ROOT)
 CHECK = os.environ.pop("AIR_CHECK", "")
 FMT = os.environ.pop("AIR_FMT", "")
 LOG = os.environ.pop("AIR_LOG", "")
 HALF = 4000
+LIMIT = 8 << 20
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\r(?!\n)")
 
 _inbox = os.fdopen(os.dup(0), encoding="utf-8")
@@ -29,8 +31,19 @@ def _exec(cmd, timeout):
             if not isinstance(e, subprocess.TimeoutExpired):
                 raise
             code = f"timeout after {timeout}s"
-        out.seek(0)
-        return ANSI.sub("", out.read().decode("utf-8", "replace")), code
+        with contextlib.suppress(OSError):
+            os.killpg(p.pid, signal.SIGKILL)
+        return ANSI.sub("", _read(out).decode("utf-8", "replace")), code
+
+
+def _read(f):
+    size = f.seek(0, 2)
+    f.seek(0)
+    if size <= LIMIT:
+        return f.read()
+    head = f.read(LIMIT // 2)
+    f.seek(-LIMIT // 2, 2)
+    return head + f"\n[… {size - LIMIT} bytes omitted]\n".encode() + f.read()
 
 
 def _rel(path):
@@ -69,6 +82,7 @@ def _change(tool, path, make):
         raise
     finally:
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+    _forget()
     note = ""
     if FMT:
         out, code = _exec(f"{FMT} {shlex.quote(rel)}", 60)
@@ -82,16 +96,33 @@ def _change(tool, path, make):
     print(f"{tool} {rel}: ok{note}")
 
 
-def edit(path, old, new):
+def _forget():
+    for name, mod in list(sys.modules.items()):
+        path = getattr(mod, "__file__", None)
+        if path and "site-packages" not in path and os.path.realpath(path).startswith(ROOT + os.sep):
+            del sys.modules[name]
+            for key in [k for k, v in G.items() if v is mod or getattr(v, "__module__", None) == name]:
+                del G[key]
+
+
+def edit(path, old, new=None):
+    pairs = [(old, new)] if new is not None else old
+    if isinstance(pairs, str) or not pairs or not all(
+            isinstance(p, (list, tuple)) and len(p) == 2 and all(isinstance(s, str) for s in p) for p in pairs):
+        raise TypeError("edit() takes (path, old, new) or (path, [(old, new), ...]) with string old and new")
     def make(full, rel):
         with open(full, encoding="utf-8", newline="") as f:
             raw = f.read()
         crlf = "\r\n" in raw and raw.count("\r\n") == raw.count("\n")
-        text = raw.replace("\r\n", "\n") if crlf else raw
-        n = text.count(old)
-        if n != 1:
-            raise ValueError(f"old text {'not found' if n == 0 else f'occurs {n} times'} in {rel}")
-        result = text.replace(old, new, 1)
+        eol = (lambda s: s.replace("\r\n", "\n")) if crlf else (lambda s: s)
+        text = result = eol(raw)
+        for k, (o, n) in enumerate(pairs, 1):
+            find = eol(o)
+            count = result.count(find)
+            if count != 1:
+                which = f" (pair {k} of {len(pairs)}; nothing was changed)" if len(pairs) > 1 else ""
+                raise ValueError(f"old text {'not found' if count == 0 else f'occurs {count} times'} in {rel}{which}")
+            result = result.replace(find, eol(n), 1)
         with open(full, "w", encoding="utf-8", newline="\r\n" if crlf else "") as f:
             f.write(result)
         return text, result
@@ -197,7 +228,7 @@ def _hint(e, misuse):
     text = str(e)
     if isinstance(e, NameError) and re.search(r"'(read|files|grep|ls|cat)'", text):
         return 'explore with plain Python: open(), re, pathlib and sh("git ls-files")'
-    if isinstance(e, SyntaxError) and sys.version_info < (3, 10):
+    if isinstance(e, SyntaxError) and sys.version_info < (3, 10) and (e.text or "").lstrip().startswith(("match ", "case ")):
         return f"the worker runs Python {sys.version_info[0]}.{sys.version_info[1]}: no match statements or X | Y types"
     if misuse:
         name = text.split("(")[0]
@@ -215,14 +246,7 @@ G = {"__name__": "__main__", "_last": "", "sh": sh, "edit": edit, "write": write
 HELPERS = tuple(f"{name}()" for name in G if not name.startswith("_"))
 
 
-class _Helper(types.ModuleType):
-    def __call__(self, *args, **kwargs):
-        return G[self.__name__](*args, **kwargs)
-
-
-for _name in ("sh",):
-    sys.modules[_name] = _Helper(_name)
-    setattr(sys.modules[_name], _name, G[_name])
+sh.sh = sys.modules["sh"] = sh
 signal.signal(signal.SIGINT, signal.SIG_IGN)
 for request in _inbox:
     request = json.loads(request)
@@ -255,8 +279,7 @@ for request in _inbox:
     sys.stdout.flush()
     os.dup2(_null, 1)
     os.dup2(_null, 2)
-    capture.seek(0)
-    text = ANSI.sub("", capture.read().decode("utf-8", "replace"))
+    text = ANSI.sub("", _read(capture).decode("utf-8", "replace"))
     capture.close()
     G["_last"] = text
     if len(text) > 2 * HALF:

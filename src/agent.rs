@@ -8,12 +8,19 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
 
 const COMPACT_AT: u64 = 100_000;
 const MAX_REQUESTS: usize = 200;
 const CHECK_TIMEOUT: Duration = Duration::from_secs(1800);
 const GATE: &str = "The project check failed on the current tree. Fix what fails, run check(), then finish again. \
                     If it cannot pass, say why in one line. The check output ended with:";
+const SANDBOX: &str = "\n\n## Sandbox\nYour code runs in a sandbox. Internet and DNS are off (localhost works), and writes \
+                       outside the repo and temp dirs fail, as do writes into .git; on macOS so do Unix sockets and \
+                       nested sandbox-exec. These failures (Operation not permitted, EPERM, Read-only file system, DNS \
+                       lookup errors) are permanent. Don't retry them and don't search the machine for another copy \
+                       of what was blocked: skip that step, finish the rest, and say in your final message what you \
+                       could not run.";
 
 pub struct Agent {
     root: PathBuf,
@@ -33,7 +40,7 @@ impl Agent {
         } else {
             let model =
                 config.model.as_deref().context("no model: pass -m or set model in ~/.config/air/config.toml")?;
-            Session::create(home, root, model, &system_prompt(root))?
+            Session::create(home, root, model, &system_prompt(root, yolo))?
         };
         let base_url = config.base_url.as_deref().context("set base_url in ~/.config/air/config.toml")?;
         let llm = Llm::new(base_url, &session.entries[0]);
@@ -193,10 +200,10 @@ impl Agent {
         ui::run("check()");
         let before = self.fingerprint();
         let script = format!("exec 2>&1\n{check}");
-        let mut cmd = worker::sandboxed(&self.root, self.yolo, &self.session.path, "/bin/sh", &["-c", &script]);
-        let (passed, out) = match tokio::time::timeout(CHECK_TIMEOUT, cmd.stdin(Stdio::null()).output()).await {
-            Ok(Ok(out)) => (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned()),
-            Ok(Err(e)) => (false, e.to_string()),
+        let cmd = worker::sandboxed(&self.root, self.yolo, &self.session.path, "/bin/sh", &["-c", &script]);
+        let (passed, out) = match tokio::time::timeout(CHECK_TIMEOUT, grouped(cmd)).await {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => (false, format!("{e:#}")),
             Err(_) => (false, format!("timeout after {}s", CHECK_TIMEOUT.as_secs())),
         };
         let clean = self.fingerprint() == before;
@@ -236,7 +243,7 @@ impl Agent {
         let (check, verdict) = match (changed, checked, &self.config.check) {
             (false, _, _) => ("-", "NO CHANGES"),
             (true, true, _) => ("passed on the final tree", "VERIFIED"),
-            (true, false, None) => ("none configured", "UNVERIFIED"),
+            (true, false, None) => ("none configured: set check in air.toml", "UNVERIFIED"),
             (true, false, Some(_)) => ("not passed on the final tree", "UNVERIFIED"),
         };
         let state = self.session.state();
@@ -317,6 +324,32 @@ impl Agent {
     }
 }
 
+struct Group(Option<u32>);
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            let group = format!("-{pid}");
+            let _ = std::process::Command::new("kill").args(["-KILL", "--", &group]).stderr(Stdio::null()).status();
+        }
+    }
+}
+
+async fn grouped(mut cmd: tokio::process::Command) -> Result<(bool, String)> {
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).process_group(0).spawn()?;
+    let group = Group(child.id());
+    let mut stdout = child.stdout.take().context("check stdout")?;
+    let mut out = vec![];
+    let wait = async {
+        let status = child.wait().await;
+        drop(group);
+        status
+    };
+    let (status, read) = tokio::join!(wait, stdout.read_to_end(&mut out));
+    read?;
+    Ok((status?.success(), String::from_utf8_lossy(&out).into_owned()))
+}
+
 fn finish(mut meta: Value) -> (String, Value) {
     let out = meta["out"].as_str().unwrap_or_default().to_string();
     if let Some(fields) = meta.as_object_mut() {
@@ -326,8 +359,11 @@ fn finish(mut meta: Value) -> (String, Value) {
     (out, meta)
 }
 
-fn system_prompt(root: &Path) -> String {
+fn system_prompt(root: &Path, yolo: bool) -> String {
     let mut prompt = include_str!("prompt.md").to_string();
+    if !yolo {
+        prompt += SANDBOX;
+    }
     if let Ok(agents) = std::fs::read_to_string(root.join("AGENTS.md")) {
         prompt += "\n\n# Project instructions (AGENTS.md)\n\n";
         prompt += &agents;

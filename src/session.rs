@@ -42,7 +42,7 @@ impl Session {
             .collect();
         paths.sort();
         for path in paths.into_iter().rev() {
-            let first = BufReader::new(File::open(&path)?).lines().next().transpose()?.unwrap_or_default();
+            let Ok(Some(Ok(first))) = File::open(&path).map(|f| BufReader::new(f).lines().next()) else { continue };
             if serde_json::from_str::<Value>(&first).is_ok_and(|header| header["cwd"] == json!(root)) {
                 let mut file = OpenOptions::new().append(true).open(&path)?;
                 if file.try_lock().is_err() {
@@ -88,17 +88,23 @@ impl Session {
     pub fn messages(&self) -> Vec<Value> {
         let mut out = vec![json!({"role": "system", "content": self.entries[0]["system"]})];
         let (keep, newest) = (self.keep(), self.newest_task());
+        let mut folded = None;
         if let Some(summary) = self.entries.iter().rev().find_map(|e| e["compact"]["summary"].as_str()) {
             let mut content = summary.to_string();
-            if let Some(u) = newest.filter(|&u| u < keep) {
+            let first = (keep..self.entries.len()).find(|&i| self.entries[i]["role"].is_string());
+            folded = first.filter(|&i| self.entries[i]["role"] == "user");
+            for u in newest.filter(|&u| u < keep).into_iter().chain(folded) {
                 let task = self.entries[u]["content"].as_str().unwrap_or_default();
-                content += &format!("\n\n[Current task, entry #{u}]\n{task}");
+                let label = if Some(u) == newest { "Current task" } else { "User" };
+                let quoted = format!("#{u} user:\n{}", crate::compact::quote(task));
+                content = content.replacen(&quoted, &format!("#{u} user: [the current task, in full below]"), 1);
+                content += &format!("\n\n[{label}, entry #{u}]\n{task}");
             }
             out.push(json!({"role": "user", "content": content}));
         }
         let mut open: Vec<Value> = vec![];
         for (i, entry) in self.entries.iter().enumerate().skip(keep) {
-            let Some(role) = entry["role"].as_str() else { continue };
+            let Some(role) = entry["role"].as_str().filter(|_| folded != Some(i)) else { continue };
             let mut message = entry.clone();
             if let Some(fields) = message.as_object_mut() {
                 fields.remove("meta");

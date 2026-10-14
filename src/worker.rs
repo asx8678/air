@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -9,9 +10,11 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 const RUN_TIMEOUT: Duration = Duration::from_secs(40 * 60);
 const HERMETIC: &str = "TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 NO_COLOR=1 CLICOLOR=0 CARGO_TERM_COLOR=never CI=1 TERM=dumb \
                         PAGER=cat GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 PYTHONHASHSEED=0 PYTHONUTF8=1 PYTHONDONTWRITEBYTECODE=1";
-const CACHES: &str = "XDG_CACHE_HOME GOCACHE UV_CACHE_DIR PIP_CACHE_DIR PRE_COMMIT_HOME npm_config_cache";
+const CACHES: &str =
+    "XDG_CACHE_HOME GOCACHE UV_CACHE_DIR PIP_CACHE_DIR PRE_COMMIT_HOME npm_config_cache PYTHONPYCACHEPREFIX";
 const SECRETS: &str = ".air .config/air .ssh .gnupg .aws .azure .kube .docker .netrc .pi .config/gh .config/gcloud \
-                       .password-store Library/Keychains";
+                       .password-store Library/Keychains .git-credentials .config/git/credentials .npmrc .pypirc \
+                       .cargo/credentials .cargo/credentials.toml";
 
 pub struct Worker {
     stdin: ChildStdin,
@@ -71,8 +74,10 @@ pub fn sandboxed(root: &Path, yolo: bool, log: &Path, program: &str, args: &[&st
         let protected: String = protected.iter().map(|d| format!(" (subpath {d:?})")).collect();
         let profile = format!(
             "(version 1)(allow default)(deny network*)\
-             (allow network* (local ip \"localhost:*\") (remote ip \"localhost:*\"))\
+             (allow network-outbound (remote ip \"localhost:*\"))\
+             (allow network-bind network-inbound (local ip \"localhost:*\"))\
              (deny file-write*)(allow file-write*{dirs} (subpath \"/dev\"))(deny file-write*{protected})\
+             (deny file-write* (require-all (subpath {root:?}) (regex #\"/\\.git(/|$)\")))\
              (deny file-read-data{secrets})(allow file-read-data (literal {log:?}))\
              (deny file-ioctl (regex #\"^/dev/tty\"))"
         );
@@ -99,8 +104,13 @@ pub fn sandboxed(root: &Path, yolo: bool, log: &Path, program: &str, args: &[&st
         cmd.args(["--unshare-all", "--die-with-parent", "--new-session", "--chdir"]).arg(root).arg(program);
         cmd
     };
-    let cache = std::env::temp_dir().join("air-cache");
-    let secret = |name: &str| ["KEY", "TOKEN", "SECRET", "PASSWORD"].iter().any(|s| name.to_uppercase().contains(s));
+    let mut hasher = std::hash::DefaultHasher::new();
+    root.hash(&mut hasher);
+    let cache = std::env::temp_dir().join(format!("air-cache/{:016x}", hasher.finish()));
+    let _ = std::fs::create_dir_all(&cache);
+    let secret = |name: &str| {
+        ["KEY", "TOKEN", "SECRET", "PASS", "CREDENTIAL", "AUTH"].iter().any(|s| name.to_uppercase().contains(s))
+    };
     cmd.args(args)
         .current_dir(root)
         .env_clear()

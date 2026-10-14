@@ -90,7 +90,7 @@ async fn main() -> Result<()> {
             }
         };
         if let Err(e) = result {
-            eprintln!("error: {e:#}");
+            eprintln!("error: {}", ui::printable(&format!("{e:#}")));
         }
     }
 }

@@ -8,6 +8,7 @@ description = "Minimal code-mode coding agent"
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
+libc = "0.2.190"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
 rustyline = "18.0.1"
 serde = { version = "1", features = ["derive"] }
