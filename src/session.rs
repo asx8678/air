@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -20,7 +20,7 @@ pub struct State {
 }
 
 impl Session {
-    pub fn create(home: &Path, root: &Path, model: &str, system: &str) -> Result<Self> {
+    pub fn create(home: &Path, root: &Path, model: &str, system: &str, profile: Map<String, Value>) -> Result<Self> {
         let dir = home.join(".air/sessions");
         DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
         let secs = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -28,7 +28,14 @@ impl Session {
         let file = OpenOptions::new().create_new(true).append(true).mode(0o600).open(&path)?;
         file.try_lock()?;
         let mut session = Self { path, entries: vec![], file };
-        session.push(json!({"cwd": root, "model": model, "temperature": crate::llm::TEMPERATURE, "system": system}))?;
+        let mut params = profile;
+        let compact_at = params.remove("compact_at");
+        let guidance = params.remove("guidance");
+        params.entry("temperature").or_insert(crate::llm::TEMPERATURE.into());
+        session.push(json!({
+            "cwd": root, "model": model, "params": params, "compact_at": compact_at, "guidance": guidance, "system": system,
+            "air": format!("{} {}", env!("CARGO_PKG_VERSION"), env!("AIR_BUILD")),
+        }))?;
         Ok(session)
     }
 
@@ -66,6 +73,15 @@ impl Session {
     }
 
     pub fn push(&mut self, entry: Value) -> Result<()> {
+        self.flush()?;
+        self.write(entry)
+    }
+
+    pub fn flush(&mut self) -> Result<()> {
+        crate::ui::events().into_iter().try_for_each(|event| self.write(event))
+    }
+
+    fn write(&mut self, entry: Value) -> Result<()> {
         self.file.write_all(format!("{entry}\n").as_bytes())?;
         self.entries.push(entry);
         Ok(())

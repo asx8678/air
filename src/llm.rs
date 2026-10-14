@@ -1,9 +1,10 @@
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use std::io::Write;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const TEMPERATURE: f64 = 0.0;
+const LONG: Duration = Duration::from_secs(240);
 const OVERFLOW: &[&str] =
     &["context_length", "context length", "context window", "maximum context", "prompt is too long", "too many tokens"];
 
@@ -19,7 +20,7 @@ impl std::fmt::Display for ContextOverflow {
 impl std::error::Error for ContextOverflow {}
 
 #[derive(Debug)]
-struct Interrupted(String);
+pub struct Interrupted(String);
 
 impl std::fmt::Display for Interrupted {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -28,6 +29,13 @@ impl std::fmt::Display for Interrupted {
 }
 
 impl std::error::Error for Interrupted {}
+
+pub fn params(header: &Value) -> Value {
+    match &header["params"] {
+        Value::Object(params) => params.clone().into(),
+        _ => json!({"temperature": header["temperature"].as_f64().unwrap_or(TEMPERATURE)}),
+    }
+}
 
 fn overflow(text: &str) -> bool {
     let lower = text.to_lowercase();
@@ -43,7 +51,7 @@ pub struct Llm {
     url: String,
     key: Option<String>,
     model: String,
-    temperature: f64,
+    params: Value,
     marked: std::cell::Cell<bool>,
 }
 
@@ -61,22 +69,40 @@ impl Llm {
                 .or_else(|| std::fs::read_to_string(key_file()).ok())
                 .map(|k| k.trim().into()),
             model: header["model"].as_str().unwrap_or_default().into(),
-            temperature: header["temperature"].as_f64().unwrap_or(TEMPERATURE),
+            params: params(header),
             marked: Default::default(),
         }
     }
 
     pub async fn complete(&self, messages: &[Value], tools: &Value) -> Result<Value> {
-        let body = json!({
-            "model": self.model, "messages": messages, "tools": tools, "temperature": self.temperature,
+        let mut body = self.params.clone();
+        let fixed = json!({
+            "model": self.model, "messages": messages, "tools": tools,
             "stream": true, "stream_options": {"include_usage": true},
-        })
-        .to_string();
+        });
+        if let (Some(body), Value::Object(fixed)) = (body.as_object_mut(), fixed) {
+            body.extend(fixed);
+        }
+        let body = body.to_string();
+        let start = Instant::now();
         for attempt in 1.. {
+            let began = Instant::now();
             match self.stream(&body).await {
-                Err(e) if attempt < 4 && e.is::<Interrupted>() => {
-                    crate::ui::note(&format!("{e}; retrying from the start"));
+                Err(e) if e.is::<Interrupted>() && (attempt == 4 || began.elapsed() > LONG) => {
+                    let extra = json!({"attempt": attempt, "ms": began.elapsed().as_millis() as u64});
+                    crate::ui::event("interrupted", &e.to_string(), extra);
+                    return Err(e);
+                }
+                Err(e) if e.is::<Interrupted>() => {
+                    let text = format!("{e}; retrying from the start");
+                    let extra = json!({"attempt": attempt, "ms": began.elapsed().as_millis() as u64});
+                    crate::ui::event("interrupted", &text, extra);
                     tokio::time::sleep(Duration::from_secs(2 << attempt)).await;
+                }
+                Ok(mut message) => {
+                    message["meta"]["timing"]["ms"] = (start.elapsed().as_millis() as u64).into();
+                    message["meta"]["timing"]["attempts"] = attempt.into();
+                    return Ok(message);
                 }
                 result => return result,
             }
@@ -85,16 +111,17 @@ impl Llm {
     }
 
     async fn stream(&self, body: &str) -> Result<Value> {
-        let mut response = self.send(body).await?;
-        let mut finished = false;
+        let (mut response, sent) = self.send(body).await?;
+        let (mut first, mut spoke) = (None, None);
+        let (mut finished, mut reason) = (false, Value::Null);
         let (mut buf, mut text, mut thinking, mut usage) = (Vec::new(), String::new(), String::new(), Value::Null);
         let mut calls: Vec<[String; 3]> = vec![];
         let mut slots = std::collections::HashMap::new();
         let mut lines = 0;
         let (mut markdown, mut began) = (crate::render::Markdown::default(), None);
         let (mut held, mut answering, mut narrated) = (String::new(), false, false);
-        let thought = |thinking: &str, began: Option<std::time::Instant>| {
-            crate::ui::thought(thinking, began.map_or(0, |b: std::time::Instant| b.elapsed().as_secs()));
+        let thought = |thinking: &str, began: Option<Instant>| {
+            crate::ui::thought(thinking, began.map_or(0, |b: Instant| b.elapsed().as_secs()));
         };
         let mut broken = None;
         'read: loop {
@@ -120,14 +147,21 @@ impl Llm {
                 if event["usage"].is_object() {
                     usage = event["usage"].clone();
                 }
-                finished |= event["choices"][0]["finish_reason"].is_string();
+                if let Some(why) = event["choices"][0]["finish_reason"].as_str() {
+                    (finished, reason) = (true, why.into());
+                }
                 let delta = &event["choices"][0]["delta"];
                 if let Some(t) = delta["reasoning_content"].as_str().or(delta["reasoning"].as_str()) {
                     thinking += t;
-                    let began = *began.get_or_insert_with(std::time::Instant::now);
+                    let began = *began.get_or_insert_with(Instant::now);
+                    first.get_or_insert(began);
                     if text.is_empty() {
                         crate::ui::thinking(&thinking, began.elapsed().as_secs());
                     }
+                }
+                if delta["tool_calls"].is_array() || delta["content"].as_str().is_some_and(|t| !t.is_empty()) {
+                    spoke.get_or_insert_with(Instant::now);
+                    first.get_or_insert_with(Instant::now);
                 }
                 if let Some(t) = delta["content"].as_str().filter(|t| !t.is_empty()) {
                     text += t;
@@ -146,7 +180,7 @@ impl Llm {
                 }
                 if !answering && !narrated && delta["tool_calls"].is_array() {
                     narrated = true;
-                    let secs = began.map_or(0, |b: std::time::Instant| b.elapsed().as_secs());
+                    let secs = began.map_or(0, |b: Instant| b.elapsed().as_secs());
                     match held.trim() {
                         "" => crate::ui::thought(&thinking, secs),
                         prose => crate::ui::narration(prose, &thinking, secs),
@@ -209,7 +243,11 @@ impl Llm {
                 markdown.finish();
             }
         }
-        let mut message = json!({"role": "assistant", "content": text, "meta": {"usage": usage}});
+        let ms = |a: Instant, b: Option<Instant>| b.map(|b| b.duration_since(a).as_millis() as u64);
+        let timing =
+            json!({"ttft_ms": ms(sent, first), "think_ms": began.and_then(|b| ms(b, spoke.or(Some(Instant::now()))))});
+        let mut message =
+            json!({"role": "assistant", "content": text, "meta": {"usage": usage, "timing": timing, "finish": reason}});
         if !thinking.is_empty() {
             message["reasoning_content"] = thinking.into();
         }
@@ -227,18 +265,19 @@ impl Llm {
         Ok(message)
     }
 
-    async fn send(&self, body: &str) -> Result<reqwest::Response> {
+    async fn send(&self, body: &str) -> Result<(reqwest::Response, Instant)> {
         for attempt in 1.. {
+            let sent = Instant::now();
             let mut request =
                 self.http.post(&self.url).header("content-type", "application/json").body(body.to_owned());
             if let Some(key) = &self.key {
                 request = request.bearer_auth(key);
             }
             let (problem, wait) = match request.send().await {
-                Ok(r) if r.status().is_success() => return Ok(r),
+                Ok(r) if r.status().is_success() => return Ok((r, sent)),
                 Ok(r) if r.status() == 429 || r.status().is_server_error() => {
                     let after = r.headers().get("retry-after").and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
-                    (r.status().to_string(), after)
+                    (r.status().as_u16().to_string(), after)
                 }
                 Ok(r) => {
                     let (status, text) = (r.status(), r.text().await.unwrap_or_default());
@@ -252,8 +291,10 @@ impl Llm {
             if attempt == 5 {
                 bail!("giving up after {attempt} attempts: {problem}");
             }
-            crate::ui::note(&format!("{problem}; retrying"));
-            tokio::time::sleep(Duration::from_secs(wait.unwrap_or(2 << attempt).min(60))).await;
+            let wait = wait.unwrap_or(2 << attempt).min(60);
+            let extra = json!({"status": problem, "attempt": attempt, "wait_s": wait});
+            crate::ui::event("retry", &format!("{problem}; retrying"), extra);
+            tokio::time::sleep(Duration::from_secs(wait)).await;
         }
         unreachable!()
     }

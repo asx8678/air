@@ -72,10 +72,13 @@ pub fn sandboxed(root: &Path, yolo: bool, log: &Path, program: &str, args: &[&st
         let dirs: String = writable.iter().map(|d| format!(" (subpath {d:?})")).collect();
         let secrets: String = secrets.map(|d| format!(" (subpath {d:?})")).collect();
         let protected: String = protected.iter().map(|d| format!(" (subpath {d:?})")).collect();
+        let sockets = root.join("tmp");
         let profile = format!(
             "(version 1)(allow default)(deny network*)\
              (allow network-outbound (remote ip \"localhost:*\"))\
              (allow network-bind network-inbound (local ip \"localhost:*\"))\
+             (allow network-bind network-outbound network-inbound \
+              (local unix-socket (subpath {sockets:?})) (remote unix-socket (subpath {sockets:?})))\
              (deny file-write*)(allow file-write*{dirs} (subpath \"/dev\"))(deny file-write*{protected})\
              (deny file-write* (require-all (subpath {root:?}) (regex #\"/\\.git(/|$)\")))\
              (deny file-read-data{secrets})(allow file-read-data (literal {log:?}))\

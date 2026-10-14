@@ -12,15 +12,21 @@ use tokio::io::AsyncReadExt;
 
 const COMPACT_AT: u64 = 100_000;
 const MAX_REQUESTS: usize = 200;
+const REPEAT_WARN: usize = 3;
+const REPEAT_BLOCK: usize = 6;
+const FILES: usize = 200;
 const CHECK_TIMEOUT: Duration = Duration::from_secs(1800);
 const GATE: &str = "The project check failed on the current tree. Fix what fails, run check(), then finish again. \
                     If it cannot pass, say why in one line. The check output ended with:";
+const NUDGE: &str = "Don't work out every change in advance: send one run() now with the next concrete step, \
+                     and adjust after you see its output.";
+const HELPERS: &[&str] = &["sh", "show", "accept", "edit", "write", "check", "carry", "plan", "done", "recall"];
 const SANDBOX: &str = "\n\n## Sandbox\nYour code runs in a sandbox. Internet and DNS are off (localhost works), and writes \
-                       outside the repo and temp dirs fail, as do writes into .git; on macOS so do Unix sockets and \
-                       nested sandbox-exec. These failures (Operation not permitted, EPERM, Read-only file system, DNS \
-                       lookup errors) are permanent. Don't retry them and don't search the machine for another copy \
-                       of what was blocked: skip that step, finish the rest, and say in your final message what you \
-                       could not run.";
+                       outside the repo and temp dirs fail, as do writes into .git; on macOS so does nested \
+                       sandbox-exec, and Unix sockets work only under the repo's tmp/ directory. These failures \
+                       (Operation not permitted, EPERM, Read-only file system, DNS lookup errors) are permanent. \
+                       Don't retry them and don't search the machine for another copy of what was blocked: skip that \
+                       step, finish the rest, and say in your final message what you could not run.";
 
 pub struct Agent {
     root: PathBuf,
@@ -31,6 +37,7 @@ pub struct Agent {
     worker: Option<Worker>,
     compact_at: u64,
     pending: Option<Value>,
+    repeat: (u64, usize),
 }
 
 impl Agent {
@@ -40,12 +47,20 @@ impl Agent {
         } else {
             let model =
                 config.model.as_deref().context("no model: pass -m or set model in ~/.config/air/config.toml")?;
-            Session::create(home, root, model, &system_prompt(root, yolo))?
+            let profile = config.models.get(model).cloned().unwrap_or_default();
+            let system = system_prompt(root, yolo, profile.get("guidance").and_then(Value::as_str));
+            Session::create(home, root, model, &system, profile)?
         };
         let base_url = config.base_url.as_deref().context("set base_url in ~/.config/air/config.toml")?;
         let llm = Llm::new(base_url, &session.entries[0]);
-        let compact_at = session.entries.iter().rev().find_map(|e| e["compact"]["at"].as_u64()).unwrap_or(COMPACT_AT);
-        Ok(Self { root: root.into(), config, yolo, llm, session, worker: None, compact_at, pending: None })
+        let learned = session.entries.iter().rev().find_map(|e| e["compact"]["at"].as_u64());
+        let compact_at = learned.or(session.entries[0]["compact_at"].as_u64()).unwrap_or(COMPACT_AT);
+        let repeat = (0, 0);
+        Ok(Self { root: root.into(), config, yolo, llm, session, worker: None, compact_at, pending: None, repeat })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.session.path
     }
 
     pub async fn run(&mut self, task: &str) -> Result<bool> {
@@ -56,6 +71,10 @@ impl Agent {
         };
         ui::clear_live();
         if let Some(result) = finished {
+            if let Err(e) = &result {
+                let text = ui::printable(&format!("{e:#}"));
+                self.session.push(json!({"event": "error", "text": text, "at": ui::now_ms()}))?;
+            }
             return result;
         }
         let settled = match &mut self.worker {
@@ -80,20 +99,22 @@ impl Agent {
         if !shown {
             println!();
         }
-        ui::note("interrupted");
+        ui::event("ctrl_c", "interrupted", Value::Null);
+        self.session.flush()?;
         Ok(false)
     }
 
     async fn turn(&mut self, task: &str) -> Result<bool> {
-        self.pending = None;
+        (self.pending, self.repeat) = (None, (0, 0));
         if self.session.last_prompt_tokens() >= self.compact_at / 2 {
             self.compact_to(self.compact_at as usize / 10)?;
         }
+        self.session.flush()?;
         let (began, clock) = (self.session.entries.len(), Instant::now());
         let snapshot = self.snapshot();
         self.session.push(json!({"role": "user", "content": task, "meta": {"snapshot": snapshot}}))?;
         let start = self.fingerprint();
-        let (mut nudged, mut overflowed) = (false, false);
+        let (mut nudged, mut overflowed, mut nudges) = (false, false, 0);
         for _ in 0..MAX_REQUESTS {
             if self.session.last_prompt_tokens() >= self.compact_at {
                 self.compact()?;
@@ -105,8 +126,13 @@ impl Agent {
                     if seen > 0 {
                         self.compact_at = self.compact_at.min(seen * 9 / 10);
                     }
-                    ui::note("context window exceeded; compacting and retrying");
+                    ui::event("overflow", "context window exceeded; compacting and retrying", json!({"seen": seen}));
                     self.compact()?;
+                    continue;
+                }
+                Err(e) if e.is::<llm::Interrupted>() && nudges < 2 => {
+                    nudges += 1;
+                    self.nudge("Your last reply was lost: the provider cut the stream during long reasoning.")?;
                     continue;
                 }
                 result => result?,
@@ -114,6 +140,14 @@ impl Agent {
             overflowed = false;
             ui::usage(&message["meta"]["usage"]);
             let calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
+            if calls.is_empty() && message["content"].as_str().is_none_or(|c| c.trim().is_empty()) && nudges < 2 {
+                nudges += 1;
+                let meta = &message["meta"];
+                let extra = json!({"usage": meta["usage"], "timing": meta["timing"], "finish": meta["finish"]});
+                ui::event("empty", "the model sent an empty reply; asking it to act", extra);
+                self.nudge("Your last reply was empty: you reasoned at length and sent nothing.")?;
+                continue;
+            }
             self.session.push(message)?;
             for call in &calls {
                 self.pending = Some(call["id"].clone());
@@ -129,10 +163,13 @@ impl Agent {
             let changed = self.fingerprint() != start;
             let mut checked = false;
             if changed && let Some(check) = &self.config.check {
+                let clock = Instant::now();
                 let (ok, out) = self.verify(check).await;
+                let ms = clock.elapsed().as_millis() as u64;
+                self.session.push(json!({"check": {"ok": ok, "ms": ms, "out": compact::tail(&out, 1500)}}))?;
                 if !ok && !nudged {
                     nudged = true;
-                    ui::note("the check failed on the final tree: asking the model to fix it");
+                    ui::event("nudge", "the check failed on the final tree: asking the model to fix it", Value::Null);
                     ui::activity("waiting for the model");
                     let gate = format!("{GATE}\n{}", compact::tail(&out, 1500));
                     self.session.push(json!({"role": "user", "content": gate, "meta": {"host": true}}))?;
@@ -140,11 +177,20 @@ impl Agent {
                 }
                 checked = ok;
             }
-            return Ok(self.report(changed, checked, began, clock));
+            return self.report(changed, checked, began, clock);
         }
-        ui::note(&format!("stopped after {MAX_REQUESTS} model requests in one turn"));
-        self.report(self.fingerprint() != start, false, began, clock);
+        ui::event("limit", &format!("stopped after {MAX_REQUESTS} model requests in one turn"), Value::Null);
+        self.report(self.fingerprint() != start, false, began, clock)?;
         Ok(false)
+    }
+
+    fn nudge(&mut self, why: &str) -> Result<()> {
+        let last = self.session.entries.iter().rev().find_map(|e| e["role"].as_str());
+        if last == Some("user") {
+            return Ok(());
+        }
+        ui::event("nudge", why, Value::Null);
+        self.session.push(json!({"role": "user", "content": format!("{why} {NUDGE}"), "meta": {"host": true}}))
     }
 
     async fn call(&mut self, call: &Value) -> (String, Value) {
@@ -153,28 +199,56 @@ impl Agent {
         match (call["function"]["name"].as_str(), args["code"].as_str()) {
             (Some("run"), Some(code)) => self.run_code(code).await,
             (Some("run"), None) => {
-                ui::note("the model's run() came without code (cut off by the output limit?)");
+                ui::event(
+                    "bad_call",
+                    "the model's run() came without code (cut off by the output limit?)",
+                    Value::Null,
+                );
                 let out = "error: run() arrived without a code argument, probably cut off by the output limit; \
                            send it again in smaller steps";
                 (out.into(), json!({"tool": "run", "error": true}))
             }
+            (Some(name), _) if HELPERS.contains(&name) => {
+                let args = call["function"]["arguments"].as_str().unwrap_or("{}");
+                let literal = serde_json::to_string(args).unwrap_or_default();
+                ui::event("bad_call", &format!("the model called {name} as a tool; running it in run()"), Value::Null);
+                self.run_code(&format!("{name}(**__import__('json').loads({literal}))")).await
+            }
             (name, _) => {
-                ui::note(&format!(
-                    "the model called {}, but the only tool is run(code)",
-                    name.unwrap_or("a nameless tool")
-                ));
+                let text =
+                    format!("the model called {}, but the only tool is run(code)", name.unwrap_or("a nameless tool"));
+                ui::event("bad_call", &text, Value::Null);
                 ("error: the only tool is run(code)".into(), json!({"tool": "run", "error": true}))
             }
         }
     }
 
     async fn run_code(&mut self, code: &str) -> (String, Value) {
+        let mut hasher = std::hash::DefaultHasher::new();
+        code.hash(&mut hasher);
+        let key = hasher.finish();
+        self.repeat = (key, if self.repeat.0 == key { self.repeat.1 + 1 } else { 1 });
+        if self.repeat.1 >= REPEAT_BLOCK {
+            let out = format!(
+                "error: this exact code already ran {} times in a row, so it was blocked: change the approach or finish",
+                self.repeat.1 - 1
+            );
+            ui::event("repeat", &out, Value::Null);
+            return (out, json!({"tool": "run", "error": true, "rejected": true}));
+        }
         ui::run(code);
         let state = self.session.state();
         let state = json!({"accepted": state.accepted, "carry": state.carry, "plan": state.plan});
+        let clock = Instant::now();
         match async { self.worker()?.run(code, &state).await }.await {
             Ok(reply) => {
-                let (out, meta) = finish(reply);
+                let (mut out, mut meta) = finish(reply);
+                if self.repeat.1 >= REPEAT_WARN {
+                    let n = self.repeat.1;
+                    out +=
+                        &format!("\n[the same code has now run {n} times in a row; at {REPEAT_BLOCK} it is blocked]");
+                }
+                meta["ms"] = (clock.elapsed().as_millis() as u64).into();
                 ui::ran(&meta, &out);
                 (out, meta)
             }
@@ -182,8 +256,8 @@ impl Agent {
                 self.worker = None;
                 let out = format!("error: {e:#}; the worker was restarted and its variables are gone");
                 println!();
-                ui::note(&out);
-                (out, json!({"tool": "run", "error": true}))
+                ui::event("worker_restart", &out, Value::Null);
+                (out, json!({"tool": "run", "error": true, "ms": clock.elapsed().as_millis() as u64}))
             }
         }
     }
@@ -239,7 +313,7 @@ impl Agent {
         format!("{:016x}", hasher.finish())
     }
 
-    fn report(&self, changed: bool, checked: bool, began: usize, clock: Instant) -> bool {
+    fn report(&mut self, changed: bool, checked: bool, began: usize, clock: Instant) -> Result<bool> {
         let (check, verdict) = match (changed, checked, &self.config.check) {
             (false, _, _) => ("-", "NO CHANGES"),
             (true, true, _) => ("passed on the final tree", "VERIFIED"),
@@ -250,15 +324,17 @@ impl Agent {
         let first = &self.session.entries[began];
         let task = first["content"].as_str().unwrap_or_default();
         let mut rows = vec![("task", task.lines().next().unwrap_or_default().to_string())];
-        rows.push(("criteria", state.accepted.unwrap_or_else(|| "-".into())));
-        if let Some(steps) = state.plan["steps"].as_array() {
-            let done = state.plan["done"].as_array().map_or(0, Vec::len);
-            rows.push(("plan", format!("{done}/{} steps done", steps.len())));
+        rows.push(("criteria", state.accepted.clone().unwrap_or_else(|| "-".into())));
+        let steps = state.plan["steps"].as_array().map(Vec::len);
+        let done = state.plan["done"].as_array().map_or(0, Vec::len);
+        if let Some(steps) = steps {
+            rows.push(("plan", format!("{done}/{steps} steps done")));
         }
         rows.push(("check", check.into()));
         let snapshot = first["meta"]["snapshot"].as_str();
         let index = self.index();
-        rows.push(("changes", changes(&self.root, snapshot.map(|tree| (tree, index.as_path())))));
+        let changes = changes(&self.root, snapshot.map(|tree| (tree, index.as_path())));
+        rows.push(("changes", changes.clone()));
         if let Some(tree) = snapshot.filter(|_| changed) {
             let short = tree.get(..12).unwrap_or(tree);
             rows.push(("undo", format!("git restore --source={short} --worktree -- .  (new files stay)")));
@@ -267,11 +343,13 @@ impl Agent {
         let usage: Vec<&Value> = turn.iter().map(|e| &e["meta"]["usage"]).filter(|u| u.is_object()).collect();
         let prompt: u64 = usage.iter().filter_map(|u| u["prompt_tokens"].as_u64()).sum();
         let out: u64 = usage.iter().filter_map(|u| u["completion_tokens"].as_u64()).sum();
+        let cached: u64 = usage.iter().filter_map(|u| ui::cached(u)).sum();
         let runs = turn.iter().filter(|e| e["meta"]["tool"] == "run").count();
-        let secs = clock.elapsed().as_secs();
+        let ms = clock.elapsed().as_millis() as u64;
+        let secs = ms / 1000;
+        let requests = usage.len();
         let cost = format!(
-            "{} requests · {runs} runs · {} in · {} out · {}:{:02}",
-            usage.len(),
+            "{requests} requests · {runs} runs · {} in · {} out · {}:{:02}",
             ui::tokens(prompt),
             ui::tokens(out),
             secs / 60,
@@ -279,7 +357,13 @@ impl Agent {
         );
         rows.push(("cost", cost));
         ui::report(&rows, verdict, !changed || checked);
-        !changed || checked
+        let changes: Vec<&str> = changes.lines().filter(|l| *l != "none").collect();
+        self.session.push(json!({"report": {
+            "verdict": verdict, "changed": changed, "checked": checked, "criteria": state.accepted,
+            "plan_steps": steps, "plan_done": done, "changes": changes, "requests": requests, "runs": runs,
+            "prompt": prompt, "cached": cached, "out": out, "ms": ms,
+        }}))?;
+        Ok(!changed || checked)
     }
 
     pub fn cost(&self) {
@@ -287,8 +371,7 @@ impl Agent {
         let (runs, rejected) = runs.fold((0, 0), |(n, r), e| (n + 1, r + usize::from(e["meta"]["rejected"] == true)));
         let (mut requests, mut tokens) = (0, [0; 3]);
         for u in self.session.entries.iter().map(|e| &e["meta"]["usage"]).filter(|u| u.is_object()) {
-            let cached = u["prompt_tokens_details"]["cached_tokens"].as_u64();
-            let cached = cached.or(u["cached_tokens"].as_u64()).or(u["prompt_cache_hit_tokens"].as_u64());
+            let cached = ui::cached(u);
             for (sum, n) in
                 tokens.iter_mut().zip([u["prompt_tokens"].as_u64(), cached, u["completion_tokens"].as_u64()])
             {
@@ -359,10 +442,14 @@ fn finish(mut meta: Value) -> (String, Value) {
     (out, meta)
 }
 
-fn system_prompt(root: &Path, yolo: bool) -> String {
+fn system_prompt(root: &Path, yolo: bool, notes: Option<&str>) -> String {
     let mut prompt = include_str!("prompt.md").to_string();
     if !yolo {
         prompt += SANDBOX;
+    }
+    if let Some(notes) = notes.map(str::trim).filter(|n| !n.is_empty()) {
+        prompt += "\n\n## Notes for this model\n";
+        prompt += notes;
     }
     if let Ok(agents) = std::fs::read_to_string(root.join("AGENTS.md")) {
         prompt += "\n\n# Project instructions (AGENTS.md)\n\n";
@@ -383,6 +470,25 @@ fn system_prompt(root: &Path, yolo: bool) -> String {
     if !skills.is_empty() {
         prompt += "\n\n# Skills (open() one when the task needs it)\n";
         prompt += &skills.join("\n");
+    }
+    let files: Vec<String> = git(root, None, &["ls-files"]).unwrap_or_default().lines().map(String::from).collect();
+    if files.len() > FILES {
+        let mut dirs = std::collections::BTreeMap::new();
+        for file in &files {
+            let parts: Vec<&str> = file.splitn(3, '/').collect();
+            let key = if parts.len() == 3 { format!("{}/{}/", parts[0], parts[1]) } else { file.clone() };
+            *dirs.entry(key).or_insert(0) += 1;
+        }
+        prompt += &format!("\n\n# Repository at session start ({} tracked files; folders show counts)\n", files.len());
+        for (path, n) in dirs.iter().take(FILES) {
+            prompt += &if path.ends_with('/') { format!("{path} ({n} files)\n") } else { format!("{path}\n") };
+        }
+    } else if !files.is_empty() {
+        prompt += &format!("\n\n# Repository files at session start ({} tracked, size in bytes)\n", files.len());
+        for file in &files {
+            let size = std::fs::metadata(root.join(file)).map_or(0, |m| m.len());
+            prompt += &format!("{file} {size}\n");
+        }
     }
     prompt
 }

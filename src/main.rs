@@ -3,6 +3,7 @@ mod compact;
 mod llm;
 mod render;
 mod session;
+mod stats;
 mod ui;
 mod worker;
 
@@ -23,6 +24,8 @@ struct Cli {
     model: Option<String>,
     #[arg(long, help = "No sandbox: network on, writes anywhere")]
     yolo: bool,
+    #[arg(long, help = "Compare model settings across all sessions: outcomes, waste and cost per turn")]
+    stats: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -32,6 +35,8 @@ pub struct Config {
     pub base_url: Option<String>,
     pub check: Option<String>,
     pub fmt: Option<String>,
+    #[serde(default)]
+    pub models: std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
 }
 
 fn load(path: &Path) -> Result<Config> {
@@ -44,25 +49,30 @@ fn load(path: &Path) -> Result<Config> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let home = PathBuf::from(std::env::var("HOME")?);
+    if cli.stats {
+        return stats::print(&home);
+    }
     let top = std::process::Command::new("git").args(["rev-parse", "--show-toplevel"]).output()?;
     if !top.status.success() {
         bail!("air works inside a git repository (git is the undo)");
     }
     let root = PathBuf::from(String::from_utf8(top.stdout)?.trim()).canonicalize()?;
-    let home = PathBuf::from(std::env::var("HOME")?);
     let user = load(&home.join(".config/air/config.toml"))?;
     let repo = load(&root.join("air.toml"))?;
-    if repo.model.is_some() || repo.base_url.is_some() {
-        eprintln!("air.toml: model and base_url are ignored; set them in ~/.config/air/config.toml");
+    if repo.model.is_some() || repo.base_url.is_some() || !repo.models.is_empty() {
+        eprintln!("air.toml: model, base_url and models are ignored; set them in ~/.config/air/config.toml");
     }
     let config = Config {
         model: cli.model.or(user.model),
         base_url: user.base_url,
         check: repo.check.or(user.check),
         fmt: repo.fmt.or(user.fmt),
+        models: user.models,
     };
     let mut agent = agent::Agent::new(&root, &home, config, cli.resume, cli.yolo)?;
     if let Some(task) = cli.task {
+        eprintln!("[session {}]", agent.path().display());
         let verified = agent.run(&task).await?;
         std::process::exit(if verified { 0 } else { 1 });
     }

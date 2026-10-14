@@ -28,14 +28,17 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
         range.clone().filter(|&i| role(i) == "user" && entries[i]["meta"]["host"].is_null()).collect();
     let recent = &users[users.len().saturating_sub(3)..];
 
-    let mut dialogue = vec![];
-    for &u in recent {
+    let (mut dialogue, mut used) = (vec![], 0);
+    for (n, &u) in recent.iter().enumerate() {
+        let budget = if n + 1 == recent.len() { 3 * EXCHANGE - used } else { EXCHANGE };
         let a = (1..u).rev().take_while(|&i| role(i) != "user").find(|&i| role(i) == "assistant" && said(i));
         let reply = a.map(|a| quote(text(a)));
         let room = reply.as_ref().map_or(EXCHANGE, |r| (EXCHANGE / 2).max(EXCHANGE.saturating_sub(r.len())));
         let user = excerpt(&quote(text(u)), room);
+        used += user.len();
         if let (Some(a), Some(reply)) = (a, reply) {
-            let reply = excerpt(&reply, EXCHANGE - user.len());
+            let reply = excerpt(&reply, budget - user.len());
+            used += reply.len();
             dialogue.push(format!("#{a} assistant (historical, not a verified outcome):\n{reply}"));
         }
         dialogue.push(format!("#{u} user:\n{user}"));
@@ -49,6 +52,25 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
     }
     let requests: Vec<String> =
         users[..users.len() - recent.len()].iter().map(|&i| format!("#{i} {}", line(text(i), 160))).collect();
+    let reported = entries.iter().any(|e| e["report"].is_object());
+    let outcomes: Vec<String> = users
+        .iter()
+        .filter(|_| reported)
+        .filter_map(|&u| {
+            let next = (u + 1..entries.len()).find(|&i| role(i) == "user" && entries[i]["meta"]["host"].is_null());
+            let end = next.unwrap_or(entries.len());
+            let report = entries[u..end].iter().rev().find(|e| e["report"].is_object()).map(|e| &e["report"]);
+            if report.is_none() && next.is_none() {
+                return None;
+            }
+            let verdict = report.map_or("no verdict".to_string(), |r| {
+                let changed = r["changes"].as_array().map_or(0, Vec::len);
+                let verdict = r["verdict"].as_str().unwrap_or("?");
+                if changed > 0 { format!("{verdict}, {changed} files changed") } else { verdict.to_string() }
+            });
+            Some(format!("#{u} {} → {verdict}", line(text(u), 80)))
+        })
+        .collect();
 
     let (mut criteria, mut carry) = (vec![], vec![]);
     let mut files: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
@@ -148,6 +170,7 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
         ("Accepted criteria", criteria, 2_048),
         ("Carry forward", carry, 3_072),
         ("Earlier requests", requests, 3_072),
+        ("Turn outcomes (host verdicts)", outcomes, 1_536),
         ("Files", files, 4_096),
         ("Unresolved failures", failures.into_iter().map(|(_, l)| l).collect(), 3_072),
         ("Status", status, 1_536),

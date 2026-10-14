@@ -1,11 +1,11 @@
-import contextlib, difflib, inspect, json, linecache, os, re, shlex, signal, subprocess, sys, tempfile, traceback
+import ast, contextlib, difflib, importlib.util, inspect, json, linecache, os, re, shlex, signal, subprocess, sys, tempfile, traceback
 
 ROOT = os.getcwd()
 sys.path.append(ROOT)
 CHECK = os.environ.pop("AIR_CHECK", "")
 FMT = os.environ.pop("AIR_FMT", "")
 LOG = os.environ.pop("AIR_LOG", "")
-HALF = 4000
+HALF = 8000
 LIMIT = 8 << 20
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\r(?!\n)")
 
@@ -145,6 +145,14 @@ def sh(cmd, timeout=120):
     return out.rstrip("\n") + (f"\n[exit {code}]" if code else "")
 
 
+def show(path, start=1, end=None):
+    with open(os.path.join(ROOT, path), encoding="utf-8", errors="replace") as f:
+        lines = f.read().splitlines()
+    start, end = max(start, 1), min(end or len(lines), len(lines))
+    print(f"[{_rel(path)}: lines {start}-{end} of {len(lines)}]")
+    print("\n".join(f"{n}: {lines[n - 1]}" for n in range(start, end + 1)))
+
+
 def accept(criteria):
     _report["accepted"] = str(criteria)
 
@@ -197,11 +205,11 @@ def plan(steps):
 
 
 def done(step=None):
-    p = _report.get("plan") or _state.get("plan")
-    if not p:
-        raise ValueError("call plan([...]) first")
+    p = _report.get("plan") or _state.get("plan") or {"steps": [], "done": []}
     left = [i for i in range(1, len(p["steps"]) + 1) if i not in p["done"]]
-    n = step or (left[0] if left else 0)
+    n = step if isinstance(step, int) else (left[0] if left else None)
+    if n is None:
+        return None
     if not 1 <= n <= len(p["steps"]):
         raise ValueError(f"no step {n}; the plan has {len(p['steps'])}")
     _report["plan"] = {"steps": p["steps"], "done": sorted(set(p["done"]) | {n})}
@@ -227,9 +235,14 @@ def recall(n):
 def _hint(e, misuse):
     text = str(e)
     if isinstance(e, NameError) and re.search(r"'(read|files|grep|ls|cat)'", text):
-        return 'explore with plain Python: open(), re, pathlib and sh("git ls-files")'
+        return 'read files with show(path, start, end); explore with plain Python: open(), re, pathlib and sh("git ls-files")'
     if isinstance(e, SyntaxError) and sys.version_info < (3, 10) and (e.text or "").lstrip().startswith(("match ", "case ")):
         return f"the worker runs Python {sys.version_info[0]}.{sys.version_info[1]}: no match statements or X | Y types"
+    code = "".join(linecache.cache.get("<run>", (0, None, [], ""))[2])
+    calls = [code.count("\n", 0, m.start()) + 1 for m in re.finditer(r"(?<![\w.])(edit|write)\(", code)]
+    if isinstance(e, SyntaxError) and calls and (e.lineno or 0) >= calls[0] and ('"""' in code or "'''" in code):
+        return ("a raw triple-quoted string cannot end with a backslash or contain its own quotes: "
+                "switch to the other quote style (''' or \"\"\") or use a plain string with escapes")
     if misuse:
         name = text.split("(")[0]
         return f"signature: {name}{inspect.signature(G[name])}"
@@ -242,16 +255,33 @@ def _hint(e, misuse):
     return None
 
 
-G = {"__name__": "__main__", "_last": "", "sh": sh, "edit": edit, "write": write, "accept": accept, "carry": carry, "plan": plan, "done": done, "check": check, "recall": recall}
-HELPERS = tuple(f"{name}()" for name in G if not name.startswith("_"))
+TOOLS = {"sh": sh, "show": show,"edit": edit, "write": write, "accept": accept, "carry": carry, "plan": plan, "done": done, "check": check, "recall": recall}
+G = {"__name__": "__main__", "_last": "", **TOOLS}
+HELPERS = tuple(f"{name}()" for name in TOOLS)
+
+
+class _Helpers:
+    def find_spec(self, name, path=None, target=None):
+        if path is None and re.fullmatch(rf"({'|'.join(TOOLS)})(_\w*)?", name):
+            return importlib.util.spec_from_loader(name, self)
+        return None
+
+    def create_module(self, spec):
+        return TOOLS[spec.name.split("_")[0]]
+
+    def exec_module(self, module):
+        print(f"[import {module.__spec__.name}: air's helpers are built in; no import needed]")
 
 
 sh.sh = sys.modules["sh"] = sh
+sys.meta_path.append(_Helpers())
 signal.signal(signal.SIGINT, signal.SIG_IGN)
 for request in _inbox:
     request = json.loads(request)
     code, _state = request["code"], request.get("state") or {}
     _report.clear()
+    os.chdir(ROOT)
+    G.update(TOOLS)
     capture = tempfile.TemporaryFile()
     os.dup2(capture.fileno(), 1)
     os.dup2(capture.fileno(), 2)
@@ -260,7 +290,14 @@ for request in _inbox:
     signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
         linecache.cache["<run>"] = (len(code), None, code.splitlines(True), "<run>")
-        exec(compile(code, "<run>", "exec"), G)
+        tree = ast.parse(code, "<run>")
+        tail = tree.body.pop() if tree.body and isinstance(tree.body[-1], ast.Expr) else None
+        exec(compile(tree, "<run>", "exec"), G)
+        if tail:
+            value = eval(compile(ast.Expression(tail.value), "<run>", "eval"), G)
+            sys.stdout.flush()
+            if value is not None and not os.fstat(1).st_size:
+                print(value)
     except BaseException as e:
         failed = True
         tb = traceback.extract_tb(e.__traceback__)
@@ -272,6 +309,13 @@ for request in _inbox:
         hint = _hint(e, misuse)
         if hint:
             print(f"hint: {hint}")
+        applied = [f"{a['tool']} {a['path']}" for a in _report.get("actions", []) if a.get("ok") and a.get("path")]
+        if applied:
+            print(f"[applied before the error: {', '.join(applied)}; inspect before repeating them]")
+    shadowed = [name for name, tool in TOOLS.items() if G.get(name) is not tool]
+    if shadowed:
+        _report["shadowed"] = shadowed
+        print(f"[{', '.join(shadowed)}: air's helpers, restored before the next run]")
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     if _report.get("check") and _tree() != _checked:
         _report["check"] = False
@@ -282,6 +326,7 @@ for request in _inbox:
     text = ANSI.sub("", _read(capture).decode("utf-8", "replace"))
     capture.close()
     G["_last"] = text
+    _report["chars"] = len(text)
     if len(text) > 2 * HALF:
         text = f"{text[:HALF]}\n[… {len(text) - 2 * HALF} characters omitted; the full output is in _last]\n{text[-HALF:]}"
     _outbox.write(json.dumps(dict(_report, out=text or "(no output)", error=failed)) + "\n")

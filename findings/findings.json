@@ -1,0 +1,1168 @@
+{
+  "review": {
+    "repo": "/Users/adam2/projects/air",
+    "crate": "air 0.1.0 (edition 2024, rust-toolchain 1.99)",
+    "date": "2026-10-14",
+    "scope": {
+      "rust_loc": 1772,
+      "python_loc": 265,
+      "modules": [
+        "main.rs",
+        "agent.rs",
+        "llm.rs",
+        "compact.rs",
+        "session.rs",
+        "worker.rs",
+        "ui.rs",
+        "render.rs",
+        "worker.py",
+        "prompt.md"
+      ]
+    },
+    "verification": {
+      "cargo_check": "clean",
+      "cargo_clippy": "clean",
+      "tests": "none",
+      "ci": "none"
+    },
+    "scores": {
+      "token_safety": "8.5/10",
+      "production_readiness": "strong for single-user CLI; not hardened for hostile providers or shared use",
+      "deterministic_compaction": "best-in-class design",
+      "async_hygiene": "weak",
+      "code_mode_enforcement": "gated helpers with a sh() bypass hole",
+      "test_coverage": "zero"
+    }
+  },
+  "findings": [
+    {
+      "id": "C1",
+      "severity": "critical",
+      "areas": [
+        "code-mode",
+        "security",
+        "compaction-integrity"
+      ],
+      "files": [
+        "src/worker.py:112",
+        "src/worker.py:62-84",
+        "src/compact.rs:56-90"
+      ],
+      "title": "sh() bypasses the write gate and the action ledger",
+      "detail": "edit()/write() enforce accept(), path validation, and action recording; sh() enforces nothing. Changes made via sh() are invisible to meta.actions, so the deterministic compaction summary (Files/Status/Unresolved failures) diverges from disk truth. Destructive commands inside the repo require zero consent; there is no read-only mode or interactive approval.",
+      "fix": "Interpose builtins.open for write modes in the exec globals (accept() + ledger); or record sh() invocations with a before/after tree diff; at minimum emit a warning into run output when the tree changed."
+    },
+    {
+      "id": "C2",
+      "severity": "high",
+      "areas": [
+        "performance",
+        "token-economy"
+      ],
+      "files": [
+        "src/session.rs:88-127",
+        "src/session.rs:102",
+        "src/llm.rs:66-80",
+        "src/llm.rs:227"
+      ],
+      "title": "O(session) clone and re-serialization of the full context on every request",
+      "detail": "Per request: deep Value clone of every retained message + system prompt, full body serialization, plus body.to_owned() per retry attempt. ~400KB copied 3x per request at COMPACT_AT=100k, up to 200 requests/turn.",
+      "fix": "Cache serialized wire form per entry at push() time (append-only session); build bodies by concatenating Arc<str> prefix + delta; bytes::Bytes for O(1) retry clones (Body::from(bytes.clone()))."
+    },
+    {
+      "id": "C3",
+      "severity": "high",
+      "areas": [
+        "async",
+        "performance"
+      ],
+      "files": [
+        "src/agent.rs:360-368",
+        "src/agent.rs:225-233",
+        "src/ui.rs:31-34",
+        "src/session.rs:68-72",
+        "src/main.rs:43"
+      ],
+      "title": "Blocking subprocess/file I/O inside the current_thread tokio runtime",
+      "detail": "std::process git calls from async turn(); fingerprint() stats every file sequentially (O(files)) multiple times per turn; ui::size() forks stty size every second from the ticker task; Session::push does unbuffered blocking writes per entry. A long stat/git loop stalls SSE buffering and can block the worker's 64KB stdout pipe mid-run.",
+      "fix": "spawn_blocking or tokio::process for git/stat work; TIOCGWINSZ ioctl instead of stty; BufWriter on the session file; prefer write-tree SHA over per-file metadata loop."
+    },
+    {
+      "id": "C4",
+      "severity": "high",
+      "areas": [
+        "resilience",
+        "state-management"
+      ],
+      "files": [
+        "src/worker.rs:70-90",
+        "src/worker.rs:52-60",
+        "src/worker.py:97-98",
+        "src/agent.rs:66-77",
+        "src/agent.rs:107"
+      ],
+      "title": "Platform-divergent interrupt semantics plus non-atomic edit() writes",
+      "detail": "bwrap --new-session (setsid) means the worker never receives terminal SIGINT on Linux; macOS sandbox-exec path does. Ctrl-C on Linux waits 3s settle() then SIGKILLs mid-execution; edit() opens with 'w' (truncate) then writes — kill between the two leaves a torn/empty file. pending holds only the last call id, so parallel-call outcomes are misattributed on interrupt.",
+      "fix": "Forward SIGINT to the worker process group on interrupt; lengthen interactive settle window; temp-file + os.replace() in edit(); track a Vec of open call ids and synthesize results for all unsettled ids."
+    },
+    {
+      "id": "C5",
+      "severity": "high",
+      "areas": [
+        "compaction",
+        "determinism",
+        "resilience"
+      ],
+      "files": [
+        "src/agent.rs:91-100",
+        "src/agent.rs:14",
+        "src/session.rs:78-81",
+        "src/llm.rs:15-16"
+      ],
+      "title": "Compaction trigger: one-request lag, hard abort on second overflow, silent when usage unreported, error-text sniffing",
+      "detail": "last_prompt_tokens() is a trailing measure, so the request that crosses the window is sent anyway; compact_at adaptation uses the last successful size (underestimates needed reduction); !overflowed guard aborts the turn on a second overflow; providers that ignore include_usage make auto-compaction silently never fire; overflow() matches six English substrings instead of structured error codes; COMPACT_AT is hard-coded.",
+      "fix": "Overflow retry budget of 2; local pending-size estimate (len()/4) before sending; compact_at/context_window config keys; warn once when usage is missing; structured error-code classification (see M1)."
+    },
+    {
+      "id": "C6",
+      "severity": "medium",
+      "areas": [
+        "token-economy",
+        "ux-contract"
+      ],
+      "files": [
+        "src/worker.py:256-259",
+        "src/worker.py:181-199",
+        "src/agent.rs:172-177"
+      ],
+      "title": "_last recovery contract is false after worker restarts",
+      "detail": "Truncated output claims 'the full output is in _last', but _last dies with the worker process (timeout, crash, interrupt-kill). recall(n) then returns only the truncated text while the summary's closing line promises exact recovery.",
+      "fix": "Note the restart caveat in the truncation text, or persist oversize outputs to a sidecar file next to the session log."
+    },
+    {
+      "id": "C7",
+      "severity": "high",
+      "areas": [
+        "production-readiness"
+      ],
+      "files": [
+        "repo-wide"
+      ],
+      "title": "Zero tests, zero CI",
+      "detail": "compact::cut/summary, Session::messages/state, answer_missing, llm::overflow, block/clip/tail boundary logic — all pure, subtle, and untested. Regressions would surface only as provider-side protocol errors in the field.",
+      "fix": "Unit tests for cut() boundary invariant (never between assistant and its tool results), summary() byte-determinism, messages() pairing repair, clip/tail char boundaries, overflow() classification, worker gate behavior; minimal CI (fmt + clippy + cargo test)."
+    },
+    {
+      "id": "M1",
+      "severity": "medium",
+      "areas": [
+        "resilience",
+        "token-economy"
+      ],
+      "files": [
+        "src/llm.rs:37-40",
+        "src/llm.rs:15-16",
+        "src/llm.rs:70-77"
+      ],
+      "title": "Overflow classification needs structured parsing; deterministic truncation is retried wastefully",
+      "detail": "overflow() string-sniffs English error text; providers with structured error codes or different phrasing are classified fatal. Separately, a tool call cut off by the output limit (finish_reason=length) is indistinguishable from a broken stream and gets retried 3x at full prompt cost, though truncation is deterministic.",
+      "fix": "Parse error JSON and check error.code/error.type first (context_length_exceeded etc.), keep substring fallback; treat finish_reason=='length' as non-retryable and fall through to the graceful 'run() came without code — resend in smaller steps' path (agent.rs:146-150)."
+    },
+    {
+      "id": "M2",
+      "severity": "medium",
+      "areas": [
+        "token-economy",
+        "caching"
+      ],
+      "files": [
+        "src/session.rs:104-108"
+      ],
+      "title": "Prompt-cache economics measured but not engineered; reasoning_content interop risk",
+      "detail": "Good: system prompt built once, append-only stable prefix, cache hit-rate displayed. Gaps: stripping reasoning_content for pre-task entries causes one full prefix cache-miss per new task; resubmitting reasoning_content at all is a provider interop risk (DeepSeek forbids it; strict servers may 4xx); no explicit breakpoints documented.",
+      "fix": "Strip reasoning only at compaction time or behind a config flag; document the caching model and the per-task/per-compaction cache-miss cost as policy."
+    },
+    {
+      "id": "M3",
+      "severity": "medium",
+      "areas": [
+        "durability",
+        "memory"
+      ],
+      "files": [
+        "src/session.rs:35-66"
+      ],
+      "title": "Session::resume fragility and memory doubling",
+      "detail": "Whole-file read_to_string plus full re-parse holds raw text and Vec<Value> simultaneously; a single corrupt interior line aborts resume with a bare serde error and no line number (torn-tail repair covers only the last line).",
+      "fix": "Parse with enumerate + context, skip-and-warn interior bad lines instead of failing the whole session; drop text after parsing."
+    },
+    {
+      "id": "M4",
+      "severity": "low",
+      "areas": [
+        "performance"
+      ],
+      "files": [
+        "src/ui.rs:144-176",
+        "src/llm.rs:126-131"
+      ],
+      "title": "ui::thinking renders unthrottled per reasoning delta",
+      "detail": "thinking() runs on every reasoning chunk while the answer is empty (mutex + print + flush per chunk); writing() already has an 80ms throttle but thinking() does not.",
+      "fix": "Apply the same ~80-150ms throttle to thinking()."
+    },
+    {
+      "id": "M5",
+      "severity": "medium",
+      "areas": [
+        "compaction",
+        "determinism"
+      ],
+      "files": [
+        "src/compact.rs:118-130",
+        "src/compact.rs:149"
+      ],
+      "title": "block() quadratic fallback; MAX_BYTES clip can amputate the recall contract",
+      "detail": "block() rebuilds the joined block for each candidate keep from n to 0 (O(n^2) joins); the final clip(&out, MAX_BYTES) can cut off the closing '[recall(n) returns entry #n exactly]' instruction when sections exceed 32KB with multibyte content — the line that makes truncation safe.",
+      "fix": "Binary-search keep (monotone length) or per-line byte budget; emit the closing line after clipping, or clip per-section."
+    },
+    {
+      "id": "M6",
+      "severity": "medium",
+      "areas": [
+        "protocol",
+        "determinism"
+      ],
+      "files": [
+        "src/llm.rs:66-80"
+      ],
+      "title": "Request body missing parallel_tool_calls:false, max_tokens, seed",
+      "detail": "Calls are executed sequentially (agent.rs:107-113) but the provider may emit parallel calls, forcing the fragile index-inference heuristic in delta reassembly (llm.rs:133-152); no max_tokens ceiling for runaway streams; no seed despite temperature 0.0 (retries re-roll completions).",
+      "fix": "Add parallel_tool_calls:false, a configurable max_tokens ceiling, and an optional seed to the request body."
+    },
+    {
+      "id": "M7",
+      "severity": "medium",
+      "areas": [
+        "token-economy"
+      ],
+      "files": [
+        "src/agent.rs:329-351"
+      ],
+      "title": "AGENTS.md injected uncapped into every request",
+      "detail": "A 50KB AGENTS.md burns ~12k tokens of context window on every request and lowers the effective overflow trigger; only cached cost is mitigated, window consumption is not.",
+      "fix": "Cap it (e.g. head 16KB + visible note) or load on demand like skills (skills progressive disclosure is already exemplary)."
+    },
+    {
+      "id": "L1",
+      "severity": "low",
+      "areas": [
+        "performance"
+      ],
+      "files": [
+        "src/llm.rs:108-110"
+      ],
+      "title": "SSE line scanning is O(n^2); UTF-8 validated twice",
+      "detail": "buf.drain(..=end).collect() shifts remaining bytes per line; from_utf8_lossy then serde_json::from_str re-validates.",
+      "fix": "Read cursor + memchr::memchr, drain once per chunk; serde_json::from_slice on raw bytes."
+    },
+    {
+      "id": "L2",
+      "severity": "low",
+      "areas": [
+        "error-handling"
+      ],
+      "files": [
+        "src/llm.rs:57-61"
+      ],
+      "title": ".expect() panic in Llm::new",
+      "detail": "Client::builder().build().expect() panics on a user-configurable path; a panic in a CLI mid-boot is avoidable.",
+      "fix": "Return Result<Self>; Agent::new already propagates Results."
+    },
+    {
+      "id": "L3",
+      "severity": "low",
+      "areas": [
+        "performance"
+      ],
+      "files": [
+        "src/session.rs:129-149",
+        "src/agent.rs:166-167"
+      ],
+      "title": "state() is O(n) per run_code — O(n^2) per turn",
+      "detail": "State changes only at three known entry shapes; recomputing by full scan on every tool call compounds over long sessions.",
+      "fix": "Maintain State incrementally inside Session::push()."
+    },
+    {
+      "id": "L4",
+      "severity": "low",
+      "areas": [
+        "robustness"
+      ],
+      "files": [
+        "src/ui.rs"
+      ],
+      "title": "UI static-mutex poisoning cascades",
+      "detail": "BAR/LIVE/RUNNING .lock().unwrap() — one panic in a UI callback poisons the mutexes and every later UI call panics for the process lifetime.",
+      "fix": "parking_lot::Mutex or .lock().unwrap_or_else(|e| e.into_inner()) at the static sites."
+    },
+    {
+      "id": "L5",
+      "severity": "low",
+      "areas": [
+        "performance"
+      ],
+      "files": [
+        "src/render.rs:14",
+        "src/render.rs:132-139"
+      ],
+      "title": "Streaming-render allocations",
+      "detail": "printable() allocates a fresh String per SSE delta chunk (control chars are rare); visible() recomputes inline() plus four String::replace allocations twice per table cell.",
+      "fix": "Return Cow<str> from printable when clean; cache per-cell visible widths."
+    },
+    {
+      "id": "L6",
+      "severity": "low",
+      "areas": [
+        "performance"
+      ],
+      "files": [
+        "src/worker.py:181-199"
+      ],
+      "title": "recall() rescans the log from line 0 every call",
+      "detail": "O(n) lines read and discarded per recall, including huge tool outputs.",
+      "fix": "Build a line-offset index once per worker start (or byte-offset map)."
+    },
+    {
+      "id": "L7",
+      "severity": "low",
+      "areas": [
+        "performance"
+      ],
+      "files": [
+        "src/agent.rs:354"
+      ],
+      "title": "tools() Value rebuilt per request",
+      "detail": "Trivial but needless allocation on every request.",
+      "fix": "Hoist to a LazyLock static."
+    },
+    {
+      "id": "L8",
+      "severity": "low",
+      "areas": [
+        "durability"
+      ],
+      "files": [
+        "src/session.rs:68-72"
+      ],
+      "title": "Session::push unbuffered, no fsync",
+      "detail": "One write syscall per entry; a hard crash loses the un-flushed tail. Torn-line repair on resume makes this an acceptable, deliberate tradeoff.",
+      "fix": "BufWriter + flush at turn boundaries; document the accepted durability model."
+    },
+    {
+      "id": "L9",
+      "severity": "low",
+      "areas": [
+        "operations",
+        "security"
+      ],
+      "files": [
+        "src/worker.rs:47-49",
+        "src/worker.rs:70-90"
+      ],
+      "title": "sandbox-exec deprecation (macOS) and sandbox network-deny friction for check",
+      "detail": "Apple deprecates sandbox-exec and its SBPL semantics drift across OS versions; network-deny-except-localhost makes a check needing cargo fetch/pip install fail confusingly in non-yolo mode.",
+      "fix": "Document the security model (sandbox-is-the-boundary, yolo semantics, deprecation risk) and the check-time network friction; plan a fallback sandboxing story for macOS."
+    },
+    {
+      "id": "L10",
+      "severity": "low",
+      "areas": [
+        "state-management"
+      ],
+      "files": [
+        "src/agent.rs:107",
+        "src/agent.rs:66-73"
+      ],
+      "title": "pending holds only the last call id — parallel-call outcomes misattributed on interrupt",
+      "detail": "self.pending is overwritten per call in the loop; on interrupt only the last call gets a settle reply recorded, earlier calls' results are unlogged (answer_missing fills the wire but the log loses their actions).",
+      "fix": "Track a Vec of open call ids; on interrupt synthesize results for all unsettled ids."
+    },
+    {
+      "id": "F1",
+      "severity": "high",
+      "areas": [
+        "cancellation-safety",
+        "silent-failure",
+        "protocol"
+      ],
+      "files": [
+        "src/worker.py:227-228",
+        "src/worker.py:234",
+        "src/worker.py:256"
+      ],
+      "title": "Worker stdin framing has no failure isolation; torn/malformed line kills the worker silently",
+      "detail": "json.loads(request) sits outside the per-run try/except. A torn request line (air interrupted mid-write_all via select! cancellation) or any malformed line kills the worker process. The death is fully silent: sys.stderr was rebound to fd 1 during the previous request's capture dance and fd 1 is dup2'd to /dev/null at end-of-run, so the fatal traceback goes to /dev/null. All worker variables and _last are lost; the agent reports only 'the worker was restarted'.",
+      "evidence": "Live probe: torn line + EOF → exit 1, stderr empty; garbage line mid-session → exit 1, stderr empty.",
+      "fix": "Wrap json.loads in try/except and skip (or reply-with-error) instead of dying; restore sys.stderr = sys.__stderr__ after each run; forward SIGINT to the worker process group on interrupt instead of relying on terminal signal delivery (bwrap --new-session detaches it)."
+    },
+    {
+      "id": "F2",
+      "severity": "high",
+      "areas": [
+        "state-integrity",
+        "silent-failure"
+      ],
+      "files": [
+        "src/agent.rs:225-233",
+        "src/agent.rs:215-223",
+        "src/agent.rs:219",
+        "src/agent.rs:360-368"
+      ],
+      "title": "Change detection is mtime+len based with silent git failure defaults — can print false verdicts",
+      "detail": "fingerprint() hashes file names + (len, mtime) via DefaultHasher: mtime churn (touch, stash pop, byte-identical formatter rewrites) flips changed=true → spurious check-gate runs; a runtime git failure makes both fingerprints hash an empty file list → changed=false → report prints NO CHANGES and exits 0 while files were modified. snapshot()'s ignored fs::copy failure silently drops the undo baseline; git() returns Option and every call site collapses None to a default.",
+      "evidence": "Code trace: git() → Option<String>, all call sites unwrap_or_default().",
+      "fix": "Replace fingerprint() with tree_id() (git add -A + write-tree SHA against the private index — content-addressed, already computed by snapshot()); bail! loudly when git fails rather than defaulting; deletes the O(files) stat loop too."
+    },
+    {
+      "id": "F3",
+      "severity": "high",
+      "areas": [
+        "performance",
+        "memory",
+        "token-economy"
+      ],
+      "files": [
+        "src/session.rs:69",
+        "src/session.rs:102",
+        "src/llm.rs:66-80",
+        "src/llm.rs:227"
+      ],
+      "title": "Five redundant serializations/copies of every large payload per request cycle; compaction is a full rebuild",
+      "detail": "Per request cycle: (1) Value construction, (2) format!(\"{entry}\") serialization at session push, (3) entry.clone() per message per request, (4) json body to_string(), (5) body.to_owned() per retry attempt. A 100KB code payload resident across 150 requests generates ~450 redundant copies (~45MB allocator churn) on a single-threaded runtime where every memcpy is latency. Compaction itself is a full-history rebuild (to_string() per entry in cut(), three passes in summary()) with no incremental/append-only block strategy, despite the session being append-only.",
+      "evidence": "Code trace with per-stage quantification.",
+      "fix": "Append-only wire cache: serialize each entry once at push() into Arc<str>, build request bodies by concatenating the cached prefix + delta; bytes::Bytes-backed body for O(1) retry clones; incremental State cache in push()."
+    },
+    {
+      "id": "F4",
+      "severity": "medium-high",
+      "areas": [
+        "token-accounting",
+        "compaction"
+      ],
+      "files": [
+        "src/compact.rs:10",
+        "src/agent.rs:82",
+        "src/agent.rs:91",
+        "src/session.rs:78-81"
+      ],
+      "title": "Token-estimation drift: len()/4 heuristic, uncounted summary, one-request trigger lag (~+20k true tokens)",
+      "detail": "cut() sizes the retained tail as to_string().len()/4 including session-only meta but excluding the 32KB summary marker itself; code tokenizes at ~3.1-3.5 chars/token so the ~80KB tail budget is really ~23-26k wire tokens (15-30% overshoot); the trigger compares against last_prompt_tokens() — the last completed request's count — so the request that crosses the window is always sent first. Stacked margins put actual context ~+20k tokens above compact_at before compaction lands; users pinning compact_at to the true window get deterministic overflow. The system receives true usage every request but never calibrates with it.",
+      "evidence": "Margin math from compact.rs:10, agent.rs:82,91, session.rs:78-81.",
+      "fix": "Self-calibrating TokenMeter (EMA of wire_chars / reported prompt_tokens) + O(1) incremental wire_bytes accounting; project the pending request size before sending (leading trigger) instead of comparing the last reported count (trailing)."
+    },
+    {
+      "id": "F5",
+      "severity": "medium",
+      "areas": [
+        "session-recovery",
+        "durability"
+      ],
+      "files": [
+        "src/session.rs:43-45",
+        "src/main.rs:36-40"
+      ],
+      "title": "Session recovery brick-risks: one unreadable file aborts all resumes; lexicographic sort picks wrong session; config errors swallowed",
+      "detail": "(a) File::open(&path)? inside the resume scan loop — one unreadable file in ~/.air/sessions (bad perms, a directory named *.jsonl, dangling symlink) aborts --resume for every repo; (b) paths.sort() is lexicographic — same-second sessions with pids 99 vs 100 resume the older one ('-99' > '-100' as bytes); (c) load() maps any config read error to Config::default() → 'no model' mystery failure with no hint the config was unreadable.",
+      "evidence": "Live probe: sorted(['1770000000-100.jsonl','1770000000-99.jsonl'])[-1] → '1770000000-99.jsonl'.",
+      "fix": "Per-file fault isolation (continue on open error), numeric sort_by_key on the embedded timestamp, and with_context on config read failures instead of silent defaults."
+    },
+    {
+      "id": "F6",
+      "severity": "medium",
+      "areas": [
+        "llm-streaming",
+        "token-accounting",
+        "resilience"
+      ],
+      "files": [
+        "src/llm.rs:107",
+        "src/llm.rs:187"
+      ],
+      "title": "Residual SSE buffer discarded at stream end — silent usage loss and spurious full-prompt retries",
+      "detail": "The SSE loop only processes complete newline-terminated lines and discards the residual buffer at stream end. A final usage line without trailing newline → silent usage loss → compaction trigger blind for that request. A final finish_reason line without newline → finished stays false → 'stream ended before the model finished' → 3 full-prompt retries of a deterministic condition → turn failure. Providers that never send finish_reason and omit [DONE] hit this every turn.",
+      "evidence": "Code trace of the 'read loop + residual buf in llm.rs stream().",
+      "fix": "After the read loop, drain the residual buffer through the same per-line handler (extract handler into a closure shared by loop body and tail-drain)."
+    },
+    {
+      "id": "F7",
+      "severity": "medium",
+      "areas": [
+        "loop-economics",
+        "token-economy"
+      ],
+      "files": [
+        "src/agent.rs:13",
+        "src/agent.rs:111"
+      ],
+      "title": "No per-turn token budget and no repeated-failure circuit breaker",
+      "detail": "MAX_REQUESTS=200 is the only per-turn bound — worst case ≈ 200 × ~100k prompt tokens billed. A model retrying the identical failing edit() burns full-context requests until the cap; the worker's rejected counter observes the loop but nothing acts on it.",
+      "evidence": "Code trace of the turn loop.",
+      "fix": "FailureBreaker: hash failed-action signatures; after 3 identical consecutive strikes append a forced strategy-change message to the tool result; add a cumulative per-turn prompt-token budget that ends the turn with a diagnostic."
+    },
+    {
+      "id": "F8",
+      "severity": "low-medium",
+      "areas": [
+        "memory-growth"
+      ],
+      "files": [
+        "src/session.rs:19"
+      ],
+      "title": "Entire session log resident in RAM forever; uncapped tool-call args and reasoning compound growth",
+      "detail": "entries is an append-only Vec<Value> required for recall(n)/state() — never evicted or spilled. Tool outputs are capped at 8KB, but tool-call ARGUMENTS (code payloads up to model max) and current-task reasoning_content are uncapped, so long-lived REPL sessions grow unboundedly in RAM (multi-MB to tens of MB); resume additionally holds raw text + parsed entries simultaneously during parse.",
+      "evidence": "Grep-proven: no remove/truncate/drain/retain on entries.",
+      "fix": "Cap tool-call argument size at the worker boundary; consider spilling pre-keep entries to disk (they remain readable for recall) or a windowed memory regime."
+    },
+    {
+      "id": "F9",
+      "severity": "low",
+      "areas": [
+        "portability",
+        "durability"
+      ],
+      "files": [
+        "src/session.rs:29",
+        "src/session.rs:54-57"
+      ],
+      "title": "Durability nits: flock fails on lockless FS; torn-line repair covers only the last line; no fsync",
+      "detail": "try_lock (flock) fails outright on NFS/lockless filesystems — session creation impossible; the set_len repair only handles a torn LAST line, so mid-file corruption aborts resume entirely; no fsync anywhere — an accepted tradeoff given append-only design, but undocumented.",
+      "evidence": "Code trace of Session::create/resume.",
+      "fix": "Document the durability model; handle flock failure with a clear diagnostic; make interior corruption skip-and-warn instead of aborting the whole resume."
+    },
+    {
+      "id": "F10",
+      "severity": "cleared",
+      "areas": [
+        "determinism",
+        "compaction",
+        "concurrency",
+        "cancellation"
+      ],
+      "files": [
+        "src/compact.rs",
+        "src/ui.rs",
+        "src/agent.rs",
+        "src/session.rs"
+      ],
+      "title": "Cleared after forensic investigation: compaction determinism, boundary splitting, lock discipline, cancellation, append-only stability",
+      "detail": "(1) compact.rs has zero nondeterminism sources (no SystemTime/Instant/rand/uuid/HashMap; BTreeMap throughout; serde_json key order stable) — summary()/cut() are pure functions of the log, byte-identical across restarts and replays. (2) Compaction triggers only at request boundaries (three call sites, none reachable during streaming); entries are atomic units; clip/tail are char-boundary-safe; no malformed-JSON or mid-thought truncation exists. (3) No lock is held across an await; single-lock-at-a-time discipline in ui.rs; no Arc/shared mutable agent state across threads — deadlock structurally impossible. (4) Dropping the LLM future mid-stream cancels cleanly with no partial session commits. (5) entries is append-only (grep-proven) so #n anchors, began, and keep indices are stable across compactions and resumes. (6) The compact marker is one atomic append; losing it loses nothing — summaries are derived state rebuilt deterministically from the log (checkpoint-is-derived, log-is-truth). Caveats carried forward: MAX_BYTES tail-clip can amputate the recall line (first-pass M5); user-direction excerpts are head-only; meta.actions truthfulness is sh()-dependent (first-pass C1).",
+      "evidence": "Grep evidence (no mutation ops on entries; no nondeterminism sources in compact.rs) + full trigger-path trace + live probes.",
+      "fix": "None required; pin the verified invariants with the tests in section 4 of 05-forensic-audit.md so refactors cannot silently regress them."
+    },
+    {
+      "id": "S0",
+      "severity": "critical",
+      "areas": [
+        "sandbox-escape",
+        "host-rce",
+        "git"
+      ],
+      "files": [
+        "src/agent.rs:215-223",
+        "src/agent.rs:370-382"
+      ],
+      "title": "Host-side git filter escape: shipped .gitattributes + .git/config execute clean filters unsandboxed",
+      "detail": "snapshot() runs git add -A and changes() runs git diff --numstat on the untrusted repo OUTSIDE the sandbox (the sandbox only wraps the worker and check). A working copy shipped with .git/config plus .gitattributes defining filter.*.clean executes attacker commands with full user privileges on the first turn of any air session; diff --numstat also executes the clean filter on the worktree side. Plumbing commands (update-index --add --remove, write-tree) are filter-free, probe-verified. Precondition: .git/config ships with the tree (zip/copy/restore; a plain git clone regenerates config). In --yolo there is no precondition: an injected sh(git config filter.x.clean ...) installs the filter and the next snapshot executes it host-side.",
+      "evidence": "Live probe with a weaponized fixture repo: CLEAN FILTER EXECUTED ON HOST, UNSANDBOXED via git add -A; executed again via git diff --numstat; update-index and write-tree filter-free.",
+      "fix": "Replace porcelain with plumbing (update-index --add --remove + write-tree for snapshots; diff-index against a refreshed private index for changes), add a startup tripwire refusing repos whose .gitattributes/.git/config define filter or diff drivers, and run host-side git under the same OS sandbox as the worker."
+    },
+    {
+      "id": "S1",
+      "severity": "high",
+      "areas": [
+        "prompt-injection",
+        "compaction-integrity"
+      ],
+      "files": [
+        "src/compact.rs:21-149",
+        "src/agent.rs:17-18",
+        "src/worker.py:149-162"
+      ],
+      "title": "Indirect prompt injection has no defense-in-depth and is laundered into permanent context by compaction",
+      "detail": "Untrusted file/build/git content flows into context unfenced and can drive the ungated sh(). Persistence vectors: the failing-check tail (1536 bytes) copied verbatim into the summary Failing-check-output section; failure error lines; model-authored carry() notes (up to 16, survive every compaction until cleared); accept() criteria. The check gate (GATE + tail of check output, 1500) injects raw build output into a user-role message. No content fencing anywhere; user-direction excerpts are head-only, so late-file injected instructions are the ones most likely to persist.",
+      "evidence": "Code trace of summary() section sources and the gate path.",
+      "fix": "Fence every summary section and gate message derived from tool/build output with explicit UNTRUSTED delimiters; teach the system prompt that fenced text is data, never instructions; consider human confirmation for sh() commands first seen in a turn."
+    },
+    {
+      "id": "S2",
+      "severity": "high",
+      "areas": [
+        "secrets",
+        "exfiltration",
+        "sandbox"
+      ],
+      "files": [
+        "src/worker.rs:17-18",
+        "src/worker.rs:47-49"
+      ],
+      "title": "Secret deny-list gaps; the LLM request itself is the exfiltration channel",
+      "detail": "The SECRETS deny-list omits ~/.git-credentials, ~/.npmrc, ~/.pypirc, ~/.cargo/credentials, ~/.terraform.d, ~/.m2, ~/.gradle, ~/.oci and ~/.subversion/auth — all readable inside the non-yolo sandbox (probe-proven with the production-equivalent canonicalized profile; listed paths like ~/.ssh are correctly denied). Anything read enters the tool result and is transmitted to the provider endpoint on the next request — network-deny gives false comfort because the sanctioned LLM channel is the exfil path. Secrets also persist in the 0600 session log. Non-canonical subpaths in the profile are silently inert, making the existing canonicalize() calls load-bearing.",
+      "evidence": "Live probe: listed ~/.ssh/id_rsa DENIED; five unlisted credential files READ-OK; outbound HTTPS BLOCKED; .git write DENIED; v1 probe with non-canonical paths allowed listed-secret reads.",
+      "fix": "Extend the deny-list with the probed gaps; preferably invert to deny file-read-data on the whole home with an explicit allow-list; treat secret-shaped content in tool output as a redaction event; pin canonicalization with a conformance test."
+    },
+    {
+      "id": "S3",
+      "severity": "medium-high",
+      "areas": [
+        "supply-chain",
+        "cache"
+      ],
+      "files": [
+        "src/worker.rs:88-91"
+      ],
+      "title": "Shared cross-project cache poisoning",
+      "detail": "CARGO/UV/PIP/npm caches are redirected to a single shared temp/air-cache across all projects and concurrent sessions. A compromised run in project A can plant poisoned registry artifacts; a network-denied build in project B must consume that cache — cross-project, cross-session supply-chain injection.",
+      "evidence": "Code trace of the CACHES redirect to one shared dir.",
+      "fix": "Namespace the cache per session (session.path.with_extension cache); document or verify integrity markers on cache reuse."
+    },
+    {
+      "id": "S4",
+      "severity": "medium",
+      "areas": [
+        "process-lifecycle",
+        "persistence"
+      ],
+      "files": [
+        "src/worker.py:22",
+        "src/worker.py:27"
+      ],
+      "title": "Daemonized grandchildren escape killpg — time-bomb processes on macOS",
+      "detail": "_exec launches commands with start_new_session and kills only the process group on timeout; a double-forked descendant escapes killpg. sandbox-exec provides no PID containment, so the orphan survives worker kill and air exit while keeping its file sandbox — it can keep rewriting the repo after the user reviews. On Linux, bwrap --unshare-all (PID namespace) contains it by design.",
+      "evidence": "killpg semantics + absence of PID containment in sandbox-exec; Linux mitigated by design.",
+      "fix": "On macOS, sweep for orphaned descendants at turn end (process-group walk) or reject daemonizing patterns; document the platform asymmetry."
+    },
+    {
+      "id": "S5",
+      "severity": "medium",
+      "areas": [
+        "denial-of-service"
+      ],
+      "files": [
+        "src/worker.py:19-30",
+        "src/worker.rs:16"
+      ],
+      "title": "Disk-fill denial of service — no write quota",
+      "detail": "Writable dirs (repo, /tmp, shared caches) are unbounded; sh(yes > big) within its 120s window writes tens of GB; check() gets 1800s. No RLIMIT_FSIZE or quota is enforced by the sandbox or the worker.",
+      "evidence": "Sandbox probe confirms repo worktree and /private/tmp writable by design.",
+      "fix": "RLIMIT_FSIZE via preexec_fn in _exec; configurable check timeout caps; alert when free space drops during a run."
+    },
+    {
+      "id": "S6",
+      "severity": "medium",
+      "areas": [
+        "ansi-injection",
+        "terminal"
+      ],
+      "files": [
+        "src/ui.rs:144-176"
+      ],
+      "title": "ANSI injection via the live thinking box — the only unfiltered output sink",
+      "detail": "Every other UI sink routes through printable()/flat(); ui::thinking builds lines from raw reasoning_content and paints them directly at ui.rs:173. A reasoning stream influenced by attacker file content can emit OSC 52 clipboard writes (paste-jacking), window-title spoofing, and cursor manipulation in the user's terminal.",
+      "evidence": "Code trace + grep: printable absent in thinking(); all other sinks filtered.",
+      "fix": "Route thinking lines through printable() like every other sink."
+    },
+    {
+      "id": "S7",
+      "severity": "low-medium",
+      "areas": [
+        "terminal",
+        "panic-safety"
+      ],
+      "files": [
+        "src/main.rs",
+        "src/ui.rs:50-58"
+      ],
+      "title": "No terminal-restore guarantee on crash or kill",
+      "detail": "No panic hook is installed (grep: zero set_hook). Turn::drop restores the scroll region on unwind, but SIGKILL or power loss leaves the region set and rustyline may leave raw mode; no defensive reset sequence is emitted at startup.",
+      "evidence": "grep set_hook = 0; Turn::drop restores only on the unwind path.",
+      "fix": "Install a panic hook emitting the reset sequence; emit a defensive scroll-region/cursor reset at startup to heal terminals dirtied by a previous kill."
+    },
+    {
+      "id": "S8",
+      "severity": "low-medium",
+      "areas": [
+        "observability",
+        "resilience"
+      ],
+      "files": [
+        "src/llm.rs:70-77",
+        "src/session.rs:68-72",
+        "Cargo.toml"
+      ],
+      "title": "Observability gaps: no jittered backoff, no tracing, no timestamps in the audit log",
+      "detail": "Retry backoff is deterministic (4/8/16s — thundering herd on provider recovery after 429s); the tracing ecosystem is absent; the otherwise-excellent 0600 JSONL audit log carries no wall-clock timestamps and no tool latency; sh()-made changes remain unattributed (first-pass C1).",
+      "evidence": "grep: no tracing anywhere; zero ts fields in entries; backoff formula trace.",
+      "fix": "Full-jitter backoff from a cheap entropy source; per-entry ts at push(); optional tracing subscriber with bearer-key redaction."
+    },
+    {
+      "id": "S9",
+      "severity": "cleared",
+      "areas": [
+        "path-validation",
+        "tool-robustness",
+        "secrets-handling"
+      ],
+      "files": [
+        "src/worker.py:52-83",
+        "src/main.rs:57-58"
+      ],
+      "title": "Cleared under adversarial probing: path validation, tool args, output caps, concurrency, key handling",
+      "detail": "Live probes against the real worker: ../ traversal, absolute-path writes, and edit via symlink to an outside target are all rejected (worker.py:57-63); the accept() gate is enforced, including across runs via host-carried state; malformed tool arguments degrade to descriptive feedback the model can act on; tool outputs are capped at 8KB head+tail (printing _last re-enters through the same cap); tool calls execute sequentially so no write races exist; the API key never enters entries or logs and is scrubbed from worker env; a repo cannot redirect base_url (main.rs ignores repo model/base_url — correctly blocks the steal-key-via-attacker-endpoint vector); the .git write-deny blocks the model from installing git filters itself in non-yolo mode.",
+      "evidence": "Live probes: worker path/gate tests all rejected or ok as expected; sandbox matrix behaved exactly as designed.",
+      "fix": "None required; pin with the malicious-repo, injection-corpus, and sandbox conformance test suites."
+    },
+    {
+      "id": "A1",
+      "severity": "high",
+      "areas": [
+        "loop-divergence",
+        "token-economy"
+      ],
+      "files": [
+        "src/agent.rs:90",
+        "src/agent.rs:138",
+        "src/agent.rs:126-127"
+      ],
+      "title": "No oscillation or divergence detection: repeated identical failures produce byte-identical feedback",
+      "detail": "The turn loop has exactly two bounds: MAX_REQUESTS=200 (agent.rs:90,138) and the one-shot check-gate nudge (agent.rs:126-127). Nothing hashes action signatures, counts consecutive identical failures, or detects stagnation. Probe-proven: repeating the same failing edit returns the identical error and identical hint both times — no escalation signal exists — so a model stuck in an edit-compile-fail loop burns up to 200 full-context requests (order of millions of prompt tokens at compact_at ~100k) before the hard stop.",
+      "evidence": "Live probe: B1 and B2 identical error + hint, byte-for-byte; grep confirms nudged/overflowed are the only loop-state flags.",
+      "fix": "LoopGuard: hash failed-action signatures; on 3 identical consecutive strikes append a forced strategy-change message; count idle runs (no edits, no check) and intervene after 4; add a per-turn cumulative prompt-token budget."
+    },
+    {
+      "id": "A2",
+      "severity": "medium",
+      "areas": [
+        "stagnation"
+      ],
+      "files": [
+        "src/agent.rs:90-140"
+      ],
+      "title": "No stagnation detector for no-op exploratory runs",
+      "detail": "The model can issue unlimited read-only runs (print/ls/cat) with no edits, no check, and no conclusion; runs and rejected are counted for display only and nothing intervenes on no-progress streaks.",
+      "evidence": "Code trace: no idle/no-op streak state anywhere in the turn loop.",
+      "fix": "Track consecutive runs whose actions contain no path-bearing edit and no check; after 4, inject a host note telling the model to conclude or change approach."
+    },
+    {
+      "id": "A3",
+      "severity": "medium",
+      "areas": [
+        "workspace-atomicity"
+      ],
+      "files": [
+        "src/worker.py:52-99"
+      ],
+      "title": "Multi-edit runs are not transactional: mid-batch failure leaves earlier edits applied",
+      "detail": "edit() applies immediately per call; a run doing edit(f1 ok), edit(f2 ok), edit(f3 fail) leaves f1 and f2 modified on disk with no rollback. Probe-proven: a.txt and b.txt modified, c.txt untouched after the run-level exception. The action ledger records exactly what applied and git provides undo, so this is visible partial state rather than silent corruption — but the model gets no one-line partially-applied summary and no cheap rollback primitive.",
+      "evidence": "Live probe: actions = 2 ok + 1 failed; disk shows the two successful edits persisted after the exception.",
+      "fix": "Capture per-file pre-images at first edit within a run; on failure print a partially-applied notice and expose rollback() in the next run to restore pre-images."
+    },
+    {
+      "id": "A4",
+      "severity": "medium",
+      "areas": [
+        "workspace-sync",
+        "attribution"
+      ],
+      "files": [
+        "src/agent.rs:215-233",
+        "src/agent.rs:249-253"
+      ],
+      "title": "Concurrent external edits are conflated with agent changes; the undo hint can revert the user's own work",
+      "detail": "Turn-start snapshot vs turn-end comparison detects that the tree changed but cannot attribute changes. A user editing files mid-turn is indistinguishable from agent edits: the check gate runs on the user-modified tree, the changes row attributes user edits to the agent turn, and the printed undo hint (git restore --source=snapshot-tree) would revert the user's concurrent edits along with the agent's.",
+      "evidence": "Code trace of snapshot/fingerprint comparison and the report undo row.",
+      "fix": "Diff the snapshot tree against the turn's action ledger; flag paths changed but never touched by an action as external, scope the undo hint to ledger paths only, and note foreign changes in the check verdict."
+    },
+    {
+      "id": "A5",
+      "severity": "medium",
+      "areas": [
+        "process-lifecycle",
+        "persistence"
+      ],
+      "files": [
+        "src/worker.py:19-30",
+        "src/worker.rs:110"
+      ],
+      "title": "Worker teardown orphans in-flight sh descendants (macOS)",
+      "detail": "kill_on_drop kills only the python worker itself; sh() commands run in their own sessions (start_new_session) and a setsid-ing or double-forking descendant escapes even killpg. Probe-proven: a setsid child survived worker SIGKILL (rc -9) and ran to completion afterwards, keeping its file sandbox — it can race with a restarted worker on the same repo. On Linux, bwrap --unshare-all PID namespace contains descendants by design.",
+      "evidence": "Live probe: proof file created 3 seconds AFTER the worker was SIGKILLed.",
+      "fix": "Best-effort pid registry: the worker records every spawned pid to a sidecar; the agent sweeps it at worker teardown, re-verifying pid ownership before killing. Full closure requires OS-level PID containment, which macOS lacks — document the asymmetry."
+    },
+    {
+      "id": "A6",
+      "severity": "low-medium",
+      "areas": [
+        "resource-retention",
+        "privacy"
+      ],
+      "files": [
+        "src/session.rs:23-66"
+      ],
+      "title": "No session retention or GC: session logs accumulate forever",
+      "detail": "No code ever deletes or prunes session files (grep-proven). Live census on this machine: 20 files / 1.1MB already accumulated in ~/.air/sessions; each holds full code, outputs, and criteria at 0600. resume() opens and reads the first line of every file on each start. Long-lived installs grow unboundedly and retain every secret ever printed into context.",
+      "evidence": "ls/du on ~/.air/sessions: 20 files, 1.1MB; grep: zero GC/cleanup code in src/.",
+      "fix": "Retention policy: keep the newest K sessions per repo root, age out the rest with sidecars, config knob, and a warning before first deletion."
+    },
+    {
+      "id": "A7",
+      "severity": "cleared",
+      "areas": [
+        "workspace-sync"
+      ],
+      "files": [
+        "src/worker.py:52-99"
+      ],
+      "title": "Cleared: no file cache means no stale-cache hallucinations — content-anchored edits are stale-safe",
+      "detail": "The agent keeps no file cache or AST index; edits are exact-unique-match string replacements applied against disk state at call time, and there are no line-number-based patches anywhere. Probe-proven mid-session race: after an external overwrite, an edit using the stale context copy failed loudly (old text not found, no corruption) while an edit anchored to the new content succeeded and merged cleanly with the user's changes. External modification cannot produce hallucinated or silently-wrong patches.",
+      "evidence": "Live probe: stale-old edit ok=False with loud error; fresh-anchored edit ok=True; disk shows clean merge of user + model changes.",
+      "fix": "None; keep the no-cache content-anchored design and pin it with an external-race test."
+    },
+    {
+      "id": "A8",
+      "severity": "cleared",
+      "areas": [
+        "goal-drift"
+      ],
+      "files": [
+        "src/session.rs:88-127",
+        "src/compact.rs:21-149"
+      ],
+      "title": "Cleared: goal anchoring is structurally sound through compaction",
+      "detail": "The current user task is pinned verbatim into the compacted context; accept() criteria are preserved verbatim (1800B), carry() notes survive every compaction until cleared, and plan()/done() track steps. summary() is rebuilt from the raw log rather than prior summaries, so anchoring does not decay across successive compactions. Caveat carried forward: user-direction excerpts are head-only (2000B), so constraints written late in a very long task text can be cut.",
+      "evidence": "Code trace of messages() pinning and summary section sources.",
+      "fix": "None structural; apply the head+tail excerpt improvement for long task texts."
+    },
+    {
+      "id": "A9",
+      "severity": "info",
+      "areas": [
+        "rehydration"
+      ],
+      "files": [
+        "src/session.rs:35-66",
+        "src/session.rs:129-149"
+      ],
+      "title": "Rehydration is near-perfect by design; ephemerals are the accepted gaps",
+      "detail": "The append-only JSONL log is the single source of truth: state() re-derives accepted/carry/plan deterministically, compact_at replays from the last marker, the model stays pinned, and the private snapshot index persists beside the log. Deliberately ephemeral on restart: worker Python globals and _last (the C6 truncation note overpromises), the busy flag, and UI state. One real gap: after external commits between sessions, the stale snapshot baseline misattributes changes on the next turn.",
+      "evidence": "Code trace of resume/state/keep.",
+      "fix": "Fix the C6 wording; scope the snapshot baseline on resume."
+    },
+    {
+      "id": "A10",
+      "severity": "low-medium",
+      "areas": [
+        "token-economy"
+      ],
+      "files": [
+        "src/llm.rs:66-80",
+        "src/agent.rs:354"
+      ],
+      "title": "Cost traps quantified: transport retries re-send full prompts; reasoning and uncapped args ride every request",
+      "detail": "Tool-call errors are handled conversationally (a short error tool-result, then the next request) — the correct, cache-aligned pattern for stateless APIs. The expensive paths are transport-level: an Interrupted stream retries the identical body up to 3 times at full prompt cost when cache misses, deterministic truncation is retried the same way, current-task reasoning_content (10-50KB) is re-sent on every request, and tool-call arguments are uncapped. tools() is rebuilt per request (~60 tokens, trivial). Combined with A1, a pathological turn can bill millions of prompt tokens.",
+      "evidence": "Code trace: complete() retry loop, session.rs reasoning stripping policy, F8/F4 quantification.",
+      "fix": "Per-turn prompt-token budget; cap tool-arg size; treat finish_reason=length as non-retryable; make retries cache-cheap via the wire-prefix cache (F3 fix)."
+    },
+    {
+      "id": "P1",
+      "severity": "medium",
+      "areas": [
+        "patch-mechanics",
+        "text-encoding"
+      ],
+      "files": [
+        "src/worker.py:85-99"
+      ],
+      "title": "Edit mechanics are corruption-proof but brittle: mixed-EOL multi-line edits and non-UTF-8 files fail loudly",
+      "detail": "edit() detects CRLF only when the count of CRLF equals the count of LF (pure-CRLF files), matches in an LF-normalized view, and writes back with unconditional newline translation. Probe-proven: pure-CRLF multi-line edits work with byte-exact CRLF preservation; mixed-EOL files fail the detection so a multi-line old (model-emitted LF) cannot match across a CRLF boundary — loud failure; non-UTF-8 files raise on decode and are uneditable; and the unconditional write translation would double an explicit CRLF inside model-provided new text. The design never corrupts — every mismatch fails loudly — but edit success rate degrades on messy real-world files.",
+      "evidence": "Live probes: 1a pure-CRLF ok with X-CRLF-gamma-CRLF on disk; 1b mixed single-line ok; 1c mixed multi-line fails (old text not found); 1d latin-1 fails on UnicodeDecodeError.",
+      "fix": "Match in an LF-normalized view always; write back via a per-line ending map so untouched lines keep exact bytes, the new block inherits the replaced line's style, and newline translation is disabled (no CR doubling)."
+    },
+    {
+      "id": "P2",
+      "severity": "medium",
+      "areas": [
+        "patch-mechanics",
+        "syntax-verification"
+      ],
+      "files": [
+        "src/worker.py:52-99",
+        "src/worker.py:75"
+      ],
+      "title": "No syntax pre-flight on edit/write: invalid syntax hits disk; the formatter gate is post-hoc and non-reverting",
+      "detail": "Nothing parses the result before the write commits. With a formatter configured, the fmt step surfaces the first parser-error line (fmt failed note, worker.py:75) but the action is still ok=True and the invalid file stays on disk — probe-proven. Without a formatter the write is completely silent about syntax. The model then pays a full check() cycle and tokens to discover typos a 30ms parse would have caught.",
+      "evidence": "Live probes: write of invalid python with FMT=py_compile reports write bad.py: ok; fmt failed: File bad.py, line 1 — action ok=True, file persists invalid; without FMT the output is just write bad2.py: ok.",
+      "fix": "Per-extension parse gate inside _change before the disk write (py_compile, tree-sitter, or formatter drivers): on failure do not write; return the parser error and line to the model immediately via the existing error path."
+    },
+    {
+      "id": "P3",
+      "severity": "medium",
+      "areas": [
+        "negative-constraints",
+        "enforcement"
+      ],
+      "files": [
+        "src/worker.py:52-83",
+        "src/worker.rs:40-49",
+        "src/main.rs:20-27"
+      ],
+      "title": "Negative constraints are prompt-only: no configurable hard interceptor for protected paths",
+      "detail": "Rules such as do-not-touch Cargo.lock or never-edit-migrations exist nowhere as enforcement. The _change interceptor architecture exists and consults PROTECTED (hard-coded to .git and hooksPath only); there is no user-configurable deny-list, and raw open(w) plus sh() bypass even the existing gate (C1). Compliance rides entirely on prompt adherence.",
+      "evidence": "Code trace: PROTECTED hard-coded (worker.py:40-49); Config has no protected field.",
+      "fix": "Add protected globs to air.toml, pass via worker env (AIR_PROTECTED), enforce with fnmatch inside _change before any mutation, and report violations as rejected actions; pair with the S-series sh() tree-diff tripwire."
+    },
+    {
+      "id": "P4",
+      "severity": "medium",
+      "areas": [
+        "concurrency",
+        "workspace-locking"
+      ],
+      "files": [
+        "src/worker.py:87-97",
+        "src/session.rs:29"
+      ],
+      "title": "No workspace-level lock: concurrent sessions can silently lose updates via the edit read-modify-write window",
+      "detail": "The session flock guards only the session file. Two air instances on the same worktree share files with no coordination: edit() does read (worker.py:87) then write (:97) with no lock between. Probe-proven with two workers on one repo and staggered read + sleep + write: the first writer's update was silently lost, both runs reported success, and both action ledgers were empty because the raw-write path bypasses the gate and ledger entirely (C1 re-proven). Two sessions editing different regions of the same file both report ok while the last write erases the first.",
+      "evidence": "Live probe: final race.txt = base + B only; A's write lost; no exceptions; empty ledgers on both sides.",
+      "fix": "WorkspaceGuard: flock a lock file under .git (host-writable, model-unreachable) in Agent::new; refuse a second instance on the same worktree; document the single-writer assumption."
+    },
+    {
+      "id": "P5",
+      "severity": "low-medium",
+      "areas": [
+        "background-execution"
+      ],
+      "files": [
+        "src/worker.py:19-30",
+        "src/worker.rs:37-43"
+      ],
+      "title": "No background-task primitive: sh() is synchronous capture-to-completion; server workflows orphan and lose logs",
+      "detail": "sh() captures stdout+stderr to a completion tempfile and blocks until timeout (120s default; 40-minute run cap). A dev server or cargo watch cannot be started and observed; the cmd-and-background workaround functions (the sandbox allows localhost) but orphans the process (A5) and loses its logs after the capture file is read. The capture tempfile is unbounded during the run (disk-fill, S5).",
+      "evidence": "Code trace of _exec synchronous capture; A5 orphan probes.",
+      "fix": "Worker helpers spawn(name, cmd) / logs(name, tail) / stop(name) with a bounded ring buffer (deque maxlen) per task, reaped at worker teardown."
+    },
+    {
+      "id": "P6",
+      "severity": "low",
+      "areas": [
+        "truncation"
+      ],
+      "files": [
+        "src/worker.py:256-259"
+      ],
+      "title": "Output truncation is a blind char-slice head+tail: no line alignment, no structural windowing",
+      "detail": "The 8000-char cap slices at arbitrary character boundaries — the model can receive half a line or half a token at each seam (cosmetic; _last allows re-slicing). Whole-file prints of 10k-line modules come back as 4KB head + 4KB tail with no structural scoping. No file injection path exists (A7), so only tool-output framing is affected.",
+      "evidence": "Code trace: text[:HALF] / text[-HALF:] char slices.",
+      "fix": "Line-align both cut points (rsplit/split on newline at the seams) and keep the exact-omission marker."
+    },
+    {
+      "id": "P7",
+      "severity": "cleared",
+      "areas": [
+        "context-routing",
+        "prompt-architecture",
+        "tool-schemas"
+      ],
+      "files": [
+        "src/agent.rs:329-354",
+        "src/session.rs:88-127",
+        "src/prompt.md"
+      ],
+      "title": "Cleared: no index to invalidate; retrieval prompt-delegated with sound economics; prompt ordering and tool schema exemplary",
+      "detail": "There is no tree-sitter/LSP/ctags index — the stale-index failure class is structurally absent (A7). Retrieval precision is delegated to the model with explicit print-only-what-you-need instructions and worked line-slicing examples; whole-file injection happens only by model choice and is bounded by the 8KB cap. Prompt ordering is structurally sound: the system prompt (built once, ~700 tokens) is always first; after compaction the summary sits at position 2 with the current task pinned verbatim; check-gate messages land at the tail (high attention); accept() criteria are re-injected through every summary as durable constraint re-statement; temperature 0 and a pinned model. The tool schema is minimal — one tool, one parameter, about 60 tokens — the anti-bloat ideal. The one bloat vector remains uncapped AGENTS.md injection (M7).",
+      "evidence": "Code trace of system_prompt/tools/messages ordering; prompt.md (46 lines).",
+      "fix": "None structural."
+    },
+    {
+      "id": "P8",
+      "severity": "cleared",
+      "areas": [
+        "patch-mechanics",
+        "multi-edit-ordering"
+      ],
+      "files": [
+        "src/worker.py:85-99"
+      ],
+      "title": "Cleared: content-anchored edits have no offset-invalidation class; stale or overlapping second edits fail loudly",
+      "detail": "Because edits are exact-unique-match string replacements with per-call re-reads (worker.py:87-97), there are no line offsets to invalidate: a second edit whose old region was changed by the first fails loudly (old text not found) rather than corrupting, and non-overlapping sequential edits compose correctly. The classic apply-patch-at-wrong-offset corruption mode is structurally absent — verified across pass-4 and pass-5 probes.",
+      "evidence": "Live probes (passes 4 and 5): sequential non-overlapping edits compose; stale/overlapping old fails loudly; disk never corrupted.",
+      "fix": "None; pin with the multi-edit composition property test."
+    }
+  ],
+  "strengths": [
+    "Deterministic log-derived compaction with verbatim excerpts and recall(n) exact recovery; no LLM summarization",
+    "Append-only JSONL sessions: flock, torn-line repair, model pinned in header, fully auditable meta trail",
+    "answer_missing() protocol repair keeps the wire valid after crashes and interrupts",
+    "One-shot check gate + MAX_REQUESTS bounds; no infinite fix loops",
+    "Head+tail run-output truncation with _last retention",
+    "Skills progressive disclosure (description line only)",
+    "Hermetic worker env: env_clear, fail-closed secret filter, cache redirection, kill_on_drop, protected .git/hooks",
+    "Edit safety: accept() gate, unique-match edit, no-clobber write, realpath escape check, CRLF preservation, formatter diff-back",
+    "Per-turn git write-tree snapshots: tree-hash identity + undo line",
+    "temperature 0.0, PYTHONHASHSEED=0, TZ/LC pinned hermetic worker"
+  ],
+  "forensic_audit": {
+    "date": "2026-10-14",
+    "method": "full-path tracing of all 9 source files; live worker-protocol probes (real worker.py under its real env contract); grep-verified determinism and append-only evidence; line-level trigger-path analysis",
+    "probes": [
+      {
+        "name": "torn request line + pipe EOF (simulated interrupt mid-write_all)",
+        "result": "worker exit 1, stderr empty — traceback silently routed to /dev/null"
+      },
+      {
+        "name": "garbage line mid-session while air alive",
+        "result": "worker exit 1, stderr empty"
+      },
+      {
+        "name": "worker variables across runs",
+        "result": "persist (x=41 → prints 42)"
+      },
+      {
+        "name": "20k-char run output",
+        "result": "truncated to 8059 chars, head+tail kept with omission marker"
+      },
+      {
+        "name": "same-second session filename sort",
+        "result": "sorted()[-1] picks …-99.jsonl over the later …-100.jsonl"
+      }
+    ],
+    "cleared": "F10: compaction determinism (pure summary, BTreeMap ordering, zero nondeterminism sources in compact.rs), request-boundary-only triggers (no mid-stream truncation), char-boundary-safe clipping, single-lock UI discipline, no locks across await, no shared mutable agent state across threads, clean LLM-stream cancellation, append-only entry-index stability, derived-checkpoint crash safety"
+  },
+  "security_audit": {
+    "date": "2026-10-14",
+    "method": "adversarial probing: malicious git filter repos against host-side git paths, production-equivalent sandbox-exec profiles (canonicalized), live worker path-validation and gate probes",
+    "probes": [
+      {
+        "name": "attacker .gitattributes + repo-local filter config, simulated snapshot() git add -A",
+        "result": "CLEAN FILTER EXECUTED ON HOST, UNSANDBOXED"
+      },
+      {
+        "name": "same config, simulated changes() git diff --numstat",
+        "result": "clean filter executed on host (worktree-side cleaning)"
+      },
+      {
+        "name": "plumbing git update-index --add --remove / git write-tree",
+        "result": "filter-free (verified fix path)"
+      },
+      {
+        "name": "sandbox (production-equivalent SBPL, canonicalized): read listed ~/.ssh/id_rsa",
+        "result": "DENIED"
+      },
+      {
+        "name": "sandbox: read unlisted ~/.git-credentials, ~/.npmrc, ~/.pypirc, ~/.cargo/credentials, ~/.terraform.d",
+        "result": "READ-OK — deny-list gap proven"
+      },
+      {
+        "name": "sandbox: write repo worktree and /private/tmp",
+        "result": "allowed (by design)"
+      },
+      {
+        "name": "sandbox: write .git",
+        "result": "DENIED"
+      },
+      {
+        "name": "sandbox: outbound HTTPS",
+        "result": "BLOCKED"
+      },
+      {
+        "name": "worker: write ../escape, absolute path, edit via symlink to /tmp",
+        "result": "all rejected — path validation robust"
+      },
+      {
+        "name": "worker: write without accept()",
+        "result": "rejected: call accept(criteria) before changing files"
+      },
+      {
+        "name": "worker: accept+write in one run; state-carried write",
+        "result": "ok=true — gate and state-carry work"
+      },
+      {
+        "name": "worker: print(sh(cat /tmp/file))",
+        "result": "reads it — no python-layer guard on sh()"
+      },
+      {
+        "name": "sandbox profile with non-canonical subpaths (v1 probe)",
+        "result": "secret denies silently inert — canonicalization is load-bearing"
+      }
+    ],
+    "cleared": "S9: path traversal (../, absolute, symlink) rejected at worker.py:57-63; accept gate enforced with host-carried state; malformed tool args degrade to descriptive feedback; outputs capped 8KB head+tail; tool calls sequential (no write races); API key never in entries/logs and scrubbed from worker env; repo cannot redirect base_url (main.rs); .git write-deny blocks model-installed filters in non-yolo"
+  },
+  "stability_audit": {
+    "date": "2026-10-14",
+    "method": "agent-loop pathology probing: multi-edit batch failure, repeated-failure signal escalation, external-modification races, orphaned descendant survival past worker SIGKILL, session accumulation census",
+    "probes": [
+      {
+        "name": "multi-edit batch: edit a ok, edit b ok, edit c fail",
+        "result": "partial application: a.txt and b.txt modified on disk, no rollback; ledger records 2 ok + 1 failed"
+      },
+      {
+        "name": "identical failing edit repeated twice",
+        "result": "byte-identical error and hint both times — no escalation signal exists"
+      },
+      {
+        "name": "external file modification mid-session, then edit with stale old text",
+        "result": "loud failure (old text not found), disk not corrupted"
+      },
+      {
+        "name": "external modification, edit anchored to new content",
+        "result": "ok=true — clean merge of user + model changes; content-anchored edits are stale-safe"
+      },
+      {
+        "name": "setsid child launched via sh(), then worker SIGKILL",
+        "result": "orphan completed AFTER worker death (proof file created 3s post-kill) — kill_on_drop covers only the worker"
+      },
+      {
+        "name": "session retention census",
+        "result": "20 files / 1.1MB in ~/.air/sessions; grep-proven zero GC/cleanup code"
+      }
+    ]
+  },
+  "mechanics_audit": {
+    "date": "2026-10-14",
+    "method": "patch-mechanics probing: EOL/encoding edit matrix, syntax-gate behavior with and without formatters, concurrent-worker lost-update race; code-trace analysis of prompt assembly and background execution",
+    "probes": [
+      {
+        "name": "pure-CRLF multi-line edit",
+        "result": "ok=True; byte-exact CRLF write-back on disk"
+      },
+      {
+        "name": "mixed-EOL single-line edit",
+        "result": "ok=True; per-line endings preserved"
+      },
+      {
+        "name": "mixed-EOL multi-line edit",
+        "result": "fails loudly (old text not found) — CRLF heuristic covers only pure-CRLF files"
+      },
+      {
+        "name": "non-UTF-8 (latin-1) file edit",
+        "result": "fails loudly on decode — uneditable, never corrupted"
+      },
+      {
+        "name": "syntax-error write with FMT=py_compile",
+        "result": "action ok=True; fmt-failure note surfaced with parser line; invalid file persists on disk"
+      },
+      {
+        "name": "syntax-error write without FMT",
+        "result": "completely silent (write bad2.py: ok) — no gate exists"
+      },
+      {
+        "name": "two workers, staggered read-modify-write on one repo",
+        "result": "silent lost update: final file contains only the second writer's content; no exceptions"
+      },
+      {
+        "name": "ledger check during the race",
+        "result": "both action ledgers empty — raw open(w) bypasses accept() and the audit ledger (C1 at the mechanics layer)"
+      }
+    ]
+  }
+}

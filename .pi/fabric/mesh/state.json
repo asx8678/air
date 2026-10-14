@@ -1,0 +1,39 @@
+{
+  "format": 1,
+  "revisionFormat": 2,
+  "entries": {
+    "topology/peer-seq": {
+      "key": "topology/peer-seq",
+      "value": {
+        "format": 1,
+        "next": 2
+      },
+      "version": 2,
+      "updatedAt": 1791963865550,
+      "updatedBy": {
+        "id": "session:01a1395e-2636-76e2-9a47-42f7d8c1fe53",
+        "name": "main",
+        "kind": "main",
+        "sessionId": "01a1395e-2636-76e2-9a47-42f7d8c1fe53"
+      }
+    }
+  },
+  "highWater": 2259,
+  "versions": {
+    "topology/peer-seq": 2,
+    "sessions/01a1394b-caf0-7440-a492-b8abb884b37f": 547,
+    "topology/participants/b7db16f156a105e84b6b5ba3722f9883a70757b70b951fea7b01694375ccb412": 549,
+    "topology/hosts/b7db16f156a105e84b6b5ba3722f9883a70757b70b951fea7b01694375ccb412": 550,
+    "sessions/01a1395e-2636-76e2-9a47-42f7d8c1fe53": 1467,
+    "topology/participants/f8f1805c0aa0362cc2ef31a410814100938dcdc77640cfb14a82651aa70bb067": 1469,
+    "topology/hosts/f8f1805c0aa0362cc2ef31a410814100938dcdc77640cfb14a82651aa70bb067": 1470
+  },
+  "tombstoneOrder": [
+    "sessions/01a1394b-caf0-7440-a492-b8abb884b37f",
+    "topology/participants/b7db16f156a105e84b6b5ba3722f9883a70757b70b951fea7b01694375ccb412",
+    "topology/hosts/b7db16f156a105e84b6b5ba3722f9883a70757b70b951fea7b01694375ccb412",
+    "sessions/01a1395e-2636-76e2-9a47-42f7d8c1fe53",
+    "topology/participants/f8f1805c0aa0362cc2ef31a410814100938dcdc77640cfb14a82651aa70bb067",
+    "topology/hosts/f8f1805c0aa0362cc2ef31a410814100938dcdc77640cfb14a82651aa70bb067"
+  ]
+}

@@ -1,0 +1,97 @@
+{
+ "round": 12,
+ "tree": "91d63d4",
+ "date": "2026-10-14",
+ "findings": [
+  {
+   "id": "12-N1",
+   "severity": "critical",
+   "status": "new",
+   "location": "src/worker.rs:73-74",
+   "title": "macOS sandbox never denied network: (local ip \"localhost:*\") matches every outbound socket; TCP+UDP egress to any IP",
+   "evidence": "sandbox-exec clause isolation; real air run returned EGRESS b'HTTP/1.1 301 Moved Permanently' from 1.1.1.1:80; UDP/53 answered; system resolver blocked (why curl looked denied)",
+   "since": "630117a",
+   "corrects": [
+    "S2",
+    "S3",
+    "L9"
+   ]
+  },
+  {
+   "id": "12-C1",
+   "severity": "low",
+   "status": "refined",
+   "corrects": [
+    "10-H1"
+   ],
+   "location": "src/session.rs:105-107",
+   "title": "Reasoning stripping re-prefills only the previous turn; R10 strip-at-push fix would remove in-turn reasoning echo",
+   "evidence": "20 real logs: ~1152 tok newly stripped over 3 non-first turn boundaries"
+  },
+  {
+   "id": "12-C2",
+   "severity": null,
+   "status": "refuted",
+   "corrects": [
+    "10-H2"
+   ],
+   "title": "SSH-agent hijack via /tmp unix socket does not work on macOS",
+   "evidence": "sandboxed AF_UNIX connect to own socket in /private/tmp -> PermissionError under current and fixed profile; Linux/bwrap untested"
+  },
+  {
+   "id": "12-C3",
+   "severity": null,
+   "status": "refuted",
+   "corrects": [
+    "11-A2"
+   ],
+   "title": "std::process::exit does not leak the worker on clean exit",
+   "evidence": "worker loop ends on stdin EOF (worker.py:227); 0 leftover workers after one-shot probe runs"
+  },
+  {
+   "id": "12-N2",
+   "severity": "medium",
+   "status": "new",
+   "location": "src/agent.rs:82-83, src/compact.rs:6-19,76-78",
+   "title": "Turn-start compaction can cut the answer the user is replying to down to 160 chars; cut() counts unsent reasoning/meta bytes",
+   "evidence": "62,638 B answer -> 'last assistant note' line(…,160) in turn-2 request"
+  },
+  {
+   "id": "12-N3",
+   "severity": "low-medium",
+   "status": "new",
+   "location": "src/compact.rs:14, src/session.rs:97",
+   "title": "Summary user message followed by kept user entry -> consecutive user messages whenever cut lands on a user entry",
+   "evidence": "turn-2 request: [system][user 633B summary][user 23B task]"
+  },
+  {
+   "id": "12-N4",
+   "severity": "low-medium",
+   "status": "new",
+   "corrects": [
+    "S6"
+   ],
+   "location": "src/ui.rs:384-387, src/agent.rs:155, src/main.rs:93",
+   "title": "ui::note and top-level eprintln print model/provider bytes raw (OSC/CSI injection)",
+   "evidence": "tool name with ESC]0;…BEL reached terminal: '^[]0;AIR-TITLE-INJECTED^Gevil'"
+  },
+  {
+   "id": "12-N5",
+   "severity": "low",
+   "status": "new",
+   "location": "src/worker.py:200-201",
+   "title": "Python 3.9 'no match statements' hint attached to every SyntaxError",
+   "evidence": "shown for 'EOL while scanning string literal'"
+  },
+  {
+   "id": "12-C4",
+   "severity": null,
+   "status": "known-tradeoff",
+   "corrects": [
+    "10-K3",
+    "11-C3"
+   ],
+   "title": "Unmarked stream end acceptance is deliberate (b2b59d7); residual: text-only clean close mid-answer accepted"
+  }
+ ]
+}
