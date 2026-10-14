@@ -243,7 +243,7 @@ impl Agent {
         let (check, verdict) = match (changed, checked, &self.config.check) {
             (false, _, _) => ("-", "NO CHANGES"),
             (true, true, _) => ("passed on the final tree", "VERIFIED"),
-            (true, false, None) => ("none configured", "UNVERIFIED"),
+            (true, false, None) => ("none configured: set check in air.toml", "UNVERIFIED"),
             (true, false, Some(_)) => ("not passed on the final tree", "UNVERIFIED"),
         };
         let state = self.session.state();
