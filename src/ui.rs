@@ -15,6 +15,7 @@ struct Bar {
 static BAR: Mutex<Option<Bar>> = Mutex::new(None);
 static STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static RUNNING: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+static EVENTS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
 
 pub fn styled() -> bool {
     std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
@@ -138,9 +139,13 @@ pub fn activity(text: &str) {
     draw();
 }
 
-pub fn usage(usage: &Value) {
+pub fn cached(usage: &Value) -> Option<u64> {
     let cached = usage["prompt_tokens_details"]["cached_tokens"].as_u64();
-    let cached = cached.or(usage["cached_tokens"].as_u64()).or(usage["prompt_cache_hit_tokens"].as_u64());
+    cached.or(usage["cached_tokens"].as_u64()).or(usage["prompt_cache_hit_tokens"].as_u64())
+}
+
+pub fn usage(usage: &Value) {
+    let cached = cached(usage);
     let prompt = usage["prompt_tokens"].as_u64().unwrap_or(0);
     update(|bar| bar.tokens = (bar.tokens.0 + prompt, bar.tokens.1 + cached.unwrap_or(0)));
 }
@@ -400,6 +405,23 @@ pub fn plan(plan: &Value) {
 pub fn note(text: &str) {
     clear_live();
     println!("{}", paint("33", &format!("· {}", printable(text))));
+}
+
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+pub fn event(kind: &str, text: &str, extra: Value) {
+    note(text);
+    let mut entry = serde_json::json!({"event": kind, "text": text, "at": now_ms()});
+    if let (Some(entry), Some(extra)) = (entry.as_object_mut(), extra.as_object()) {
+        entry.extend(extra.clone());
+    }
+    EVENTS.lock().unwrap().push(entry);
+}
+
+pub fn events() -> Vec<Value> {
+    std::mem::take(&mut *EVENTS.lock().unwrap())
 }
 
 pub fn report(rows: &[(&str, String)], verdict: &str, good: bool) {

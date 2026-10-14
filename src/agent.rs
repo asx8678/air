@@ -49,6 +49,10 @@ impl Agent {
         Ok(Self { root: root.into(), config, yolo, llm, session, worker: None, compact_at, pending: None })
     }
 
+    pub fn path(&self) -> &Path {
+        &self.session.path
+    }
+
     pub async fn run(&mut self, task: &str) -> Result<bool> {
         let _bar = ui::Turn::start();
         let finished = tokio::select! {
@@ -57,6 +61,10 @@ impl Agent {
         };
         ui::clear_live();
         if let Some(result) = finished {
+            if let Err(e) = &result {
+                let text = ui::printable(&format!("{e:#}"));
+                self.session.push(json!({"event": "error", "text": text, "at": ui::now_ms()}))?;
+            }
             return result;
         }
         let settled = match &mut self.worker {
@@ -81,7 +89,8 @@ impl Agent {
         if !shown {
             println!();
         }
-        ui::note("interrupted");
+        ui::event("ctrl_c", "interrupted", Value::Null);
+        self.session.flush()?;
         Ok(false)
     }
 
@@ -90,6 +99,7 @@ impl Agent {
         if self.session.last_prompt_tokens() >= self.compact_at / 2 {
             self.compact_to(self.compact_at as usize / 10)?;
         }
+        self.session.flush()?;
         let (began, clock) = (self.session.entries.len(), Instant::now());
         let snapshot = self.snapshot();
         self.session.push(json!({"role": "user", "content": task, "meta": {"snapshot": snapshot}}))?;
@@ -106,7 +116,7 @@ impl Agent {
                     if seen > 0 {
                         self.compact_at = self.compact_at.min(seen * 9 / 10);
                     }
-                    ui::note("context window exceeded; compacting and retrying");
+                    ui::event("overflow", "context window exceeded; compacting and retrying", json!({"seen": seen}));
                     self.compact()?;
                     continue;
                 }
@@ -117,7 +127,8 @@ impl Agent {
             let calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
             if calls.is_empty() && message["content"].as_str().is_none_or(|c| c.trim().is_empty()) && !retried {
                 retried = true;
-                ui::note("the model sent an empty reply; asking again");
+                let extra = json!({"usage": message["meta"]["usage"], "timing": message["meta"]["timing"]});
+                ui::event("empty", "the model sent an empty reply; asking again", extra);
                 continue;
             }
             self.session.push(message)?;
@@ -135,10 +146,13 @@ impl Agent {
             let changed = self.fingerprint() != start;
             let mut checked = false;
             if changed && let Some(check) = &self.config.check {
+                let clock = Instant::now();
                 let (ok, out) = self.verify(check).await;
+                let ms = clock.elapsed().as_millis() as u64;
+                self.session.push(json!({"check": {"ok": ok, "ms": ms, "out": compact::tail(&out, 1500)}}))?;
                 if !ok && !nudged {
                     nudged = true;
-                    ui::note("the check failed on the final tree: asking the model to fix it");
+                    ui::event("nudge", "the check failed on the final tree: asking the model to fix it", Value::Null);
                     ui::activity("waiting for the model");
                     let gate = format!("{GATE}\n{}", compact::tail(&out, 1500));
                     self.session.push(json!({"role": "user", "content": gate, "meta": {"host": true}}))?;
@@ -146,10 +160,10 @@ impl Agent {
                 }
                 checked = ok;
             }
-            return Ok(self.report(changed, checked, began, clock));
+            return self.report(changed, checked, began, clock);
         }
-        ui::note(&format!("stopped after {MAX_REQUESTS} model requests in one turn"));
-        self.report(self.fingerprint() != start, false, began, clock);
+        ui::event("limit", &format!("stopped after {MAX_REQUESTS} model requests in one turn"), Value::Null);
+        self.report(self.fingerprint() != start, false, began, clock)?;
         Ok(false)
     }
 
@@ -159,16 +173,19 @@ impl Agent {
         match (call["function"]["name"].as_str(), args["code"].as_str()) {
             (Some("run"), Some(code)) => self.run_code(code).await,
             (Some("run"), None) => {
-                ui::note("the model's run() came without code (cut off by the output limit?)");
+                ui::event(
+                    "bad_call",
+                    "the model's run() came without code (cut off by the output limit?)",
+                    Value::Null,
+                );
                 let out = "error: run() arrived without a code argument, probably cut off by the output limit; \
                            send it again in smaller steps";
                 (out.into(), json!({"tool": "run", "error": true}))
             }
             (name, _) => {
-                ui::note(&format!(
-                    "the model called {}, but the only tool is run(code)",
-                    name.unwrap_or("a nameless tool")
-                ));
+                let text =
+                    format!("the model called {}, but the only tool is run(code)", name.unwrap_or("a nameless tool"));
+                ui::event("bad_call", &text, Value::Null);
                 ("error: the only tool is run(code)".into(), json!({"tool": "run", "error": true}))
             }
         }
@@ -178,9 +195,11 @@ impl Agent {
         ui::run(code);
         let state = self.session.state();
         let state = json!({"accepted": state.accepted, "carry": state.carry, "plan": state.plan});
+        let clock = Instant::now();
         match async { self.worker()?.run(code, &state).await }.await {
             Ok(reply) => {
-                let (out, meta) = finish(reply);
+                let (out, mut meta) = finish(reply);
+                meta["ms"] = (clock.elapsed().as_millis() as u64).into();
                 ui::ran(&meta, &out);
                 (out, meta)
             }
@@ -188,8 +207,8 @@ impl Agent {
                 self.worker = None;
                 let out = format!("error: {e:#}; the worker was restarted and its variables are gone");
                 println!();
-                ui::note(&out);
-                (out, json!({"tool": "run", "error": true}))
+                ui::event("worker_restart", &out, Value::Null);
+                (out, json!({"tool": "run", "error": true, "ms": clock.elapsed().as_millis() as u64}))
             }
         }
     }
@@ -245,7 +264,7 @@ impl Agent {
         format!("{:016x}", hasher.finish())
     }
 
-    fn report(&self, changed: bool, checked: bool, began: usize, clock: Instant) -> bool {
+    fn report(&mut self, changed: bool, checked: bool, began: usize, clock: Instant) -> Result<bool> {
         let (check, verdict) = match (changed, checked, &self.config.check) {
             (false, _, _) => ("-", "NO CHANGES"),
             (true, true, _) => ("passed on the final tree", "VERIFIED"),
@@ -256,15 +275,17 @@ impl Agent {
         let first = &self.session.entries[began];
         let task = first["content"].as_str().unwrap_or_default();
         let mut rows = vec![("task", task.lines().next().unwrap_or_default().to_string())];
-        rows.push(("criteria", state.accepted.unwrap_or_else(|| "-".into())));
-        if let Some(steps) = state.plan["steps"].as_array() {
-            let done = state.plan["done"].as_array().map_or(0, Vec::len);
-            rows.push(("plan", format!("{done}/{} steps done", steps.len())));
+        rows.push(("criteria", state.accepted.clone().unwrap_or_else(|| "-".into())));
+        let steps = state.plan["steps"].as_array().map(Vec::len);
+        let done = state.plan["done"].as_array().map_or(0, Vec::len);
+        if let Some(steps) = steps {
+            rows.push(("plan", format!("{done}/{steps} steps done")));
         }
         rows.push(("check", check.into()));
         let snapshot = first["meta"]["snapshot"].as_str();
         let index = self.index();
-        rows.push(("changes", changes(&self.root, snapshot.map(|tree| (tree, index.as_path())))));
+        let changes = changes(&self.root, snapshot.map(|tree| (tree, index.as_path())));
+        rows.push(("changes", changes.clone()));
         if let Some(tree) = snapshot.filter(|_| changed) {
             let short = tree.get(..12).unwrap_or(tree);
             rows.push(("undo", format!("git restore --source={short} --worktree -- .  (new files stay)")));
@@ -273,11 +294,13 @@ impl Agent {
         let usage: Vec<&Value> = turn.iter().map(|e| &e["meta"]["usage"]).filter(|u| u.is_object()).collect();
         let prompt: u64 = usage.iter().filter_map(|u| u["prompt_tokens"].as_u64()).sum();
         let out: u64 = usage.iter().filter_map(|u| u["completion_tokens"].as_u64()).sum();
+        let cached: u64 = usage.iter().filter_map(|u| ui::cached(u)).sum();
         let runs = turn.iter().filter(|e| e["meta"]["tool"] == "run").count();
-        let secs = clock.elapsed().as_secs();
+        let ms = clock.elapsed().as_millis() as u64;
+        let secs = ms / 1000;
+        let requests = usage.len();
         let cost = format!(
-            "{} requests · {runs} runs · {} in · {} out · {}:{:02}",
-            usage.len(),
+            "{requests} requests · {runs} runs · {} in · {} out · {}:{:02}",
             ui::tokens(prompt),
             ui::tokens(out),
             secs / 60,
@@ -285,7 +308,13 @@ impl Agent {
         );
         rows.push(("cost", cost));
         ui::report(&rows, verdict, !changed || checked);
-        !changed || checked
+        let changes: Vec<&str> = changes.lines().filter(|l| *l != "none").collect();
+        self.session.push(json!({"report": {
+            "verdict": verdict, "changed": changed, "checked": checked, "criteria": state.accepted,
+            "plan_steps": steps, "plan_done": done, "changes": changes, "requests": requests, "runs": runs,
+            "prompt": prompt, "cached": cached, "out": out, "ms": ms,
+        }}))?;
+        Ok(!changed || checked)
     }
 
     pub fn cost(&self) {
@@ -293,8 +322,7 @@ impl Agent {
         let (runs, rejected) = runs.fold((0, 0), |(n, r), e| (n + 1, r + usize::from(e["meta"]["rejected"] == true)));
         let (mut requests, mut tokens) = (0, [0; 3]);
         for u in self.session.entries.iter().map(|e| &e["meta"]["usage"]).filter(|u| u.is_object()) {
-            let cached = u["prompt_tokens_details"]["cached_tokens"].as_u64();
-            let cached = cached.or(u["cached_tokens"].as_u64()).or(u["prompt_cache_hit_tokens"].as_u64());
+            let cached = ui::cached(u);
             for (sum, n) in
                 tokens.iter_mut().zip([u["prompt_tokens"].as_u64(), cached, u["completion_tokens"].as_u64()])
             {

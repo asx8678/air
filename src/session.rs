@@ -28,7 +28,10 @@ impl Session {
         let file = OpenOptions::new().create_new(true).append(true).mode(0o600).open(&path)?;
         file.try_lock()?;
         let mut session = Self { path, entries: vec![], file };
-        session.push(json!({"cwd": root, "model": model, "temperature": crate::llm::TEMPERATURE, "system": system}))?;
+        session.push(json!({
+            "cwd": root, "model": model, "temperature": crate::llm::TEMPERATURE, "system": system,
+            "air": format!("{} {}", env!("CARGO_PKG_VERSION"), env!("AIR_BUILD")),
+        }))?;
         Ok(session)
     }
 
@@ -66,6 +69,15 @@ impl Session {
     }
 
     pub fn push(&mut self, entry: Value) -> Result<()> {
+        self.flush()?;
+        self.write(entry)
+    }
+
+    pub fn flush(&mut self) -> Result<()> {
+        crate::ui::events().into_iter().try_for_each(|event| self.write(event))
+    }
+
+    fn write(&mut self, entry: Value) -> Result<()> {
         self.file.write_all(format!("{entry}\n").as_bytes())?;
         self.entries.push(entry);
         Ok(())

@@ -306,6 +306,7 @@ for request in _inbox:
             print(f"hint: {hint}")
     shadowed = [name for name, tool in TOOLS.items() if G.get(name) is not tool]
     if shadowed:
+        _report["shadowed"] = shadowed
         print(f"[{', '.join(shadowed)}: air's helpers, restored before the next run]")
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     if _report.get("check") and _tree() != _checked:
@@ -317,6 +318,7 @@ for request in _inbox:
     text = ANSI.sub("", _read(capture).decode("utf-8", "replace"))
     capture.close()
     G["_last"] = text
+    _report["chars"] = len(text)
     if len(text) > 2 * HALF:
         text = f"{text[:HALF]}\n[… {len(text) - 2 * HALF} characters omitted; the full output is in _last]\n{text[-HALF:]}"
     _outbox.write(json.dumps(dict(_report, out=text or "(no output)", error=failed)) + "\n")

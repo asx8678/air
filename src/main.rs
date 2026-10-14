@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
     };
     let mut agent = agent::Agent::new(&root, &home, config, cli.resume, cli.yolo)?;
     if let Some(task) = cli.task {
+        eprintln!("[session {}]", agent.path().display());
         let verified = agent.run(&task).await?;
         std::process::exit(if verified { 0 } else { 1 });
     }
