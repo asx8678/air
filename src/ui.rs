@@ -383,7 +383,7 @@ pub fn plan(plan: &Value) {
 
 pub fn note(text: &str) {
     clear_live();
-    println!("{}", paint("33", &format!("· {text}")));
+    println!("{}", paint("33", &format!("· {}", printable(text))));
 }
 
 pub fn report(rows: &[(&str, String)], verdict: &str, good: bool) {

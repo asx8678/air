@@ -11,7 +11,7 @@ pub fn cut(entries: &[Value], prev: usize, keep_tokens: usize) -> usize {
         if tail > keep_tokens {
             break;
         }
-        if role != "tool" {
+        if role == "assistant" {
             keep = i;
         }
     }
@@ -33,6 +33,13 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
             dialogue.push(format!("#{a} assistant (historical, not a verified outcome):\n{}", excerpt(text(a), 1000)));
         }
         dialogue.push(format!("#{u} user:\n{}", excerpt(text(u), 2000)));
+    }
+    let after = users.last().map_or(1, |&u| u + 1);
+    if let Some(a) = (after..keep).rev().find(|&i| role(i) == "assistant" && said(i)) {
+        dialogue.push(format!(
+            "#{a} assistant, latest reply (historical, not a verified outcome):\n{}",
+            excerpt(text(a), 4000)
+        ));
     }
     let requests: Vec<String> =
         users[..users.len() - recent.len()].iter().map(|&i| format!("#{i} {}", line(text(i), 160))).collect();
@@ -127,7 +134,7 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
 
     let mut out = String::from("[Summary of earlier work, rebuilt from the session log. Newer messages follow it.]\n");
     for (title, lines, cap) in [
-        ("Recent user directions", dialogue, 8_192),
+        ("Recent user directions", dialogue, 12_288),
         ("Accepted criteria", criteria, 2_048),
         ("Carry forward", carry, 3_072),
         ("Earlier requests", requests, 3_072),

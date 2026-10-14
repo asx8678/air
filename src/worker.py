@@ -5,6 +5,7 @@ CHECK = os.environ.pop("AIR_CHECK", "")
 FMT = os.environ.pop("AIR_FMT", "")
 LOG = os.environ.pop("AIR_LOG", "")
 HALF = 4000
+LIMIT = 8 << 20
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\r(?!\n)")
 
 _inbox = os.fdopen(os.dup(0), encoding="utf-8")
@@ -29,8 +30,19 @@ def _exec(cmd, timeout):
             if not isinstance(e, subprocess.TimeoutExpired):
                 raise
             code = f"timeout after {timeout}s"
-        out.seek(0)
-        return ANSI.sub("", out.read().decode("utf-8", "replace")), code
+        with contextlib.suppress(OSError):
+            os.killpg(p.pid, signal.SIGKILL)
+        return ANSI.sub("", _read(out).decode("utf-8", "replace")), code
+
+
+def _read(f):
+    size = f.seek(0, 2)
+    f.seek(0)
+    if size <= LIMIT:
+        return f.read()
+    head = f.read(LIMIT // 2)
+    f.seek(-LIMIT // 2, 2)
+    return head + f"\n[… {size - LIMIT} bytes omitted]\n".encode() + f.read()
 
 
 def _rel(path):
@@ -87,11 +99,12 @@ def edit(path, old, new):
         with open(full, encoding="utf-8", newline="") as f:
             raw = f.read()
         crlf = "\r\n" in raw and raw.count("\r\n") == raw.count("\n")
-        text = raw.replace("\r\n", "\n") if crlf else raw
-        n = text.count(old)
+        eol = (lambda s: s.replace("\r\n", "\n")) if crlf else (lambda s: s)
+        text, find, put = eol(raw), eol(old), eol(new)
+        n = text.count(find)
         if n != 1:
             raise ValueError(f"old text {'not found' if n == 0 else f'occurs {n} times'} in {rel}")
-        result = text.replace(old, new, 1)
+        result = text.replace(find, put, 1)
         with open(full, "w", encoding="utf-8", newline="\r\n" if crlf else "") as f:
             f.write(result)
         return text, result
@@ -197,7 +210,7 @@ def _hint(e, misuse):
     text = str(e)
     if isinstance(e, NameError) and re.search(r"'(read|files|grep|ls|cat)'", text):
         return 'explore with plain Python: open(), re, pathlib and sh("git ls-files")'
-    if isinstance(e, SyntaxError) and sys.version_info < (3, 10):
+    if isinstance(e, SyntaxError) and sys.version_info < (3, 10) and (e.text or "").lstrip().startswith(("match ", "case ")):
         return f"the worker runs Python {sys.version_info[0]}.{sys.version_info[1]}: no match statements or X | Y types"
     if misuse:
         name = text.split("(")[0]
@@ -255,8 +268,7 @@ for request in _inbox:
     sys.stdout.flush()
     os.dup2(_null, 1)
     os.dup2(_null, 2)
-    capture.seek(0)
-    text = ANSI.sub("", capture.read().decode("utf-8", "replace"))
+    text = ANSI.sub("", _read(capture).decode("utf-8", "replace"))
     capture.close()
     G["_last"] = text
     if len(text) > 2 * HALF:

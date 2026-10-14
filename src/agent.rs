@@ -8,6 +8,8 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
+use tokio::signal::unix::{SignalKind, signal};
 
 const COMPACT_AT: u64 = 100_000;
 const MAX_REQUESTS: usize = 200;
@@ -42,12 +44,21 @@ impl Agent {
     }
 
     pub async fn run(&mut self, task: &str) -> Result<bool> {
-        let _bar = ui::Turn::start();
+        let bar = ui::Turn::start();
+        let (mut term, mut hup) = (signal(SignalKind::terminate())?, signal(SignalKind::hangup())?);
+        let mut quit = false;
         let finished = tokio::select! {
             result = self.turn(task) => Some(result),
             _ = tokio::signal::ctrl_c() => None,
+            _ = term.recv() => { quit = true; None }
+            _ = hup.recv() => { quit = true; None }
         };
         ui::clear_live();
+        if quit {
+            drop(bar);
+            self.worker = None;
+            std::process::exit(143);
+        }
         if let Some(result) = finished {
             return result;
         }
@@ -193,10 +204,10 @@ impl Agent {
         ui::run("check()");
         let before = self.fingerprint();
         let script = format!("exec 2>&1\n{check}");
-        let mut cmd = worker::sandboxed(&self.root, self.yolo, &self.session.path, "/bin/sh", &["-c", &script]);
-        let (passed, out) = match tokio::time::timeout(CHECK_TIMEOUT, cmd.stdin(Stdio::null()).output()).await {
-            Ok(Ok(out)) => (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned()),
-            Ok(Err(e)) => (false, e.to_string()),
+        let cmd = worker::sandboxed(&self.root, self.yolo, &self.session.path, "/bin/sh", &["-c", &script]);
+        let (passed, out) = match tokio::time::timeout(CHECK_TIMEOUT, grouped(cmd)).await {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => (false, format!("{e:#}")),
             Err(_) => (false, format!("timeout after {}s", CHECK_TIMEOUT.as_secs())),
         };
         let clean = self.fingerprint() == before;
@@ -315,6 +326,32 @@ impl Agent {
         ui::note(&format!("compacted entries #1-#{} into a {} byte summary", keep - 1, summary.len()));
         self.session.push(json!({"compact": {"keep": keep, "summary": summary, "at": self.compact_at}}))
     }
+}
+
+struct Group(Option<u32>);
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            let group = format!("-{pid}");
+            let _ = std::process::Command::new("kill").args(["-KILL", "--", &group]).stderr(Stdio::null()).status();
+        }
+    }
+}
+
+async fn grouped(mut cmd: tokio::process::Command) -> Result<(bool, String)> {
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).process_group(0).spawn()?;
+    let group = Group(child.id());
+    let mut stdout = child.stdout.take().context("check stdout")?;
+    let mut out = vec![];
+    let wait = async {
+        let status = child.wait().await;
+        drop(group);
+        status
+    };
+    let (status, read) = tokio::join!(wait, stdout.read_to_end(&mut out));
+    read?;
+    Ok((status?.success(), String::from_utf8_lossy(&out).into_owned()))
 }
 
 fn finish(mut meta: Value) -> (String, Value) {
