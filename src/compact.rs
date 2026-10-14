@@ -1,36 +1,23 @@
-//! Deterministic, LLM-free compaction. A summary is a pure function of the raw log entries before
-//! the cut. It never reads an earlier summary, it is at most 32 KiB, and every #n in it is a log line
-//! that recall(n) returns exactly. Facts come from typed fields the host recorded, never from
-//! parsing output text.
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-/// Raw tail kept after a cut, in estimated tokens (4 bytes each).
-const KEEP_TOKENS: usize = 20_000;
 const MAX_BYTES: usize = 32 * 1024;
 
-/// The earliest user or assistant entry after the previous cut whose raw tail fits KEEP_TOKENS, or
-/// entries.len() (compact everything) when none fits. A tool result always directly follows the
-/// assistant entry that called it, so cutting at a user or assistant entry never splits a pair.
-pub fn cut(entries: &[Value], prev: usize) -> usize {
+pub fn cut(entries: &[Value], prev: usize, keep_tokens: usize) -> usize {
     let (mut tail, mut keep) = (0, entries.len());
     for i in (prev + 1..entries.len()).rev() {
-        let Some(role) = entries[i]["role"].as_str() else { continue }; // markers are not sent
+        let Some(role) = entries[i]["role"].as_str() else { continue };
         tail += entries[i].to_string().len() / 4;
-        if tail > KEEP_TOKENS {
+        if tail > keep_tokens {
             break;
         }
         if role != "tool" {
             keep = i;
         }
     }
-    // Never cut past the newest user direction: its full text must reach the model.
-    let newest =
-        (prev + 1..entries.len()).rev().find(|&i| entries[i]["role"] == "user" && entries[i]["meta"]["host"].is_null());
-    newest.map_or(keep, |u| keep.min(u))
+    keep
 }
 
-/// Summary of entries #1..keep, read straight from the raw log.
 pub fn summary(entries: &[Value], keep: usize) -> String {
     let role = |i: usize| entries[i]["role"].as_str().unwrap_or_default();
     let text = |i: usize| entries[i]["content"].as_str().unwrap_or_default();
@@ -40,7 +27,6 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
         range.clone().filter(|&i| role(i) == "user" && entries[i]["meta"]["host"].is_null()).collect();
     let recent = &users[users.len().saturating_sub(3)..];
 
-    // The last three user directions, each with the assistant text it answered.
     let mut dialogue = vec![];
     for &u in recent {
         if let Some(a) = (1..u).rev().take_while(|&i| role(i) != "user").find(|&i| role(i) == "assistant" && said(i)) {
@@ -51,11 +37,11 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
     let requests: Vec<String> =
         users[..users.len() - recent.len()].iter().map(|&i| format!("#{i} {}", line(text(i), 160))).collect();
 
-    // Criteria, files, failures and status from what each run reported, never parsed from its output.
     let (mut criteria, mut carry) = (vec![], vec![]);
-    let mut files: BTreeMap<&str, (usize, usize)> = BTreeMap::new(); // path -> (1 modified | 2 created, last #)
-    let mut failures: Vec<(String, String)> = vec![]; // (action, line); dropped by a later success of the same action
+    let mut files: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    let mut failures: Vec<(String, String)> = vec![];
     let mut status = vec![];
+    let mut failing_check = None;
     for i in range.clone() {
         let meta = &entries[i]["meta"];
         if let Some(c) = meta["accepted"].as_str() {
@@ -64,7 +50,6 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
         if let Some(notes) = meta["carry"].as_array() {
             carry = notes.iter().filter_map(Value::as_str).map(|n| format!("#{i} {n}")).collect();
         }
-        // Each edit, write and check of a run, in order; a failure stays until the same action succeeds.
         for act in meta["actions"].as_array().into_iter().flatten() {
             let (tool, path, ok) = (act["tool"].as_str().unwrap_or_default(), act["path"].as_str(), act["ok"] == true);
             let action = path.map_or_else(|| tool.to_string(), |p| format!("{tool} {p}"));
@@ -77,6 +62,7 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
                 None => {
                     status.retain(|s: &String| !s.starts_with("last check"));
                     status.push(format!("last check: #{i} {}", if ok { "passed" } else { "FAILED" }));
+                    failing_check = (!ok).then_some(i);
                 }
                 _ => {}
             }
@@ -94,9 +80,10 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
     ranked.sort_by_key(|(_, (rank, _))| std::cmp::Reverse(*rank));
     let files: Vec<String> =
         ranked.iter().map(|(path, (rank, i))| format!("{} {path} #{i}", ["", "modified", "created"][*rank])).collect();
+    let check_output: Vec<String> =
+        failing_check.map(|i| format!("#{i}\n{}", tail(text(i), 1536))).into_iter().collect();
 
-    // One line per event: user and assistant text, each tool call with its result. Results are
-    // matched only among the entries right after their call, since providers may reuse call ids.
+    let skip = |l: &&str| l.is_empty() || l.starts_with('#') || l.starts_with("import ") || l.starts_with("from ");
     let mut events = vec![];
     for i in range {
         match role(i) {
@@ -112,11 +99,24 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
                     let name = call["function"]["name"].as_str().unwrap_or_default();
                     let args: Value = serde_json::from_str(call["function"]["arguments"].as_str().unwrap_or_default())
                         .unwrap_or_default();
-                    let what = line(args["code"].as_str().unwrap_or_default(), 80);
+                    let code = args["code"].as_str().unwrap_or_default();
+                    let what = line(code.lines().map(str::trim).find(|l| !skip(l)).unwrap_or_default(), 80);
                     let result = (i + 1..keep)
                         .take_while(|&r| role(r) == "tool")
                         .find(|&r| entries[r]["tool_call_id"] == call["id"]);
-                    let outcome = result.map_or_else(|| "no result".into(), |r| format!("#{r} {}", line(text(r), 80)));
+                    let outcome = result.map_or_else(
+                        || "no result".into(),
+                        |r| {
+                            let out = text(r);
+                            let shown = if entries[r]["meta"]["error"] == true {
+                                let last = |l: &&str| !l.is_empty() && !l.starts_with("hint:");
+                                out.lines().map(str::trim).rev().find(last).unwrap_or_default()
+                            } else {
+                                out
+                            };
+                            format!("#{r} {}", line(shown, 80))
+                        },
+                    );
                     events.push(format!("#{i} {name} {what} → {outcome}"));
                 }
             }
@@ -127,13 +127,14 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
 
     let mut out = String::from("[Summary of earlier work, rebuilt from the session log. Newer messages follow it.]\n");
     for (title, lines, cap) in [
-        ("Recent user directions", dialogue, 10_240),
+        ("Recent user directions", dialogue, 8_192),
         ("Accepted criteria", criteria, 2_048),
         ("Carry forward", carry, 3_072),
         ("Earlier requests", requests, 3_072),
         ("Files", files, 4_096),
         ("Unresolved failures", failures.into_iter().map(|(_, l)| l).collect(), 3_072),
         ("Status", status, 1_536),
+        ("Failing check output", check_output, 2_048),
         ("Latest events", events, 4_096),
     ] {
         if !lines.is_empty() {
@@ -153,7 +154,6 @@ fn touch<'a>(files: &mut BTreeMap<&'a str, (usize, usize)>, path: &'a str, rank:
     *seen = (seen.0.max(rank), i);
 }
 
-/// A titled block within `cap` bytes; when too long, its middle lines give way to an omission note.
 fn block(title: &str, lines: &[String], cap: usize) -> String {
     let n = lines.len();
     for keep in (0..=n).rev() {
@@ -171,7 +171,6 @@ fn block(title: &str, lines: &[String], cap: usize) -> String {
     clip(title, cap).to_string()
 }
 
-/// Text cut to `max` bytes with an explicit loss marker.
 fn excerpt(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
@@ -180,7 +179,6 @@ fn excerpt(s: &str, max: usize) -> String {
     format!("{head}\n[… {} bytes omitted]", s.len() - head.len())
 }
 
-/// First non-empty line, at most `max` bytes.
 fn line(s: &str, max: usize) -> String {
     let first = s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
     if first.len() <= max { first.to_string() } else { format!("{}…", clip(first, max)) }
@@ -192,4 +190,12 @@ fn clip(s: &str, max: usize) -> &str {
         end -= 1;
     }
     &s[..end]
+}
+
+pub fn tail(s: &str, max: usize) -> &str {
+    let mut start = s.len().saturating_sub(max);
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    &s[start..]
 }

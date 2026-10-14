@@ -1,25 +1,21 @@
-//! A small Markdown renderer for the terminal, fed line by line as the model's text streams in:
-//! headings, bold, inline code, code fences, bullets, quotes, rules and tables. Piped output stays raw.
-use crate::ui::{paint, styled, width, wrap};
+use crate::ui::{paint, printable, styled, width, wrap};
 
 #[derive(Default)]
 pub struct Markdown {
     line: String,
     fence: bool,
-    table: Vec<String>, // rows held back until the table ends, so columns can be aligned
+    table: Vec<String>,
 }
 
 impl Markdown {
-    /// Adds streamed text; every completed line is rendered at once.
     pub fn push(&mut self, text: &str) {
-        self.line.push_str(text);
+        self.line.push_str(&printable(text));
         while let Some(end) = self.line.find('\n') {
             let line: String = self.line.drain(..=end).collect();
-            self.render(line.trim_end_matches(['\n', '\r']));
+            self.render(line.trim_end_matches('\n'));
         }
     }
 
-    /// Renders whatever is left after the stream ends.
     pub fn finish(&mut self) {
         if !self.line.is_empty() {
             let line = std::mem::take(&mut self.line);
@@ -54,7 +50,7 @@ impl Markdown {
         }
         let hashes = text.chars().take_while(|&c| c == '#').count();
         if (1..=6).contains(&hashes) && text[hashes..].starts_with(' ') {
-            let title = inline(text[hashes..].trim()).replace("\x1b[22m", ""); // keep the heading bold
+            let title = inline(text[hashes..].trim()).replace("\x1b[22m", "");
             return paint(if hashes == 1 { "1;4" } else { "1" }, &title);
         }
         if text.len() >= 3 && (text.chars().all(|c| c == '-') || text.chars().all(|c| c == '*')) {
@@ -69,7 +65,6 @@ impl Markdown {
         format!("{indent}{}", inline(text))
     }
 
-    /// A held-back table with its columns padded to a common width.
     fn flush_table(&mut self) {
         let rows: Vec<Vec<String>> = std::mem::take(&mut self.table)
             .iter()
@@ -83,7 +78,6 @@ impl Markdown {
                 *w = (*w).max(visible(cell));
             }
         }
-        // Too wide for the terminal: narrow the widest column until it fits; its cells wrap.
         let room = width().saturating_sub(3 * widths.len() + 1);
         while widths.iter().sum::<usize>() > room {
             let (i, &widest) = widths.iter().enumerate().max_by_key(|&(_, w)| *w).expect("a table has columns");
@@ -116,8 +110,6 @@ impl Markdown {
     }
 }
 
-/// Width of a cell as shown: the escapes inline() adds take no room, while a marker without a
-/// partner stays typed and counts.
 fn visible(cell: &str) -> usize {
     let mut plain = inline(cell);
     for esc in ["\x1b[36m", "\x1b[39m", "\x1b[1m", "\x1b[22m"] {
@@ -126,8 +118,6 @@ fn visible(cell: &str) -> usize {
     plain.chars().count()
 }
 
-/// `code` and **bold** inside one line, in one pass so code can sit inside bold. A marker without
-/// a partner later in the line stays as typed.
 pub fn inline(text: &str) -> String {
     let (mut out, mut bold, mut code) = (String::new(), false, false);
     let mut rest = text;

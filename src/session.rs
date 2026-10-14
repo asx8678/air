@@ -1,9 +1,8 @@
-//! The append-only session log, the ground truth. Line n of the file is entry #n; line 0 is the
-//! header that pins model, sampling and the system prompt. Compaction only appends a marker.
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,36 +12,34 @@ pub struct Session {
     file: File,
 }
 
-/// Agent state, derived from the log instead of being kept beside it.
 #[derive(Default)]
 pub struct State {
-    /// accept() criteria of the current user turn
     pub accepted: Option<String>,
-    /// tree fingerprint at the last check(), when that check passed
-    pub check: Option<String>,
-    /// carry() notes, kept in every compaction summary until cleared
     pub carry: Vec<String>,
-    /// plan() steps and which are done, for the current user turn
     pub plan: Value,
 }
 
 impl Session {
     pub fn create(home: &Path, root: &Path, model: &str, system: &str) -> Result<Self> {
         let dir = home.join(".air/sessions");
-        fs::create_dir_all(&dir)?;
+        DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
         let secs = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let path = dir.join(format!("{secs}-{}.jsonl", std::process::id()));
-        let file = OpenOptions::new().create_new(true).append(true).open(&path)?;
-        file.try_lock()?; // held while this process appends; a resume elsewhere must not cut its lines
+        let file = OpenOptions::new().create_new(true).append(true).mode(0o600).open(&path)?;
+        file.try_lock()?;
         let mut session = Self { path, entries: vec![], file };
         session.push(json!({"cwd": root, "model": model, "temperature": crate::llm::TEMPERATURE, "system": system}))?;
         Ok(session)
     }
 
-    /// The newest session started in this repo.
     pub fn resume(home: &Path, root: &Path) -> Result<Self> {
-        let mut paths: Vec<PathBuf> =
-            fs::read_dir(home.join(".air/sessions")).into_iter().flatten().flatten().map(|e| e.path()).collect();
+        let mut paths: Vec<PathBuf> = fs::read_dir(home.join(".air/sessions"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+            .collect();
         paths.sort();
         for path in paths.into_iter().rev() {
             let first = BufReader::new(File::open(&path)?).lines().next().transpose()?.unwrap_or_default();
@@ -51,8 +48,6 @@ impl Session {
                 if file.try_lock().is_err() {
                     bail!("{} is in use by another air", path.display());
                 }
-                // A crash can leave the last line without its newline: complete it when it is a whole
-                // entry, else drop it, so line n stays entry #n.
                 let mut text = fs::read_to_string(&path)?;
                 let cut = text.rfind('\n').map_or(0, |i| i + 1);
                 if serde_json::from_str::<Value>(&text[cut..]).is_ok() {
@@ -71,34 +66,45 @@ impl Session {
     }
 
     pub fn push(&mut self, entry: Value) -> Result<()> {
-        // One write per entry: serde_json's Display would issue one per JSON fragment.
         self.file.write_all(format!("{entry}\n").as_bytes())?;
         self.entries.push(entry);
         Ok(())
     }
 
-    /// First entry kept raw by the last compaction (1 when nothing has been compacted).
     pub fn keep(&self) -> usize {
         self.entries.iter().rev().find_map(|e| e["compact"]["keep"].as_u64()).map_or(1, |k| k as usize)
     }
 
     pub fn last_prompt_tokens(&self) -> u64 {
-        self.entries.iter().rev().find_map(|e| e["meta"]["usage"]["prompt_tokens"].as_u64()).unwrap_or(0)
+        let current = self.entries.iter().rev().take_while(|e| e["compact"].is_null());
+        current.map(|e| &e["meta"]["usage"]["prompt_tokens"]).find_map(Value::as_u64).unwrap_or(0)
     }
 
-    /// The request: system prompt, the latest summary, then the raw entries from the cut on,
-    /// with every tool call paired with exactly one result.
+    fn newest_task(&self) -> Option<usize> {
+        let user = |i: &usize| self.entries[*i]["role"] == "user" && self.entries[*i]["meta"]["host"].is_null();
+        (1..self.entries.len()).rev().find(user)
+    }
+
     pub fn messages(&self) -> Vec<Value> {
         let mut out = vec![json!({"role": "system", "content": self.entries[0]["system"]})];
+        let (keep, newest) = (self.keep(), self.newest_task());
         if let Some(summary) = self.entries.iter().rev().find_map(|e| e["compact"]["summary"].as_str()) {
-            out.push(json!({"role": "user", "content": summary}));
+            let mut content = summary.to_string();
+            if let Some(u) = newest.filter(|&u| u < keep) {
+                let task = self.entries[u]["content"].as_str().unwrap_or_default();
+                content += &format!("\n\n[Current task, entry #{u}]\n{task}");
+            }
+            out.push(json!({"role": "user", "content": content}));
         }
-        let mut open: Vec<Value> = vec![]; // ids of calls still waiting for their result
-        for entry in &self.entries[self.keep()..] {
-            let Some(role) = entry["role"].as_str() else { continue }; // markers
+        let mut open: Vec<Value> = vec![];
+        for (i, entry) in self.entries.iter().enumerate().skip(keep) {
+            let Some(role) = entry["role"].as_str() else { continue };
             let mut message = entry.clone();
             if let Some(fields) = message.as_object_mut() {
                 fields.remove("meta");
+                if newest.is_some_and(|u| i < u) {
+                    fields.remove("reasoning_content");
+                }
             }
             if role == "tool" {
                 if let Some(i) = open.iter().position(|id| *id == message["tool_call_id"]) {
@@ -137,15 +143,11 @@ impl Session {
             if let Some(notes) = meta["carry"].as_array() {
                 state.carry = notes.iter().filter_map(|n| n.as_str().map(String::from)).collect();
             }
-            if let Some(passed) = meta["check"].as_bool() {
-                state.check = passed.then(|| meta["fp"].as_str().unwrap_or_default().into());
-            }
         }
         state
     }
 }
 
-/// An interrupted turn can leave calls without results, which providers reject.
 fn answer_missing(out: &mut Vec<Value>, open: &mut Vec<Value>) {
     for id in open.drain(..) {
         out.push(json!({"role": "tool", "tool_call_id": id, "content": "tool result missing (interrupted)"}));

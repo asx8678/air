@@ -1,5 +1,3 @@
-//! The terminal UI: a scrolling log of short step lines and, on a terminal, a status bar pinned to
-//! the last row (a scroll region keeps the log above it). Piped or NO_COLOR output gets plain lines.
 use serde_json::Value;
 use std::io::{IsTerminal, Write};
 use std::sync::Mutex;
@@ -11,13 +9,11 @@ struct Bar {
     started: Instant,
     activity: String,
     plan: String,
-    tokens: (u64, u64), // prompt, cached
+    tokens: (u64, u64),
 }
 
 static BAR: Mutex<Option<Bar>> = Mutex::new(None);
-/// Runs so far in this turn, for step numbers.
 static STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-/// The step line being run, and since when, so the result can replace "running" on it.
 static RUNNING: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 
 pub fn styled() -> bool {
@@ -28,7 +24,10 @@ pub fn paint(code: &str, text: &str) -> String {
     if styled() { format!("\x1b[{code}m{text}\x1b[0m") } else { text.to_string() }
 }
 
-/// Rows and columns of the controlling terminal.
+pub fn printable(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).collect()
+}
+
 fn size() -> Option<(u16, u16)> {
     let tty = std::fs::File::open("/dev/tty").ok()?;
     let out = std::process::Command::new("stty").arg("size").stdin(tty).output().ok()?;
@@ -37,7 +36,6 @@ fn size() -> Option<(u16, u16)> {
     Some((it.next()??, it.next()??)).filter(|&(rows, cols)| rows >= 5 && cols >= 20)
 }
 
-/// The status bar of one turn; dropping it gives the last row back to the terminal.
 pub struct Turn(Option<tokio::task::JoinHandle<()>>);
 
 impl Turn {
@@ -77,7 +75,6 @@ impl Drop for Turn {
     }
 }
 
-/// Keep the last row out of the scroll region, leaving the cursor where the log continues.
 fn reserve(rows: u16) {
     print!("\n\x1b[1A\x1b7\x1b[1;{}r\x1b8", rows.saturating_sub(1));
 }
@@ -115,9 +112,14 @@ pub fn tokens(n: u64) -> String {
     if n >= 1000 { format!("{:.1}k tok", n as f64 / 1000.0) } else { format!("{n} tok") }
 }
 
-/// What the agent is doing right now, shown in the status bar.
 pub fn activity(text: &str) {
-    update(|bar| bar.activity = text.to_string());
+    let mut bar = BAR.lock().unwrap();
+    match bar.as_mut() {
+        Some(bar) if bar.activity != text => bar.activity = text.to_string(),
+        _ => return,
+    }
+    drop(bar);
+    draw();
 }
 
 pub fn usage(usage: &Value) {
@@ -127,23 +129,18 @@ pub fn usage(usage: &Value) {
     update(|bar| bar.tokens = (bar.tokens.0 + prompt, bar.tokens.1 + cached.unwrap_or(0)));
 }
 
-/// Usable line width: the terminal's when there is a status bar, else a fixed 120.
 pub fn width() -> usize {
     BAR.lock().unwrap().as_ref().map_or(120, |b| b.cols as usize)
 }
 
-/// Whitespace collapsed to single spaces, cut to `max` characters.
 fn flat(text: &str, max: usize) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = printable(text).split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() <= max { flat } else { flat.chars().take(max).collect::<String>() + "…" }
 }
 
-/// Lines currently held by the live thinking box, and when it was last drawn.
 static LIVE: Mutex<(usize, Option<Instant>)> = Mutex::new((0, None));
 const LIVE_LINES: usize = 3;
 
-/// Live thinking: a small box in the log, redrawn in place, showing the latest lines of reasoning.
-/// The status bar only says for how long. Without a terminal there is no box, just the summary.
 pub fn thinking(text: &str, secs: u64) {
     activity(&format!("thinking {secs}s"));
     let Some(cols) = BAR.lock().unwrap().as_ref().map(|b| b.cols as usize) else { return };
@@ -151,6 +148,7 @@ pub fn thinking(text: &str, secs: u64) {
     if live.1.is_some_and(|drawn| drawn.elapsed() < Duration::from_millis(80)) {
         return;
     }
+    let text = printable(text);
     let width = cols.saturating_sub(6).max(20);
     let start = text.char_indices().rev().nth(width * (LIVE_LINES + 2)).map_or(0, |(i, _)| i);
     let mut lines: Vec<String> = vec![String::new()];
@@ -179,14 +177,13 @@ pub fn thinking(text: &str, secs: u64) {
     *live = (LIVE_LINES + 1, Some(Instant::now()));
 }
 
-/// Live while the model writes code: one line with its size so far, erased when the run starts.
 pub fn writing(lines: usize) {
     activity("writing code");
     if BAR.lock().unwrap().is_none() {
         return;
     }
     if LIVE.lock().unwrap().0 > 1 {
-        clear_live(); // a thinking box is still up
+        clear_live();
     }
     let mut live = LIVE.lock().unwrap();
     if live.1.is_some_and(|drawn| drawn.elapsed() < Duration::from_millis(80)) {
@@ -199,7 +196,6 @@ pub fn writing(lines: usize) {
     *live = (1, Some(Instant::now()));
 }
 
-/// Erase the live thinking box, leaving the cursor where it began.
 pub fn clear_live() {
     let mut live = LIVE.lock().unwrap();
     if live.0 > 0 {
@@ -209,7 +205,6 @@ pub fn clear_live() {
     *live = (0, None);
 }
 
-/// A finished reasoning block on one line: what it decided, which is usually its last sentence.
 pub fn thought(text: &str, secs: u64) {
     clear_live();
     let sentences = sentences(text);
@@ -221,14 +216,11 @@ pub fn thought(text: &str, secs: u64) {
     step_note(&body, text, secs, "2;3");
 }
 
-/// Short prose the model wrote before calling a tool: it says what the step is for, so it takes
-/// the thought's place on one line instead of standing apart as an answer.
 pub fn narration(text: &str, thinking: &str, secs: u64) {
     clear_live();
     step_note(text, thinking, secs, "2");
 }
 
-/// One `◇` line above a step. Long thinks get a badge with time and size; /think prints all of it.
 fn step_note(body: &str, thinking: &str, secs: u64, style: &str) {
     let total = thinking.trim().chars().count();
     let badge = if secs >= 5 || total >= 2000 {
@@ -240,7 +232,6 @@ fn step_note(body: &str, thinking: &str, secs: u64, style: &str) {
     println!("    {} {}{}", paint("35", "◇"), paint(style, &flat(body, room)), paint("2", &badge));
 }
 
-/// Sentences end at . ? or ! followed by whitespace, or at a line break, so "calc.py" stays whole.
 fn sentences(text: &str) -> Vec<&str> {
     let mut out = vec![];
     let mut start = 0;
@@ -258,16 +249,14 @@ fn sentences(text: &str) -> Vec<&str> {
     out
 }
 
-/// The string literal right after `call(` on a line, as in open("src/a.rs") or sh("cargo test").
 fn literal_after<'a>(line: &'a str, call: &str) -> Option<&'a str> {
     let rest = &line[line.find(call)? + call.len()..];
     let quote = rest.chars().next().filter(|c| matches!(c, '"' | '\''))?;
     rest[1..].split(quote).next()
 }
 
-/// A run starting: a step number and what it does, read from its first meaningful line.
-/// The result is added to the same line when the run finishes.
 pub fn run(code: &str) {
+    let code = printable(code);
     let step = STEP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     let skip = |l: &&str| l.is_empty() || l.starts_with('#') || l.starts_with("import ") || l.starts_with("from ");
     let first = code.lines().map(str::trim).find(|l| !skip(l)).unwrap_or("(no code)");
@@ -295,8 +284,6 @@ pub fn run(code: &str) {
     activity(&format!("step {step} running · {}", flat(first, 60)));
 }
 
-/// What a run did: its result on the step line, then criteria, plan, file changes and checks
-/// beneath it. Output is previewed only when it is short; errors always show their last lines.
 pub fn ran(meta: &Value, out: &str) {
     let lines: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty() && *l != "(no output)").collect();
     let actions = meta["actions"].as_array().cloned().unwrap_or_default();
@@ -316,7 +303,7 @@ pub fn ran(meta: &Value, out: &str) {
     let took = match RUNNING.lock().unwrap().take() {
         Some((line, started)) => {
             if BAR.lock().unwrap().is_some() {
-                print!("\r\x1b[2K{line}"); // replace "running" with the result
+                print!("\r\x1b[2K{line}");
             }
             let secs = started.elapsed().as_secs_f64();
             if secs >= 1.0 { paint("2", &format!(" · {secs:.1}s")) } else { String::new() }
@@ -333,7 +320,7 @@ pub fn ran(meta: &Value, out: &str) {
     for act in &actions {
         let (tool, ok) = (act["tool"].as_str().unwrap_or_default(), act["ok"] == true);
         let mark = if ok { paint("32", "✓") } else { paint("31", "✗") };
-        match act["path"].as_str() {
+        match act["path"].as_str().map(|p| flat(p, 120)) {
             Some(path) if ok => {
                 let (a, r) = (act["added"].as_u64().unwrap_or(0), act["removed"].as_u64().unwrap_or(0));
                 println!(
@@ -342,12 +329,15 @@ pub fn ran(meta: &Value, out: &str) {
                     paint("31", &format!("−{r}"))
                 );
             }
-            Some(path) => println!("      {mark} {tool} {path}: {}", act["error"].as_str().unwrap_or_default()),
+            Some(path) => {
+                let error = flat(act["error"].as_str().unwrap_or_default(), width().saturating_sub(20).max(30));
+                println!("      {mark} {tool} {path}: {error}");
+            }
             None => println!("      {mark} check {}", if ok { "passed" } else { "FAILED" }),
         }
     }
     let shown: &[&str] = if failed {
-        &lines[lines.len().saturating_sub(4)..] // the error and its hint are at the end
+        &lines[lines.len().saturating_sub(4)..]
     } else if actions.is_empty() && lines.len() <= 3 {
         &lines
     } else {
@@ -358,16 +348,20 @@ pub fn ran(meta: &Value, out: &str) {
     }
 }
 
-/// Before the model's prose: a blank line, so answers stand apart from the steps.
 pub fn prose() {
     if STEP.load(std::sync::atomic::Ordering::Relaxed) > 0 {
         println!();
     }
 }
 
-/// The plan as a checklist; the first open step is the current one.
 pub fn plan(plan: &Value) {
-    let steps: Vec<&str> = plan["steps"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let steps: Vec<String> = plan["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|s| flat(s, width().saturating_sub(10).max(30)))
+        .collect();
     let done: Vec<u64> = plan["done"].as_array().into_iter().flatten().filter_map(Value::as_u64).collect();
     let current = (1..=steps.len() as u64).find(|i| !done.contains(i));
     for (i, step) in (1u64..).zip(&steps) {
@@ -387,13 +381,11 @@ pub fn plan(plan: &Value) {
     update(|bar| bar.plan = progress);
 }
 
-/// A host message, such as compaction or the verify-gate nudge.
 pub fn note(text: &str) {
     clear_live();
     println!("{}", paint("33", &format!("· {text}")));
 }
 
-/// The fixed-shape report that ends a turn.
 pub fn report(rows: &[(&str, String)], verdict: &str, good: bool) {
     let head = format!("── {verdict} ").to_string() + &"─".repeat(36);
     println!("\n{}", paint(if good { "1;32" } else { "1;31" }, &head));
@@ -403,10 +395,9 @@ pub fn report(rows: &[(&str, String)], verdict: &str, good: bool) {
     }
 }
 
-/// Each line of `text` word-wrapped to `room` columns.
 pub fn wrap(text: &str, room: usize) -> Vec<String> {
     let mut out = vec![];
-    for line in text.lines() {
+    for line in printable(text).lines() {
         let mut current = String::new();
         for word in line.split_whitespace() {
             if !current.is_empty() && current.chars().count() + 1 + word.chars().count() > room {

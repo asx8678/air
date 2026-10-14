@@ -1,37 +1,36 @@
-# air's code-mode worker: persistent, standard library only, Python 3.9+.
 import contextlib, difflib, inspect, json, types, linecache, os, re, shlex, signal, subprocess, sys, tempfile, traceback
 
 ROOT = os.getcwd()
 CHECK = os.environ.pop("AIR_CHECK", "")
 FMT = os.environ.pop("AIR_FMT", "")
 LOG = os.environ.pop("AIR_LOG", "")
-HALF = 4000  # characters of output kept from each end
+HALF = 4000
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\r(?!\n)")
 
-# The protocol keeps private copies of the host pipes. Fds 0/1/2 point elsewhere, so nothing
-# the model's code starts can write into it.
 _inbox = os.fdopen(os.dup(0), encoding="utf-8")
 _outbox = os.fdopen(os.dup(1), "w", encoding="utf-8")
 _null = os.open(os.devnull, os.O_RDWR)
 os.dup2(_null, 0)
-_report = {}  # what this run did, for the host
-_state = {}  # accepted criteria, carry notes and the plan, derived by the host from its log
-_checked = None  # the tree the last passing check() saw
+_report = {}
+_state = {}
+_checked = None
 
 
 def _exec(cmd, timeout):
-    p = subprocess.Popen(cmd, shell=True, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                         stderr=subprocess.STDOUT, start_new_session=True)
-    try:
-        out, code = p.communicate(timeout=timeout)[0], p.returncode
-    except BaseException as e:  # timeout or Ctrl-C: stop the whole process group
-        with contextlib.suppress(OSError):
-            os.killpg(p.pid, signal.SIGKILL)
-        out = p.communicate()[0]
-        if not isinstance(e, subprocess.TimeoutExpired):
-            raise
-        code = f"timeout after {timeout}s"
-    return ANSI.sub("", out.decode("utf-8", "replace")), code
+    with tempfile.TemporaryFile() as out:
+        p = subprocess.Popen(cmd, shell=True, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                             start_new_session=True)
+        try:
+            code = p.wait(timeout=timeout)
+        except BaseException as e:
+            with contextlib.suppress(OSError):
+                os.killpg(p.pid, signal.SIGKILL)
+            p.wait()
+            if not isinstance(e, subprocess.TimeoutExpired):
+                raise
+            code = f"timeout after {timeout}s"
+        out.seek(0)
+        return ANSI.sub("", out.read().decode("utf-8", "replace")), code
 
 
 def _rel(path):
@@ -39,12 +38,10 @@ def _rel(path):
 
 
 def _protected():
-    """Where git runs code from outside the sandbox: .git, and a hooks dir kept in the tree."""
     hooks = subprocess.run(["git", "config", "core.hooksPath"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
     dirs = [os.path.join(ROOT, ".git")]
     if hooks:
         hooks = os.path.realpath(os.path.join(ROOT, os.path.expanduser(hooks)))
-        # husky's hooksPath is .husky/_, whose hooks run the scripts in .husky itself.
         dirs.append(os.path.dirname(hooks) if os.path.basename(hooks) == "_" else hooks)
     return [os.path.realpath(d) for d in dirs]
 
@@ -53,10 +50,8 @@ PROTECTED = _protected()
 
 
 def _change(tool, path, make):
-    """The one way files change: inside the repo, after accept(), exact, then formatted."""
     rel = _rel(path)
     real = os.path.realpath(os.path.join(ROOT, rel))
-    # Ctrl-C waits until the write is done and recorded: a cut-off write or an unrecorded one misleads.
     signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
     try:
         if rel.startswith("..") or not real.startswith(ROOT + os.sep):
@@ -80,7 +75,7 @@ def _change(tool, path, make):
         note = f"; fmt failed: {out.strip().splitlines()[0] if out.strip() else code}" if code else ""
     with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
         after = f.read()
-    written = written.replace("\r\n", "\n")  # read back with \n line ends too
+    written = written.replace("\r\n", "\n")
     if after != written:
         diff = difflib.unified_diff(written.splitlines(True), after.splitlines(True), n=1)
         note += "; the formatter changed it:\n" + "".join(list(diff)[2:]).rstrip("\n")
@@ -88,12 +83,9 @@ def _change(tool, path, make):
 
 
 def edit(path, old, new):
-    """Replace the one exact occurrence of old with new."""
     def make(full, rel):
         with open(full, encoding="utf-8", newline="") as f:
             raw = f.read()
-        # Match on \n line ends, as the model reads them, but write back the file's own CRLF. A file
-        # with mixed line ends is matched as it is, so lines the edit does not touch keep theirs.
         crlf = "\r\n" in raw and raw.count("\r\n") == raw.count("\n")
         text = raw.replace("\r\n", "\n") if crlf else raw
         n = text.count(old)
@@ -107,7 +99,6 @@ def edit(path, old, new):
 
 
 def write(path, content):
-    """Create a new file; fails if it exists."""
     def make(full, rel):
         if os.path.lexists(full):
             raise ValueError(f"{rel} exists; use edit")
@@ -119,18 +110,15 @@ def write(path, content):
 
 
 def sh(cmd, timeout=120):
-    """Run a shell command; returns stdout+stderr, ending in '[exit N]' when it fails."""
     out, code = _exec(cmd, timeout)
     return out.rstrip("\n") + (f"\n[exit {code}]" if code else "")
 
 
 def accept(criteria):
-    """Declare what done means. Required before the first edit; check() and the report measure against it."""
     _report["accepted"] = str(criteria)
 
 
 def check():
-    """Run the project's check command, print its output, return True when it passes."""
     if not CHECK:
         print("no check command configured (set check in air.toml)")
         return None
@@ -149,7 +137,6 @@ def check():
 
 
 def _tree():
-    """Size and mtime of every file git does not ignore; a check must leave this unchanged."""
     out = subprocess.run(["git", "ls-files", "-co", "--exclude-standard", "-z"], cwd=ROOT, capture_output=True).stdout
     tree = {}
     for f in filter(None, out.decode("utf-8", "replace").split("\0")):
@@ -160,7 +147,6 @@ def _tree():
 
 
 def carry(note=None, clear=False):
-    """Keep a note in every compaction summary until cleared; carry() alone lists the notes."""
     notes = [] if clear else list(_report.get("carry", _state.get("carry") or []))
     if note is not None:
         note = str(note)
@@ -174,13 +160,12 @@ def carry(note=None, clear=False):
         _report["carry"] = notes
     return notes
 
+
 def plan(steps):
-    """Set this task's steps, replacing any earlier plan. The UI shows them; mark progress with done()."""
     _report["plan"] = {"steps": [str(s) for s in steps], "done": []}
 
 
 def done(step=None):
-    """Mark a step done (1-based; default: the current one). Returns the next step, or None when all are done."""
     p = _report.get("plan") or _state.get("plan")
     if not p:
         raise ValueError("call plan([...]) first")
@@ -192,8 +177,8 @@ def done(step=None):
     rest = [i for i in left if i != n]
     return p["steps"][rest[0] - 1] if rest else None
 
+
 def recall(n):
-    """Session log entry #n exactly as recorded; summaries cite entries as #n."""
     with open(LOG, encoding="utf-8") as f:
         for i, line in enumerate(f):
             if i == n:
@@ -209,7 +194,6 @@ def recall(n):
 
 
 def _hint(e, misuse):
-    """One fixed hint per known mistake, keyed on the exception and our own helpers' messages."""
     text = str(e)
     if isinstance(e, NameError) and re.search(r"'(read|files|grep|ls|cat)'", text):
         return 'explore with plain Python: open(), re, pathlib and sh("git ls-files")'
@@ -226,24 +210,25 @@ def _hint(e, misuse):
             return advice
     return None
 
+
 G = {"__name__": "__main__", "_last": "", "sh": sh, "edit": edit, "write": write, "accept": accept, "carry": carry, "plan": plan, "done": done, "check": check, "recall": recall}
 HELPERS = tuple(f"{name}()" for name in G if not name.startswith("_"))
 
 
-class _Helper(types.ModuleType):  # models often write `import sh`; let that mean the helper
+class _Helper(types.ModuleType):
     def __call__(self, *args, **kwargs):
         return G[self.__name__](*args, **kwargs)
 
 
 for _name in ("sh",):
     sys.modules[_name] = _Helper(_name)
-    setattr(sys.modules[_name], _name, G[_name])  # from sh import sh
-signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C only interrupts a running script
+    setattr(sys.modules[_name], _name, G[_name])
+signal.signal(signal.SIGINT, signal.SIG_IGN)
 for request in _inbox:
     request = json.loads(request)
     code, _state = request["code"], request.get("state") or {}
     _report.clear()
-    capture = tempfile.TemporaryFile()  # prints and stray child output, in order
+    capture = tempfile.TemporaryFile()
     os.dup2(capture.fileno(), 1)
     os.dup2(capture.fileno(), 2)
     sys.stdout = sys.stderr = open(1, "w", encoding="utf-8", errors="replace", buffering=1, closefd=False)
@@ -252,12 +237,10 @@ for request in _inbox:
     try:
         linecache.cache["<run>"] = (len(code), None, code.splitlines(True), "<run>")
         exec(compile(code, "<run>", "exec"), G)
-    except BaseException as e:  # show only the model's own frames
+    except BaseException as e:
         failed = True
         tb = traceback.extract_tb(e.__traceback__)
         frames = [f for f in tb if f.filename == "<run>"]
-        # Rejection: the code never got to act (bad syntax, an unknown name, or a helper called with the
-        # wrong arguments, which Python raises in the caller's frame). Anything else is an effect failure.
         misuse = isinstance(e, TypeError) and tb and tb[-1].filename == "<run>" and str(e).startswith(HELPERS)
         rejected = isinstance(e, (SyntaxError, NameError)) or misuse
         _report["exception"], _report["rejected"] = type(e).__name__, bool(rejected)
@@ -266,7 +249,7 @@ for request in _inbox:
         if hint:
             print(f"hint: {hint}")
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    if _report.get("check") and _tree() != _checked:  # changed after it passed: the pass no longer applies
+    if _report.get("check") and _tree() != _checked:
         _report["check"] = False
         print("[check no longer applies: files changed after it passed; run check() again]")
     sys.stdout.flush()

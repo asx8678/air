@@ -1,20 +1,19 @@
-//! The turn loop: one tool (run: code mode), and the verify gate.
 use crate::llm::{self, Llm};
 use crate::session::Session;
-use crate::worker::Worker;
+use crate::worker::{self, Worker};
 use crate::{Config, compact, ui};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::process::Stdio;
+use std::time::{Duration, Instant};
 
-/// Prompt tokens of the last request at which the history is compacted before the next one.
 const COMPACT_AT: u64 = 100_000;
-/// Model requests in one user turn before it is stopped, so a looping model cannot spend without end.
 const MAX_REQUESTS: usize = 200;
-const GATE: &str = "check() has not passed on the current tree. Run check(), fix what fails, then finish again. \
-                    If it cannot pass, say why in one line.";
+const CHECK_TIMEOUT: Duration = Duration::from_secs(1800);
+const GATE: &str = "The project check failed on the current tree. Fix what fails, run check(), then finish again. \
+                    If it cannot pass, say why in one line. The check output ended with:";
 
 pub struct Agent {
     root: PathBuf,
@@ -23,6 +22,8 @@ pub struct Agent {
     llm: Llm,
     session: Session,
     worker: Option<Worker>,
+    compact_at: u64,
+    pending: Option<Value>,
 }
 
 impl Agent {
@@ -36,79 +37,107 @@ impl Agent {
         };
         let base_url = config.base_url.as_deref().context("set base_url in ~/.config/air/config.toml")?;
         let llm = Llm::new(base_url, &session.entries[0]);
-        Ok(Self { root: root.into(), config, yolo, llm, session, worker: None })
+        let compact_at = session.entries.iter().rev().find_map(|e| e["compact"]["at"].as_u64()).unwrap_or(COMPACT_AT);
+        Ok(Self { root: root.into(), config, yolo, llm, session, worker: None, compact_at, pending: None })
     }
 
-    /// One user turn; Ctrl-C stops it. True when the result is verified or nothing changed.
     pub async fn run(&mut self, task: &str) -> Result<bool> {
         let _bar = ui::Turn::start();
         let finished = tokio::select! {
             result = self.turn(task) => Some(result),
             _ = tokio::signal::ctrl_c() => None,
         };
-        // The stream can end while the thinking box is live (error or Ctrl-C); erase it before any
-        // more log, or the next redraw moves up into lines that have nothing to do with it.
         ui::clear_live();
         if let Some(result) = finished {
             return result;
         }
-        println!();
-        ui::note("interrupted");
-        // Keep the worker (and its variables) when its interrupted run reports back; else restart it.
-        if let Some(worker) = &mut self.worker
-            && !worker.settle().await
-        {
-            self.worker = None;
+        let settled = match &mut self.worker {
+            Some(worker) => worker.settle().await,
+            None => Ok(None),
+        };
+        let mut shown = false;
+        match settled {
+            Ok(Some(reply)) => {
+                let (out, mut meta) = finish(reply);
+                meta["interrupted"] = true.into();
+                ui::ran(&meta, &out);
+                shown = true;
+                if let Some(id) = self.pending.take() {
+                    let content = format!("{out}\n[interrupted by the user]");
+                    self.session.push(json!({"role": "tool", "tool_call_id": id, "content": content, "meta": meta}))?;
+                }
+            }
+            Ok(None) => {}
+            Err(_) => self.worker = None,
         }
+        if !shown {
+            println!();
+        }
+        ui::note("interrupted");
         Ok(false)
     }
 
     async fn turn(&mut self, task: &str) -> Result<bool> {
+        self.pending = None;
+        if self.session.last_prompt_tokens() >= self.compact_at / 2 {
+            self.compact_to(self.compact_at as usize / 10)?;
+        }
         let (began, clock) = (self.session.entries.len(), Instant::now());
-        self.session.push(json!({"role": "user", "content": task}))?;
+        let snapshot = self.snapshot();
+        self.session.push(json!({"role": "user", "content": task, "meta": {"snapshot": snapshot}}))?;
         let start = self.fingerprint();
         let (mut nudged, mut overflowed) = (false, false);
         for _ in 0..MAX_REQUESTS {
-            if self.session.last_prompt_tokens() >= COMPACT_AT {
+            if self.session.last_prompt_tokens() >= self.compact_at {
                 self.compact()?;
             }
             let message = match self.llm.complete(&self.session.messages(), &tools()).await {
-                // Too long for this model: compact and retry once.
                 Err(e) if e.is::<llm::ContextOverflow>() && !overflowed => {
                     overflowed = true;
+                    let seen = self.session.last_prompt_tokens();
+                    if seen > 0 {
+                        self.compact_at = self.compact_at.min(seen * 9 / 10);
+                    }
                     ui::note("context window exceeded; compacting and retrying");
                     self.compact()?;
                     continue;
                 }
                 result => result?,
             };
+            overflowed = false;
             ui::usage(&message["meta"]["usage"]);
             let calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
             self.session.push(message)?;
             for call in &calls {
+                self.pending = Some(call["id"].clone());
                 let (content, meta) = self.call(call).await;
                 self.session
                     .push(json!({"role": "tool", "tool_call_id": call["id"], "content": content, "meta": meta}))?;
+                self.pending = None;
             }
             if !calls.is_empty() {
                 ui::activity("waiting for the model");
                 continue;
             }
-            // The verify gate: a turn that changed the tree is done only when check() passed on this tree.
-            let (changed, checked) = self.verdict(&start);
-            if changed && !checked && self.config.check.is_some() && !nudged {
-                nudged = true;
-                ui::note("changes not verified yet: asking the model to run check()");
-                ui::activity("waiting for the model");
-                self.session.push(json!({"role": "user", "content": GATE, "meta": {"host": true}}))?;
-                continue;
+            let changed = self.fingerprint() != start;
+            let mut checked = false;
+            if changed && let Some(check) = &self.config.check {
+                let (ok, out) = self.verify(check).await;
+                if !ok && !nudged {
+                    nudged = true;
+                    ui::note("the check failed on the final tree: asking the model to fix it");
+                    ui::activity("waiting for the model");
+                    let gate = format!("{GATE}\n{}", compact::tail(&out, 1500));
+                    self.session.push(json!({"role": "user", "content": gate, "meta": {"host": true}}))?;
+                    continue;
+                }
+                checked = ok;
             }
             return Ok(self.report(changed, checked, began, clock));
         }
         ui::note(&format!("stopped after {MAX_REQUESTS} model requests in one turn"));
-        let (changed, checked) = self.verdict(&start);
-        self.report(changed, checked, began, clock);
-        Ok(false) // the model never finished
+        self.report(self.fingerprint() != start, false, began, clock);
+        Ok(false)
     }
 
     async fn call(&mut self, call: &Value) -> (String, Value) {
@@ -134,30 +163,22 @@ impl Agent {
 
     async fn run_code(&mut self, code: &str) -> (String, Value) {
         ui::run(code);
-        // The worker enforces accept-before-edit with state derived from the log.
         let state = self.session.state();
         let state = json!({"accepted": state.accepted, "carry": state.carry, "plan": state.plan});
-        let reply = async { self.worker()?.run(code, &state).await }.await;
-        let mut meta = match reply {
-            Ok(meta) => meta,
+        match async { self.worker()?.run(code, &state).await }.await {
+            Ok(reply) => {
+                let (out, meta) = finish(reply);
+                ui::ran(&meta, &out);
+                (out, meta)
+            }
             Err(e) => {
                 self.worker = None;
                 let out = format!("error: {e:#}; the worker was restarted and its variables are gone");
                 println!();
                 ui::note(&out);
-                return (out, json!({"tool": "run", "error": true}));
+                (out, json!({"tool": "run", "error": true}))
             }
-        };
-        let out = meta["out"].as_str().unwrap_or_default().to_string();
-        ui::ran(&meta, &out);
-        if meta["check"].is_boolean() {
-            meta["fp"] = self.fingerprint().into();
         }
-        if let Some(fields) = meta.as_object_mut() {
-            fields.remove("out");
-        }
-        meta["tool"] = "run".into();
-        (out, meta)
     }
 
     fn worker(&mut self) -> Result<&mut Worker> {
@@ -168,15 +189,41 @@ impl Agent {
         Ok(self.worker.as_mut().expect("just started"))
     }
 
-    /// Identity of the working tree: path, size and mtime of every file git does not ignore.
-    /// Whether the tree changed since `start`, and whether check() passed on the tree as it is now.
-    fn verdict(&self, start: &str) -> (bool, bool) {
-        let now = self.fingerprint();
-        (now != start, self.session.state().check == Some(now))
+    async fn verify(&self, check: &str) -> (bool, String) {
+        ui::run("check()");
+        let before = self.fingerprint();
+        let script = format!("exec 2>&1\n{check}");
+        let mut cmd = worker::sandboxed(&self.root, self.yolo, &self.session.path, "/bin/sh", &["-c", &script]);
+        let (passed, out) = match tokio::time::timeout(CHECK_TIMEOUT, cmd.stdin(Stdio::null()).output()).await {
+            Ok(Ok(out)) => (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned()),
+            Ok(Err(e)) => (false, e.to_string()),
+            Err(_) => (false, format!("timeout after {}s", CHECK_TIMEOUT.as_secs())),
+        };
+        let clean = self.fingerprint() == before;
+        let ok = passed && clean;
+        let why = if clean { check } else { "the check changed the working tree" };
+        let verdict = if ok { "passed" } else { "FAILED" };
+        let out = format!("{}\n[check {verdict}: {why}]", out.trim_end()).trim_start().to_string();
+        ui::ran(&json!({"actions": [{"tool": "check", "ok": ok}]}), &out);
+        (ok, out)
+    }
+
+    fn index(&self) -> PathBuf {
+        self.session.path.with_extension("index")
+    }
+
+    fn snapshot(&self) -> Option<String> {
+        let index = self.index();
+        if !index.exists() {
+            let current = git(&self.root, None, &["rev-parse", "--git-path", "index"]).unwrap_or_default();
+            let _ = std::fs::copy(self.root.join(current.trim()), &index);
+        }
+        git(&self.root, Some(&index), &["add", "-A"])?;
+        git(&self.root, Some(&index), &["write-tree"]).map(|tree| tree.trim().to_string())
     }
 
     fn fingerprint(&self) -> String {
-        let list = git(&self.root, &["ls-files", "-co", "--exclude-standard", "-z"]);
+        let list = git(&self.root, None, &["ls-files", "-co", "--exclude-standard", "-z"]).unwrap_or_default();
         let mut hasher = std::hash::DefaultHasher::new();
         for file in list.split('\0').filter(|f| !f.is_empty()) {
             file.hash(&mut hasher);
@@ -185,16 +232,16 @@ impl Agent {
         format!("{:016x}", hasher.finish())
     }
 
-    /// The fixed-shape final report, written by the host rather than the model.
     fn report(&self, changed: bool, checked: bool, began: usize, clock: Instant) -> bool {
         let (check, verdict) = match (changed, checked, &self.config.check) {
             (false, _, _) => ("-", "NO CHANGES"),
             (true, true, _) => ("passed on the final tree", "VERIFIED"),
             (true, false, None) => ("none configured", "UNVERIFIED"),
-            (true, false, Some(_)) => ("not passed after the last change", "UNVERIFIED"),
+            (true, false, Some(_)) => ("not passed on the final tree", "UNVERIFIED"),
         };
         let state = self.session.state();
-        let task = self.session.entries[began]["content"].as_str().unwrap_or_default();
+        let first = &self.session.entries[began];
+        let task = first["content"].as_str().unwrap_or_default();
         let mut rows = vec![("task", task.lines().next().unwrap_or_default().to_string())];
         rows.push(("criteria", state.accepted.unwrap_or_else(|| "-".into())));
         if let Some(steps) = state.plan["steps"].as_array() {
@@ -202,7 +249,13 @@ impl Agent {
             rows.push(("plan", format!("{done}/{} steps done", steps.len())));
         }
         rows.push(("check", check.into()));
-        rows.push(("changes", changes(&self.root)));
+        let snapshot = first["meta"]["snapshot"].as_str();
+        let index = self.index();
+        rows.push(("changes", changes(&self.root, snapshot.map(|tree| (tree, index.as_path())))));
+        if let Some(tree) = snapshot.filter(|_| changed) {
+            let short = tree.get(..12).unwrap_or(tree);
+            rows.push(("undo", format!("git restore --source={short} --worktree -- .  (new files stay)")));
+        }
         let turn = &self.session.entries[began..];
         let usage: Vec<&Value> = turn.iter().map(|e| &e["meta"]["usage"]).filter(|u| u.is_object()).collect();
         let prompt: u64 = usage.iter().filter_map(|u| u["prompt_tokens"].as_u64()).sum();
@@ -225,7 +278,7 @@ impl Agent {
     pub fn cost(&self) {
         let runs = self.session.entries.iter().filter(|e| e["meta"]["tool"] == "run");
         let (runs, rejected) = runs.fold((0, 0), |(n, r), e| (n + 1, r + usize::from(e["meta"]["rejected"] == true)));
-        let (mut requests, mut tokens) = (0, [0; 3]); // prompt, cached, completion
+        let (mut requests, mut tokens) = (0, [0; 3]);
         for u in self.session.entries.iter().map(|e| &e["meta"]["usage"]).filter(|u| u.is_object()) {
             let cached = u["prompt_tokens_details"]["cached_tokens"].as_u64();
             let cached = cached.or(u["cached_tokens"].as_u64()).or(u["prompt_cache_hit_tokens"].as_u64());
@@ -240,7 +293,6 @@ impl Agent {
         println!("{runs} runs · {rejected} rejected before acting (syntax, unknown name, wrong arguments)");
     }
 
-    /// The model's last full reasoning, rendered.
     pub fn think(&self) {
         let last = self.session.entries.iter().rev().find_map(|e| e["reasoning_content"].as_str());
         let mut markdown = crate::render::Markdown::default();
@@ -249,19 +301,31 @@ impl Agent {
     }
 
     pub fn compact(&mut self) -> Result<()> {
+        self.compact_to(self.compact_at as usize / 5)
+    }
+
+    fn compact_to(&mut self, keep_tokens: usize) -> Result<()> {
         let prev = self.session.keep();
-        let keep = compact::cut(&self.session.entries, prev);
+        let keep = compact::cut(&self.session.entries, prev, keep_tokens);
         if keep <= prev {
             ui::note("nothing to compact");
             return Ok(());
         }
         let summary = compact::summary(&self.session.entries, keep);
         ui::note(&format!("compacted entries #1-#{} into a {} byte summary", keep - 1, summary.len()));
-        self.session.push(json!({"compact": {"keep": keep, "summary": summary}}))
+        self.session.push(json!({"compact": {"keep": keep, "summary": summary, "at": self.compact_at}}))
     }
 }
 
-/// The immutable prefix: prompt, AGENTS.md and the skill index, pinned in the session header.
+fn finish(mut meta: Value) -> (String, Value) {
+    let out = meta["out"].as_str().unwrap_or_default().to_string();
+    if let Some(fields) = meta.as_object_mut() {
+        fields.remove("out");
+    }
+    meta["tool"] = "run".into();
+    (out, meta)
+}
+
 fn system_prompt(root: &Path) -> String {
     let mut prompt = include_str!("prompt.md").to_string();
     if let Ok(agents) = std::fs::read_to_string(root.join("AGENTS.md")) {
@@ -281,7 +345,7 @@ fn system_prompt(root: &Path) -> String {
         .collect();
     skills.sort();
     if !skills.is_empty() {
-        prompt += "\n\n# Skills (read() one when the task needs it)\n";
+        prompt += "\n\n# Skills (open() one when the task needs it)\n";
         prompt += &skills.join("\n");
     }
     prompt
@@ -293,22 +357,27 @@ fn tools() -> Value {
         "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]}}}])
 }
 
-/// Host-side git, with repo config unable to run commands through fsmonitor.
-fn git(root: &Path, args: &[&str]) -> String {
-    let out =
-        std::process::Command::new("git").args(["-c", "core.fsmonitor=false"]).args(args).current_dir(root).output();
-    out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+fn git(root: &Path, index: Option<&Path>, args: &[&str]) -> Option<String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["-c", "core.fsmonitor=false"]).args(args).current_dir(root);
+    if let Some(index) = index {
+        cmd.env("GIT_INDEX_FILE", index);
+    }
+    let out = cmd.output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Changed files with line counts, from git: "src/a.rs +3 −1 · notes.md (new)".
-fn changes(root: &Path) -> String {
-    let mut out: Vec<String> = git(root, &["diff", "--numstat", "HEAD"])
+fn changes(root: &Path, snapshot: Option<(&str, &Path)>) -> String {
+    let (base, index) = snapshot.map_or(("HEAD", None), |(tree, index)| (tree, Some(index)));
+    let mut out: Vec<String> = git(root, index, &["diff", "--numstat", base])
+        .unwrap_or_default()
         .lines()
         .filter_map(|l| match l.splitn(3, '\t').collect::<Vec<_>>()[..] {
             [added, removed, path] => Some(format!("{path} +{added} −{removed}")),
             _ => None,
         })
         .collect();
-    out.extend(git(root, &["ls-files", "-o", "--exclude-standard"]).lines().map(|f| format!("{f} (new)")));
+    let new = git(root, index, &["ls-files", "-o", "--exclude-standard"]).unwrap_or_default();
+    out.extend(new.lines().map(|f| format!("{f} (new)")));
     if out.is_empty() { "none".into() } else { out.join("\n") }
 }

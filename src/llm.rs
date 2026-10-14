@@ -1,16 +1,12 @@
-//! One OpenAI-compatible chat-completions client (GLM, Kimi, OpenRouter, local). We own the wire format.
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use std::io::Write;
 use std::time::Duration;
 
-/// Sampling for new sessions; the session header pins it.
 pub const TEMPERATURE: f64 = 0.0;
-/// How providers word a request that no longer fits the model's context window.
 const OVERFLOW: &[&str] =
     &["context_length", "context length", "context window", "maximum context", "prompt is too long", "too many tokens"];
 
-/// The request did not fit the model's context window.
 #[derive(Debug)]
 pub struct ContextOverflow(String);
 
@@ -22,7 +18,6 @@ impl std::fmt::Display for ContextOverflow {
 
 impl std::error::Error for ContextOverflow {}
 
-/// The stream broke off before the model finished; nothing was logged, so the request is retried.
 #[derive(Debug)]
 struct Interrupted(String);
 
@@ -34,7 +29,11 @@ impl std::fmt::Display for Interrupted {
 
 impl std::error::Error for Interrupted {}
 
-/// Where the API key lives when AIR_API_KEY is unset; the sandbox denies reading it.
+fn overflow(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    OVERFLOW.iter().any(|m| lower.contains(m))
+}
+
 pub fn key_file() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/air/api_key")
 }
@@ -48,10 +47,8 @@ pub struct Llm {
 }
 
 impl Llm {
-    /// `header` is the session's first log entry, which pins model and sampling.
     pub fn new(base_url: &str, header: &Value) -> Self {
         Self {
-            // No overall timeout (a long answer is fine), but a connection silent for 5 minutes is dead.
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(30))
                 .read_timeout(Duration::from_secs(300))
@@ -67,9 +64,7 @@ impl Llm {
         }
     }
 
-    /// One streamed completion. Text is printed as it arrives; usage goes in the message's meta.
     pub async fn complete(&self, messages: &[Value], tools: &Value) -> Result<Value> {
-        // serde_json maps are sorted, so the same history always serializes to the same bytes.
         let body = json!({
             "model": self.model, "messages": messages, "tools": tools, "temperature": self.temperature,
             "stream": true, "stream_options": {"include_usage": true},
@@ -89,19 +84,17 @@ impl Llm {
 
     async fn stream(&self, body: &str) -> Result<Value> {
         let mut response = self.send(body).await?;
-        let mut finished = false; // a finish_reason or [DONE] arrived: the model ended the reply
+        let mut finished = false;
         let (mut buf, mut text, mut thinking, mut usage) = (Vec::new(), String::new(), String::new(), Value::Null);
-        let mut calls: Vec<[String; 3]> = vec![]; // id, name, arguments
+        let mut calls: Vec<[String; 3]> = vec![];
+        let mut lines = 0;
         let (mut markdown, mut began) = (crate::render::Markdown::default(), None);
-        // Prose is held back until it is clearly an answer (long, or structured) or a tool call
-        // arrives, which makes it narration for that step.
         let (mut held, mut answering, mut narrated) = (String::new(), false, false);
-        // Always ends the reasoning block, so its live box is erased even for an empty one.
         let thought = |thinking: &str, began: Option<std::time::Instant>| {
             crate::ui::thought(thinking, began.map_or(0, |b: std::time::Instant| b.elapsed().as_secs()));
         };
-        let mut broken = None; // the connection failed mid-body
-        loop {
+        let mut broken = None;
+        'read: loop {
             let chunk = match response.chunk().await {
                 Ok(Some(chunk)) => chunk,
                 Ok(None) => break,
@@ -113,11 +106,13 @@ impl Llm {
             buf.extend_from_slice(&chunk);
             while let Some(end) = buf.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = buf.drain(..=end).collect();
-                let Some(data) = std::str::from_utf8(&line)?.trim().strip_prefix("data:") else { continue };
+                let line = String::from_utf8_lossy(&line);
+                let Some(data) = line.trim().strip_prefix("data:") else { continue };
                 finished |= data.trim() == "[DONE]";
                 let Ok(event) = serde_json::from_str::<Value>(data.trim()) else { continue };
                 if let Some(error) = event.get("error") {
-                    bail!("provider error: {error}");
+                    broken = Some(format!("provider error: {error}"));
+                    break 'read;
                 }
                 if event["usage"].is_object() {
                     usage = event["usage"].clone();
@@ -155,8 +150,6 @@ impl Llm {
                     }
                 }
                 for call in delta["tool_calls"].as_array().into_iter().flatten() {
-                    // Some providers (Gemini) omit index: then a chunk starts a new call when it brings a
-                    // different id, or a name once the current call's arguments are already complete.
                     let i = match (call["index"].as_u64(), calls.last()) {
                         (Some(i), _) => i as usize,
                         (None, None) => 0,
@@ -178,19 +171,23 @@ impl Llm {
                     }
                     if let Some(args) = call["function"]["arguments"].as_str() {
                         calls[i][2] += args;
-                        crate::ui::writing(calls.iter().map(|c| c[2].matches("\\n").count() + 1).sum());
+                        lines += args.matches("\\n").count();
+                        crate::ui::writing(lines + calls.len());
                     }
                 }
                 std::io::stdout().flush()?;
             }
         }
-        // Some servers close without finish_reason or [DONE]; a clean close still counts as the end when
-        // something arrived and every tool call's arguments are complete JSON.
+        if let Some(problem) = broken.as_deref().filter(|p| overflow(p)) {
+            if answering {
+                markdown.finish();
+            }
+            return Err(ContextOverflow(problem.to_string()).into());
+        }
         finished |= broken.is_none()
             && !(text.is_empty() && calls.is_empty())
             && calls.iter().all(|c| serde_json::from_str::<Value>(&c[2]).is_ok());
         if !finished {
-            // What was shown of this attempt stays on screen; the retry starts over below it.
             if answering {
                 markdown.finish();
             }
@@ -199,7 +196,6 @@ impl Llm {
         if answering {
             markdown.finish();
         } else if !narrated {
-            // No tool call came: whatever was held back is the answer.
             thought(&thinking, began);
             if !held.trim().is_empty() {
                 crate::ui::prose();
@@ -216,8 +212,6 @@ impl Llm {
                 .into_iter()
                 .enumerate()
                 .map(|(i, [id, name, args])| {
-                    // The log is replayed on every request, so it keeps only valid JSON arguments; a call
-                    // whose arguments were cut off is logged with none, and its result says so.
                     let args = if serde_json::from_str::<Value>(&args).is_ok() { args } else { "{}".into() };
                     let id = if id.is_empty() { format!("call_{i}") } else { id };
                     json!({"id": id, "type": "function", "function": {"name": name, "arguments": args}})
@@ -227,7 +221,6 @@ impl Llm {
         Ok(message)
     }
 
-    /// POST, retrying rate limits, server errors and dropped connections.
     async fn send(&self, body: &str) -> Result<reqwest::Response> {
         for attempt in 1.. {
             let mut request =
@@ -235,24 +228,26 @@ impl Llm {
             if let Some(key) = &self.key {
                 request = request.bearer_auth(key);
             }
-            let problem = match request.send().await {
+            let (problem, wait) = match request.send().await {
                 Ok(r) if r.status().is_success() => return Ok(r),
-                Ok(r) if r.status() == 429 || r.status().is_server_error() => r.status().to_string(),
+                Ok(r) if r.status() == 429 || r.status().is_server_error() => {
+                    let after = r.headers().get("retry-after").and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+                    (r.status().to_string(), after)
+                }
                 Ok(r) => {
                     let (status, text) = (r.status(), r.text().await.unwrap_or_default());
-                    let lower = text.to_lowercase();
-                    if OVERFLOW.iter().any(|m| lower.contains(m)) {
+                    if overflow(&text) {
                         return Err(ContextOverflow(text).into());
                     }
                     bail!("{status}: {text}")
                 }
-                Err(e) => e.to_string(),
+                Err(e) => (e.to_string(), None),
             };
             if attempt == 5 {
                 bail!("giving up after {attempt} attempts: {problem}");
             }
             crate::ui::note(&format!("{problem}; retrying"));
-            tokio::time::sleep(Duration::from_secs(2 << attempt)).await;
+            tokio::time::sleep(Duration::from_secs(wait.unwrap_or(2 << attempt).min(60))).await;
         }
         unreachable!()
     }

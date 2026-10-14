@@ -1,4 +1,3 @@
-//! air: a minimal code-mode coding agent.
 mod agent;
 mod compact;
 mod llm;
@@ -13,24 +12,19 @@ use rustyline::error::ReadlineError;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-/// Minimal code-mode coding agent. Without a task it starts a REPL (/compact, /cost, /think).
 #[derive(Parser)]
-#[command(version)]
+#[command(version, about = "Minimal code-mode coding agent. Without a task it starts a REPL (/compact, /cost, /think).")]
 struct Cli {
-    /// Run this task once and exit (status 1 when the result is unverified)
+    #[arg(help = "Run this task once and exit (status 1 when the result is unverified)")]
     task: Option<String>,
-    /// Resume the latest session in this repo
-    #[arg(long)]
+    #[arg(long, help = "Resume the latest session in this repo")]
     resume: bool,
-    /// Model for a new session; it stays pinned for the session's whole life
-    #[arg(short, long)]
+    #[arg(short, long, help = "Model for a new session; it stays pinned for the session's whole life")]
     model: Option<String>,
-    /// No sandbox: network on, writes anywhere
-    #[arg(long)]
+    #[arg(long, help = "No sandbox: network on, writes anywhere")]
     yolo: bool,
 }
 
-/// The whole config: four keys.
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -56,7 +50,6 @@ async fn main() -> Result<()> {
     }
     let root = PathBuf::from(String::from_utf8(top.stdout)?.trim()).canonicalize()?;
     let home = PathBuf::from(std::env::var("HOME")?);
-    // A repo's air.toml may set check and fmt only: model and base_url decide where your key goes.
     let user = load(&home.join(".config/air/config.toml"))?;
     let repo = load(&root.join("air.toml"))?;
     if repo.model.is_some() || repo.base_url.is_some() {
