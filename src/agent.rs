@@ -15,6 +15,12 @@ const MAX_REQUESTS: usize = 200;
 const CHECK_TIMEOUT: Duration = Duration::from_secs(1800);
 const GATE: &str = "The project check failed on the current tree. Fix what fails, run check(), then finish again. \
                     If it cannot pass, say why in one line. The check output ended with:";
+const SANDBOX: &str = "\n\n## Sandbox\nYour code runs in a sandbox. Internet and DNS are off (localhost works), and writes \
+                       outside the repo and temp dirs fail, as do writes into .git; on macOS so do Unix sockets and \
+                       nested sandbox-exec. These failures (Operation not permitted, EPERM, Read-only file system, DNS \
+                       lookup errors) are permanent. Don't retry them and don't search the machine for another copy \
+                       of what was blocked: skip that step, finish the rest, and say in your final message what you \
+                       could not run.";
 
 pub struct Agent {
     root: PathBuf,
@@ -34,7 +40,7 @@ impl Agent {
         } else {
             let model =
                 config.model.as_deref().context("no model: pass -m or set model in ~/.config/air/config.toml")?;
-            Session::create(home, root, model, &system_prompt(root))?
+            Session::create(home, root, model, &system_prompt(root, yolo))?
         };
         let base_url = config.base_url.as_deref().context("set base_url in ~/.config/air/config.toml")?;
         let llm = Llm::new(base_url, &session.entries[0]);
@@ -353,8 +359,11 @@ fn finish(mut meta: Value) -> (String, Value) {
     (out, meta)
 }
 
-fn system_prompt(root: &Path) -> String {
+fn system_prompt(root: &Path, yolo: bool) -> String {
     let mut prompt = include_str!("prompt.md").to_string();
+    if !yolo {
+        prompt += SANDBOX;
+    }
     if let Ok(agents) = std::fs::read_to_string(root.join("AGENTS.md")) {
         prompt += "\n\n# Project instructions (AGENTS.md)\n\n";
         prompt += &agents;

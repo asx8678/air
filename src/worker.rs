@@ -10,7 +10,8 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 const RUN_TIMEOUT: Duration = Duration::from_secs(40 * 60);
 const HERMETIC: &str = "TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 NO_COLOR=1 CLICOLOR=0 CARGO_TERM_COLOR=never CI=1 TERM=dumb \
                         PAGER=cat GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 PYTHONHASHSEED=0 PYTHONUTF8=1 PYTHONDONTWRITEBYTECODE=1";
-const CACHES: &str = "XDG_CACHE_HOME GOCACHE UV_CACHE_DIR PIP_CACHE_DIR PRE_COMMIT_HOME npm_config_cache";
+const CACHES: &str =
+    "XDG_CACHE_HOME GOCACHE UV_CACHE_DIR PIP_CACHE_DIR PRE_COMMIT_HOME npm_config_cache PYTHONPYCACHEPREFIX";
 const SECRETS: &str = ".air .config/air .ssh .gnupg .aws .azure .kube .docker .netrc .pi .config/gh .config/gcloud \
                        .password-store Library/Keychains .git-credentials .config/git/credentials .npmrc .pypirc \
                        .cargo/credentials .cargo/credentials.toml";

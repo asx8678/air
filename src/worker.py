@@ -1,6 +1,7 @@
-import contextlib, difflib, inspect, json, types, linecache, os, re, shlex, signal, subprocess, sys, tempfile, traceback
+import contextlib, difflib, inspect, json, linecache, os, re, shlex, signal, subprocess, sys, tempfile, traceback
 
 ROOT = os.getcwd()
+sys.path.append(ROOT)
 CHECK = os.environ.pop("AIR_CHECK", "")
 FMT = os.environ.pop("AIR_FMT", "")
 LOG = os.environ.pop("AIR_LOG", "")
@@ -81,6 +82,7 @@ def _change(tool, path, make):
         raise
     finally:
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+    _forget()
     note = ""
     if FMT:
         out, code = _exec(f"{FMT} {shlex.quote(rel)}", 60)
@@ -92,6 +94,15 @@ def _change(tool, path, make):
         diff = difflib.unified_diff(written.splitlines(True), after.splitlines(True), n=1)
         note += "; the formatter changed it:\n" + "".join(list(diff)[2:]).rstrip("\n")
     print(f"{tool} {rel}: ok{note}")
+
+
+def _forget():
+    for name, mod in list(sys.modules.items()):
+        path = getattr(mod, "__file__", None)
+        if path and "site-packages" not in path and os.path.realpath(path).startswith(ROOT + os.sep):
+            del sys.modules[name]
+            for key in [k for k, v in G.items() if v is mod or getattr(v, "__module__", None) == name]:
+                del G[key]
 
 
 def edit(path, old, new):
@@ -228,14 +239,7 @@ G = {"__name__": "__main__", "_last": "", "sh": sh, "edit": edit, "write": write
 HELPERS = tuple(f"{name}()" for name in G if not name.startswith("_"))
 
 
-class _Helper(types.ModuleType):
-    def __call__(self, *args, **kwargs):
-        return G[self.__name__](*args, **kwargs)
-
-
-for _name in ("sh",):
-    sys.modules[_name] = _Helper(_name)
-    setattr(sys.modules[_name], _name, G[_name])
+sh.sh = sys.modules["sh"] = sh
 signal.signal(signal.SIGINT, signal.SIG_IGN)
 for request in _inbox:
     request = json.loads(request)

@@ -2,6 +2,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 const MAX_BYTES: usize = 32 * 1024;
+const EXCHANGE: usize = 3968;
 
 pub fn cut(entries: &[Value], prev: usize, keep_tokens: usize) -> usize {
     let (mut tail, mut keep) = (0, entries.len());
@@ -29,10 +30,14 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
 
     let mut dialogue = vec![];
     for &u in recent {
-        if let Some(a) = (1..u).rev().take_while(|&i| role(i) != "user").find(|&i| role(i) == "assistant" && said(i)) {
-            dialogue.push(format!("#{a} assistant (historical, not a verified outcome):\n{}", excerpt(text(a), 1000)));
+        let a = (1..u).rev().take_while(|&i| role(i) != "user").find(|&i| role(i) == "assistant" && said(i));
+        let room = a.map_or(EXCHANGE, |a| (EXCHANGE / 2).max(EXCHANGE.saturating_sub(text(a).len())));
+        let user = excerpt(text(u), room);
+        if let Some(a) = a {
+            let reply = excerpt(text(a), EXCHANGE - user.len());
+            dialogue.push(format!("#{a} assistant (historical, not a verified outcome):\n{reply}"));
         }
-        dialogue.push(format!("#{u} user:\n{}", excerpt(text(u), 2000)));
+        dialogue.push(format!("#{u} user:\n{user}"));
     }
     let after = users.last().map_or(1, |&u| u + 1);
     if let Some(a) = (after..keep).rev().find(|&i| role(i) == "assistant" && said(i)) {
@@ -132,9 +137,13 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
     }
     let events = events.split_off(events.len().saturating_sub(40));
 
+    let footer = format!(
+        "\n[Entries #1-#{} are summarized here; recall(n) returns entry #n exactly. Continue the task.]",
+        keep - 1
+    );
     let mut out = String::from("[Summary of earlier work, rebuilt from the session log. Newer messages follow it.]\n");
     for (title, lines, cap) in [
-        ("Recent user directions", dialogue, 12_288),
+        ("Recent user directions", dialogue, 16_384),
         ("Accepted criteria", criteria, 2_048),
         ("Carry forward", carry, 3_072),
         ("Earlier requests", requests, 3_072),
@@ -144,16 +153,14 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
         ("Failing check output", check_output, 2_048),
         ("Latest events", events, 4_096),
     ] {
-        if !lines.is_empty() {
-            out += &block(&format!("\n## {title}"), &lines, cap);
+        let left = MAX_BYTES.saturating_sub(out.len() + footer.len() + 1);
+        let section = block(&format!("\n## {title}"), &lines, cap.min(left));
+        if !lines.is_empty() && !section.is_empty() {
+            out += &section;
             out += "\n";
         }
     }
-    out += &format!(
-        "\n[Entries #1-#{} are summarized here; recall(n) returns entry #n exactly. Continue the task.]",
-        keep - 1
-    );
-    clip(&out, MAX_BYTES).to_string()
+    out + &footer
 }
 
 fn touch<'a>(files: &mut BTreeMap<&'a str, (usize, usize)>, path: &'a str, rank: usize, i: usize) {
@@ -175,7 +182,7 @@ fn block(title: &str, lines: &[String], cap: usize) -> String {
             return block;
         }
     }
-    clip(title, cap).to_string()
+    String::new()
 }
 
 fn excerpt(s: &str, max: usize) -> String {
