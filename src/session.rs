@@ -33,6 +33,7 @@ impl Session {
         let secs = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let path = dir.join(format!("{secs}-{}.jsonl", std::process::id()));
         let file = OpenOptions::new().create_new(true).append(true).open(&path)?;
+        file.try_lock()?; // held while this process appends; a resume elsewhere must not cut its lines
         let mut session = Self { path, entries: vec![], file };
         session.push(json!({"cwd": root, "model": model, "temperature": crate::llm::TEMPERATURE, "system": system}))?;
         Ok(session)
@@ -46,12 +47,22 @@ impl Session {
         for path in paths.into_iter().rev() {
             let first = BufReader::new(File::open(&path)?).lines().next().transpose()?.unwrap_or_default();
             if serde_json::from_str::<Value>(&first).is_ok_and(|header| header["cwd"] == json!(root)) {
-                // A crash can leave a partial last line: drop it, so line n stays entry #n.
-                let text = fs::read_to_string(&path)?;
-                let whole = text.rfind('\n').map_or(0, |i| i + 1);
-                let file = OpenOptions::new().append(true).open(&path)?;
-                file.set_len(whole as u64)?;
-                let entries = text[..whole].lines().map(serde_json::from_str).collect::<Result<_, _>>()?;
+                let mut file = OpenOptions::new().append(true).open(&path)?;
+                if file.try_lock().is_err() {
+                    bail!("{} is in use by another air", path.display());
+                }
+                // A crash can leave the last line without its newline: complete it when it is a whole
+                // entry, else drop it, so line n stays entry #n.
+                let mut text = fs::read_to_string(&path)?;
+                let cut = text.rfind('\n').map_or(0, |i| i + 1);
+                if serde_json::from_str::<Value>(&text[cut..]).is_ok() {
+                    file.write_all(b"\n")?;
+                    text.push('\n');
+                } else {
+                    file.set_len(cut as u64)?;
+                    text.truncate(cut);
+                }
+                let entries = text.lines().map(serde_json::from_str).collect::<Result<_, _>>()?;
                 eprintln!("[resumed {}]", path.display());
                 return Ok(Self { file, path, entries });
             }

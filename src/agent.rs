@@ -95,8 +95,7 @@ impl Agent {
                 continue;
             }
             // The verify gate: a turn that changed the tree is done only when check() passed on this tree.
-            let now = self.fingerprint();
-            let (changed, checked) = (now != start, self.session.state().check == Some(now));
+            let (changed, checked) = self.verdict(&start);
             if changed && !checked && self.config.check.is_some() && !nudged {
                 nudged = true;
                 ui::note("changes not verified yet: asking the model to run check()");
@@ -107,9 +106,8 @@ impl Agent {
             return Ok(self.report(changed, checked, began, clock));
         }
         ui::note(&format!("stopped after {MAX_REQUESTS} model requests in one turn"));
-        let now = self.fingerprint();
-        let checked = self.session.state().check.as_ref() == Some(&now);
-        self.report(now != start, checked, began, clock);
+        let (changed, checked) = self.verdict(&start);
+        self.report(changed, checked, began, clock);
         Ok(false) // the model never finished
     }
 
@@ -171,6 +169,12 @@ impl Agent {
     }
 
     /// Identity of the working tree: path, size and mtime of every file git does not ignore.
+    /// Whether the tree changed since `start`, and whether check() passed on the tree as it is now.
+    fn verdict(&self, start: &str) -> (bool, bool) {
+        let now = self.fingerprint();
+        (now != start, self.session.state().check == Some(now))
+    }
+
     fn fingerprint(&self) -> String {
         let list = git(&self.root, &["ls-files", "-co", "--exclude-standard", "-z"]);
         let mut hasher = std::hash::DefaultHasher::new();

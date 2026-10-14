@@ -38,32 +38,52 @@ def _rel(path):
     return os.path.relpath(os.path.join(ROOT, path), ROOT)
 
 
+def _protected():
+    """Where git runs code from outside the sandbox: .git, and a hooks dir kept in the tree."""
+    hooks = subprocess.run(["git", "config", "core.hooksPath"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    dirs = [os.path.join(ROOT, ".git")]
+    if hooks:
+        hooks = os.path.realpath(os.path.join(ROOT, os.path.expanduser(hooks)))
+        # husky's hooksPath is .husky/_, whose hooks run the scripts in .husky itself.
+        dirs.append(os.path.dirname(hooks) if os.path.basename(hooks) == "_" else hooks)
+    return [os.path.realpath(d) for d in dirs]
+
+
+PROTECTED = _protected()
+
+
 def _change(tool, path, make):
     """The one way files change: inside the repo, after accept(), exact, then formatted."""
     rel = _rel(path)
+    real = os.path.realpath(os.path.join(ROOT, rel))
+    # Ctrl-C waits until the write is done and recorded: a cut-off write or an unrecorded one misleads.
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
     try:
-        if rel.startswith("..") or not os.path.realpath(os.path.join(ROOT, rel)).startswith(ROOT + os.sep):
+        if rel.startswith("..") or not real.startswith(ROOT + os.sep):
             raise ValueError(f"{path} is outside the repo")
-        if rel.split(os.sep)[0] == ".git":
-            raise ValueError("files under .git are off limits")
+        if any(real == d or real.startswith(d + os.sep) for d in PROTECTED):
+            raise ValueError(f"{path} is off limits: git runs code from there outside the sandbox")
         if not (_report.get("accepted") or _state.get("accepted")):
             raise ValueError("call accept(criteria) before changing files")
         before, written = make(os.path.join(ROOT, rel), rel)
         delta = [l[0] for l in difflib.unified_diff(before.splitlines(), written.splitlines(), lineterm="")][2:]
-        note = ""
-        if FMT:
-            out, code = _exec(f"{FMT} {shlex.quote(rel)}", 60)
-            note = f"; fmt failed: {out.strip().splitlines()[0] if out.strip() else code}" if code else ""
-        with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
-            after = f.read()
-        if after != written:
-            diff = difflib.unified_diff(written.splitlines(True), after.splitlines(True), n=1)
-            note += "; the formatter changed it:\n" + "".join(list(diff)[2:]).rstrip("\n")
+        _report.setdefault("actions", []).append(
+            {"tool": tool, "path": rel, "ok": True, "added": delta.count("+"), "removed": delta.count("-")})
     except Exception as e:
         _report.setdefault("actions", []).append({"tool": tool, "path": rel, "ok": False, "error": str(e)})
         raise
-    _report.setdefault("actions", []).append(
-        {"tool": tool, "path": rel, "ok": True, "added": delta.count("+"), "removed": delta.count("-")})
+    finally:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+    note = ""
+    if FMT:
+        out, code = _exec(f"{FMT} {shlex.quote(rel)}", 60)
+        note = f"; fmt failed: {out.strip().splitlines()[0] if out.strip() else code}" if code else ""
+    with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
+        after = f.read()
+    written = written.replace("\r\n", "\n")  # read back with \n line ends too
+    if after != written:
+        diff = difflib.unified_diff(written.splitlines(True), after.splitlines(True), n=1)
+        note += "; the formatter changed it:\n" + "".join(list(diff)[2:]).rstrip("\n")
     print(f"{tool} {rel}: ok{note}")
 
 
@@ -72,19 +92,16 @@ def edit(path, old, new):
     def make(full, rel):
         with open(full, encoding="utf-8", newline="") as f:
             raw = f.read()
-        # Match on \n line ends, as the model reads them, but write back the file's own CRLF.
-        crlf = "\r\n" in raw
+        # Match on \n line ends, as the model reads them, but write back the file's own CRLF. A file
+        # with mixed line ends is matched as it is, so lines the edit does not touch keep theirs.
+        crlf = "\r\n" in raw and raw.count("\r\n") == raw.count("\n")
         text = raw.replace("\r\n", "\n") if crlf else raw
         n = text.count(old)
         if n != 1:
             raise ValueError(f"old text {'not found' if n == 0 else f'occurs {n} times'} in {rel}")
         result = text.replace(old, new, 1)
-        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})  # Ctrl-C must not leave it truncated
-        try:
-            with open(full, "w", encoding="utf-8", newline="\r\n" if crlf else "") as f:
-                f.write(result)
-        finally:
-            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+        with open(full, "w", encoding="utf-8", newline="\r\n" if crlf else "") as f:
+            f.write(result)
         return text, result
     _change("edit", path, make)
 

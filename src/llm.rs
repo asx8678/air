@@ -78,7 +78,7 @@ impl Llm {
         for attempt in 1.. {
             match self.stream(&body).await {
                 Err(e) if attempt < 4 && e.is::<Interrupted>() => {
-                    crate::ui::note(&format!("{e}; retrying"));
+                    crate::ui::note(&format!("{e}; retrying from the start"));
                     tokio::time::sleep(Duration::from_secs(2 << attempt)).await;
                 }
                 result => return result,
@@ -100,7 +100,16 @@ impl Llm {
         let thought = |thinking: &str, began: Option<std::time::Instant>| {
             crate::ui::thought(thinking, began.map_or(0, |b: std::time::Instant| b.elapsed().as_secs()));
         };
-        while let Some(chunk) = response.chunk().await.map_err(|e| Interrupted(format!("{e:#}")))? {
+        let mut broken = None; // the connection failed mid-body
+        loop {
+            let chunk = match response.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(e) => {
+                    broken = Some(format!("{e:#}"));
+                    break;
+                }
+            };
             buf.extend_from_slice(&chunk);
             while let Some(end) = buf.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = buf.drain(..=end).collect();
@@ -146,11 +155,17 @@ impl Llm {
                     }
                 }
                 for call in delta["tool_calls"].as_array().into_iter().flatten() {
-                    // Some providers (Gemini) omit index: then a call that names its function is a new one.
-                    let i = match call["index"].as_u64() {
-                        Some(i) => i as usize,
-                        None if call["function"]["name"].is_string() => calls.len(),
-                        None => calls.len().saturating_sub(1),
+                    // Some providers (Gemini) omit index: then a chunk starts a new call when it brings a
+                    // different id, or a name once the current call's arguments are already complete.
+                    let i = match (call["index"].as_u64(), calls.last()) {
+                        (Some(i), _) => i as usize,
+                        (None, None) => 0,
+                        (None, Some([id, name, args])) => {
+                            let new_id =
+                                call["id"].as_str().is_some_and(|i| !i.is_empty() && !id.is_empty() && i != id);
+                            let complete = !name.is_empty() && serde_json::from_str::<Value>(args).is_ok();
+                            calls.len() - 1 + usize::from(new_id || call["function"]["name"].is_string() && complete)
+                        }
                     };
                     if calls.len() <= i {
                         calls.resize(i + 1, Default::default());
@@ -169,8 +184,17 @@ impl Llm {
                 std::io::stdout().flush()?;
             }
         }
+        // Some servers close without finish_reason or [DONE]; a clean close still counts as the end when
+        // something arrived and every tool call's arguments are complete JSON.
+        finished |= broken.is_none()
+            && !(text.is_empty() && calls.is_empty())
+            && calls.iter().all(|c| serde_json::from_str::<Value>(&c[2]).is_ok());
         if !finished {
-            return Err(Interrupted("the stream ended before the model finished".into()).into());
+            // What was shown of this attempt stays on screen; the retry starts over below it.
+            if answering {
+                markdown.finish();
+            }
+            return Err(Interrupted(broken.unwrap_or("the stream ended before the model finished".into())).into());
         }
         if answering {
             markdown.finish();

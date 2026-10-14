@@ -61,7 +61,7 @@ const SECRETS: &str = ".air .config/air .ssh .gnupg .aws .azure .kube .docker .n
                        .password-store Library/Keychains";
 
 /// `program` inside the sandbox unless --yolo: no network beyond localhost, writes only to the repo
-/// (but never its .git, which runs code outside the sandbox through hooks and config), temp dirs and
+/// (but never its .git or hooks dir, which run code outside the sandbox), temp dirs and
 /// tool caches, no reading of credentials, and the inherited environment minus secrets plus the
 /// hermetic pins.
 fn sandboxed(root: &Path, yolo: bool, log: &Path, program: &str, args: &[&str]) -> Command {
@@ -70,17 +70,18 @@ fn sandboxed(root: &Path, yolo: bool, log: &Path, program: &str, args: &[&str]) 
     let home = home.canonicalize().unwrap_or(home);
     let secrets = SECRETS.split_whitespace().map(|s| home.join(s));
     let log = log.canonicalize().unwrap_or_else(|_| log.into());
+    let protected = protected(root);
     let mut cmd = if yolo {
         Command::new(program)
     } else if cfg!(target_os = "macos") {
         let dirs: String = writable.iter().map(|d| format!(" (subpath {d:?})")).collect();
         let secrets: String = secrets.map(|d| format!(" (subpath {d:?})")).collect();
+        let protected: String = protected.iter().map(|d| format!(" (subpath {d:?})")).collect();
         let profile = format!(
             "(version 1)(allow default)(deny network*)\
              (allow network* (local ip \"localhost:*\") (remote ip \"localhost:*\"))\
-             (deny file-write*)(allow file-write*{dirs} (subpath \"/dev\"))(deny file-write* (subpath {:?}))\
-             (deny file-read-data{secrets})(allow file-read-data (literal {log:?}))",
-            root.join(".git")
+             (deny file-write*)(allow file-write*{dirs} (subpath \"/dev\"))(deny file-write*{protected})\
+             (deny file-read-data{secrets})(allow file-read-data (literal {log:?}))"
         );
         let mut cmd = Command::new("/usr/bin/sandbox-exec");
         cmd.arg("-p").arg(profile).arg(program);
@@ -98,8 +99,10 @@ fn sandboxed(root: &Path, yolo: bool, log: &Path, program: &str, args: &[&str]) 
                 cmd.arg("--ro-bind").arg("/dev/null").arg(&path);
             }
         }
-        let git = root.join(".git");
-        cmd.arg("--ro-bind").arg(&git).arg(&git).arg("--ro-bind").arg(&log).arg(&log);
+        for dir in protected.iter().filter(|d| d.exists()) {
+            cmd.arg("--ro-bind").arg(dir).arg(dir);
+        }
+        cmd.arg("--ro-bind").arg(&log).arg(&log);
         cmd.args(["--unshare-all", "--die-with-parent", "--new-session", "--chdir"]).arg(root).arg(program);
         cmd
     };
@@ -111,6 +114,21 @@ fn sandboxed(root: &Path, yolo: bool, log: &Path, program: &str, args: &[&str]) 
         .envs(HERMETIC.split_whitespace().filter_map(|pin| pin.split_once('=')))
         .kill_on_drop(true);
     cmd
+}
+
+/// Where git runs code from outside the sandbox: .git, and a hooks dir kept in the tree
+/// (core.hooksPath). husky's is .husky/_, whose hooks run the scripts in .husky itself.
+fn protected(root: &Path) -> Vec<PathBuf> {
+    let out = std::process::Command::new("git").arg("-C").arg(root).args(["config", "core.hooksPath"]).output();
+    let hooks = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    let mut dirs = vec![root.join(".git")];
+    if !hooks.is_empty() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let hooks = root.join(hooks.strip_prefix("~/").map_or(hooks.clone(), |rest| format!("{home}/{rest}")));
+        let hooks = hooks.canonicalize().unwrap_or(hooks);
+        dirs.push(if hooks.ends_with("_") { hooks.parent().unwrap_or(&hooks).into() } else { hooks });
+    }
+    dirs
 }
 
 fn writable(root: &Path) -> Vec<PathBuf> {
