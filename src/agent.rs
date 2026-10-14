@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
-use tokio::signal::unix::{SignalKind, signal};
 
 const COMPACT_AT: u64 = 100_000;
 const MAX_REQUESTS: usize = 200;
@@ -44,21 +43,12 @@ impl Agent {
     }
 
     pub async fn run(&mut self, task: &str) -> Result<bool> {
-        let bar = ui::Turn::start();
-        let (mut term, mut hup) = (signal(SignalKind::terminate())?, signal(SignalKind::hangup())?);
-        let mut quit = false;
+        let _bar = ui::Turn::start();
         let finished = tokio::select! {
             result = self.turn(task) => Some(result),
             _ = tokio::signal::ctrl_c() => None,
-            _ = term.recv() => { quit = true; None }
-            _ = hup.recv() => { quit = true; None }
         };
         ui::clear_live();
-        if quit {
-            drop(bar);
-            self.worker = None;
-            std::process::exit(143);
-        }
         if let Some(result) = finished {
             return result;
         }
