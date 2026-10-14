@@ -1,0 +1,49 @@
+{
+  "document": "10-six-domain-forensic-audit.md",
+  "round": 10,
+  "reviewed": "2026-10-14",
+  "scope": "8 Rust modules (1772 LOC), worker.py (265 LOC), prompt.md; cargo clippy clean; zero tests",
+  "domains": [
+    "rust-performance",
+    "token-economy-compaction",
+    "security-sandbox-provider",
+    "agent-loop-stability",
+    "patch-mechanics-context-routing",
+    "code-mode-permission-boundaries"
+  ],
+  "findings": [
+    {"id": "10-K1", "severity": "critical", "category": "security/mode-boundaries", "title": "No permission model: accept() is model self-approval; no read-only mode; --yolo unguarded", "location": "worker.py _change(); main.rs Cli", "fix": "§3.6 + user-approval policy layer"},
+    {"id": "10-K2", "severity": "critical", "category": "patch-reliability", "title": "edit() truncates then writes; kill/crash/disk-full destroys target file", "location": "worker.py edit() open(full,'w')", "fix": "§3.5 atomic tmp+fsync+os.replace"},
+    {"id": "10-K3", "severity": "critical", "category": "determinism/patch-reliability", "title": "Stream-finish heuristic accepts truncated SSE responses as complete; partial tool-call plans executed", "location": "llm.rs stream() ~L193", "fix": "§3.1 positive completion signal"},
+    {"id": "10-H1", "severity": "high", "category": "token-economy", "title": "messages() strips reasoning_content from history at turn boundaries; prompt cache invalidated every turn", "location": "session.rs messages() ~L104-108", "fix": "§3.2 append-only prefix"},
+    {"id": "10-H2", "severity": "high", "category": "security", "title": "Sandbox env deny-list leaks SSH_AUTH_SOCK/DATABASE_URL/DSN; /tmp writable enables SSH-agent hijack", "location": "worker.rs sandboxed() secret()", "fix": "§3.6 env allowlist"},
+    {"id": "10-H3", "severity": "high", "category": "agent-loop-stability", "title": "3s settle() vs 30min checks; partial stdin writes corrupt worker protocol; stale-reply misalignment", "location": "worker.rs settle()/run(); agent.rs run()", "fix": "P1#5 request-generation counter"},
+    {"id": "10-H4", "severity": "high", "category": "resource-leaks", "title": "Orphaned subprocesses: kill_on_drop kills only direct child; _exec groups survive worker SIGKILL", "location": "worker.py _exec(); agent.rs verify()", "fix": "P1#6 process-group kill sweep"},
+    {"id": "10-H5", "severity": "high", "category": "security", "title": "Nested/vendored .git writable -> hook planting executing later outside the sandbox", "location": "worker.rs protected()", "fix": "§3.6 deny regex for /.git/"},
+    {"id": "10-H6", "severity": "high", "category": "testing", "title": "Zero tests, zero CI", "location": "crate-wide", "fix": "§4 P0/P1 suites"},
+    {"id": "10-M1", "severity": "medium", "category": "token-economy", "title": "Usage-or-nothing token accounting; len/4 estimator; fixed COMPACT_AT untied to model window", "location": "compact.rs cut(); agent.rs consts", "fix": "P1#7 calibrated fallback"},
+    {"id": "10-M2", "severity": "medium", "category": "compaction", "title": "Consecutive context overflow hard-aborts turn; 'nothing to compact' stalls into abort", "location": "agent.rs turn() overflow arm", "fix": "P1#7 escalation truncation"},
+    {"id": "10-M3", "severity": "medium", "category": "async-safety", "title": "Blocking stty fork/exec every second and std::fs/process inside async turn on current_thread runtime", "location": "ui.rs size(); agent.rs snapshot/fingerprint/changes", "fix": "§3.4"},
+    {"id": "10-M4", "severity": "medium", "category": "performance", "title": "O(session) clone + re-serialization of full context per request; unbounded entries Vec", "location": "session.rs messages()", "fix": "§3.2 + borrowed serialization"},
+    {"id": "10-M5", "severity": "medium", "category": "agent-loops", "title": "MAX_REQUESTS=200; one check-nudge; no repeated-tool-call or repeated-failure detection", "location": "agent.rs turn()", "fix": "§3.7 oscillation breaker"},
+    {"id": "10-M6", "severity": "medium", "category": "provider-resilience", "title": "Backoff without jitter; overflow classified by error-text substring sniffing", "location": "llm.rs send()/overflow()", "fix": "§3.3"},
+    {"id": "10-M7", "severity": "medium", "category": "patch-reliability", "title": "No pre-flight syntax/AST validation of edits; mixed-EOL files break old matching", "location": "worker.py edit()/_change()", "fix": "P2#10-11"},
+    {"id": "10-M8", "severity": "medium", "category": "token-economy", "title": "AGENTS.md + SKILL.md descriptions injected uncapped; system prompt frozen at session creation", "location": "agent.rs system_prompt()", "fix": "cap + refresh policy"},
+    {"id": "10-M9", "severity": "medium", "category": "provider-integration", "title": "reasoning_content echoed back to provider on request", "location": "session.rs messages()", "fix": "§3.2"},
+    {"id": "10-M10", "severity": "medium", "category": "terminal-ux-safety", "title": "No panic hook / terminal restore guarantee; poisoned-mutex panic in Turn::drop during unwind", "location": "ui.rs Turn::drop", "fix": "§3.8"},
+    {"id": "10-M11", "severity": "medium", "category": "prompt-injection/supply-chain", "title": "Repo-controlled air.toml check/fmt execute as user; localhost network allowed; --yolo silent", "location": "main.rs; worker.rs sandboxed()", "fix": "confirmation gate + tighten profile"},
+    {"id": "10-M12", "severity": "medium", "category": "determinism", "title": "Request omits max_tokens, seed, parallel_tool_calls:false", "location": "llm.rs complete()", "fix": "add request controls"},
+    {"id": "10-M13", "severity": "medium", "category": "error-handling", "title": "load() swallows all config read errors; api_key file perms unchecked", "location": "main.rs load(); llm.rs key_file()", "fix": "classify ENOENT vs other errors; 0600 check"},
+    {"id": "10-M14", "severity": "medium", "category": "patch-reliability", "title": "Multi-file edit batches non-transactional; no rollback", "location": "worker.py", "fix": "journal + rollback markers"},
+    {"id": "10-L1", "severity": "low", "category": "performance/resilience", "title": "SSE scan O(n^2) drain, uncapped buffer, multi-line data: events silently dropped", "location": "llm.rs stream()", "fix": "BytesMut split_to + cap"},
+    {"id": "10-L2", "severity": "low", "category": "error-handling", "title": "Latent max-40 underflow in excerpt; 17 unwrap / 5 expect sites, lock-poison panics", "location": "compact.rs; ui.rs; llm.rs Llm::new", "fix": "saturating_sub; poison-tolerant lock helper"},
+    {"id": "10-L3", "severity": "low", "category": "determinism", "title": "fingerprint() hashes mtime (phantom/missed changes); compact::tail cuts mid-line", "location": "agent.rs fingerprint(); compact.rs tail()", "fix": "content hash fallback; line-boundary tail"}
+  ],
+  "strengths": [
+    "Deterministic log-derived compaction (no LLM summarization) with recall(n) verbatim recovery",
+    "OS sandbox with .git + core.hooksPath write protection and secret-name filtering",
+    "check() gate with tree-fingerprint dirty detection around verification",
+    "Head/tail output truncation with _last full-text recovery",
+    "SIGINT masking around file mutation; PYTHONHASHSEED/TZ/LC_ALL pinning; session file locking"
+  ]
+}
