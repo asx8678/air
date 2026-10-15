@@ -5,7 +5,7 @@ sys.path.append(ROOT)
 CHECK = os.environ.pop("AIR_CHECK", "")
 FMT = os.environ.pop("AIR_FMT", "")
 LOG = os.environ.pop("AIR_LOG", "")
-HALF = 8000
+HALF = 16000
 LIMIT = 8 << 20
 RUN_CAP = 570
 IGNORABLE = re.compile("[\u200c-\u200f\u202a-\u202e\u206a-\u206f\ufeff]")
