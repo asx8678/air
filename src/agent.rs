@@ -215,8 +215,9 @@ impl Agent {
     pub async fn run(&mut self, task: &str) -> Result<bool> {
         let _bar = ui::Turn::start();
         let finished = tokio::select! {
-            result = self.turn(task) => Some(result),
+            biased;
             _ = tokio::signal::ctrl_c() => None,
+            result = self.turn(task) => Some(result),
         };
         ui::clear_live();
         if let Some(result) = finished {

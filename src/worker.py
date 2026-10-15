@@ -168,8 +168,9 @@ def edit(path, old, new=None):
                 which = f" (pair {k} of {len(pairs)}; nothing was changed)" if len(pairs) > 1 else ""
                 raise ValueError(f"old text {'not found' if count == 0 else f'occurs {count} times'} in {rel}{which}")
             result = result.replace(find, eol(n), 1)
-        with open(full, "w", encoding="utf-8", newline="\r\n" if crlf else "") as f:
-            f.write(result)
+        data = (result.replace("\n", "\r\n") if crlf else result).encode("utf-8")
+        with open(full, "wb") as f:
+            f.write(data)
         return text, result
     _change("edit", path, make)
 
@@ -178,9 +179,10 @@ def write(path, content):
     def make(full, rel):
         if os.path.lexists(full):
             raise ValueError(f"{rel} exists; use edit")
+        data = content.encode("utf-8")
         os.makedirs(os.path.dirname(full), exist_ok=True)
-        with open(full, "x", encoding="utf-8") as f:
-            f.write(content)
+        with open(full, "xb") as f:
+            f.write(data)
         return "", content
     _change("write", path, make)
 
