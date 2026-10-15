@@ -1,4 +1,4 @@
-import ast, contextlib, ctypes, difflib, importlib.util, inspect, json, linecache, os, re, shlex, signal, stat, subprocess, sys, tempfile, threading, time, traceback
+import ast, contextlib, ctypes, difflib, importlib.util, json, linecache, os, re, shlex, signal, stat, subprocess, sys, tempfile, threading, time, traceback
 
 ROOT = os.getcwd()
 sys.path.append(ROOT)
@@ -285,23 +285,6 @@ def recall(n):
     raise IndexError(f"no entry #{n}")
 
 
-def _hint(e, misuse):
-    text = str(e)
-    if isinstance(e, NameError) and re.search(r"'(read|files|grep|ls|cat)'", text):
-        return 'read files with show(path, start, end); explore with plain Python: open(), re, pathlib and sh("git ls-files")'
-    if isinstance(e, SyntaxError) and sys.version_info < (3, 10) and (e.text or "").lstrip().startswith(("match ", "case ")):
-        return f"the worker runs Python {sys.version_info[0]}.{sys.version_info[1]}: no match statements or X | Y types"
-    code = "".join(linecache.cache.get("<run>", (0, None, [], ""))[2])
-    calls = [code.count("\n", 0, m.start()) + 1 for m in re.finditer(r"(?<![\w.])(edit|write)\(", code)]
-    if isinstance(e, SyntaxError) and calls and (e.lineno or 0) >= calls[0] and ('"""' in code or "'''" in code):
-        return ("a raw triple-quoted string cannot end with a backslash or contain its own quotes: "
-                "switch to the other quote style (''' or \"\"\") or use a plain string with escapes")
-    if misuse:
-        name = text.split("(")[0]
-        return f"signature: {name}{inspect.signature(G[name])}"
-    return None
-
-
 TOOLS = {"sh": sh, "show": show,"edit": edit, "write": write, "accept": accept, "carry": carry, "plan": plan, "done": done, "check": check, "recall": recall}
 G = {"__name__": "__main__", "_last": "", **TOOLS}
 HELPERS = tuple(f"{name}()" for name in TOOLS)
@@ -356,9 +339,6 @@ for request in _inbox:
         rejected = isinstance(e, (SyntaxError, NameError)) or misuse
         _report["exception"], _report["rejected"] = type(e).__name__, bool(rejected)
         print("".join(traceback.format_list(frames) + traceback.format_exception_only(type(e), e)), end="")
-        hint = _hint(e, misuse)
-        if hint:
-            print(f"hint: {hint}")
         applied = [f"{a['tool']} {a['path']}" for a in _report.get("actions", []) if a.get("ok") and a.get("path")]
         if applied:
             print(f"[applied before the error: {', '.join(applied)}; inspect before repeating them]")
