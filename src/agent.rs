@@ -272,7 +272,7 @@ impl Agent {
 
     async fn unfinished(&mut self) -> Result<()> {
         match self.current.take() {
-            Some((began, clock)) => self.report(None, false, began, clock).await.map(drop),
+            Some((began, clock)) => self.report(None, false, true, began, clock).await.map(drop),
             None => self.session.flush(),
         }
     }
@@ -283,13 +283,17 @@ impl Agent {
             self.compact_to(self.compact_at as usize / 10, false)?;
         }
         self.session.flush()?;
-        let (began, clock) = (self.session.entries.len(), Instant::now());
-        let start = self.tree().await?;
+        let clock = Instant::now();
+        let why = "air's change detection (a private git index, not your staging area) could not snapshot the tree";
+        let start = self.tree().await.context(why)?;
         let snapshot_ms = clock.elapsed().as_millis() as u64;
         self.session
             .push(json!({"role": "user", "content": task, "meta": {"snapshot": start, "snapshot_ms": snapshot_ms}}))?;
+        // The push first writes what the snapshot logged, so the turn begins at the task itself.
+        let began = self.session.entries.len() - 1;
         self.current = Some((began, clock));
-        let (mut nudged, mut overflowed, mut nudges, mut cut) = (false, false, 0, false);
+        let (mut nudged, mut overflowed, mut nudges, mut empties, mut cut, mut stalled) =
+            (false, false, 0, 0, false, false);
         let ceiling = self.session.header()["turn_tokens"].as_u64().unwrap_or(self.compact_at * TURN_BUDGET);
         let mut spent = 0;
         let mut limit = format!("stopped after {MAX_REQUESTS} model requests in one turn");
@@ -321,7 +325,7 @@ impl Agent {
                 }
                 Err(e) if e.is::<llm::ContextOverflow>() => {
                     let system = self.session.header()["system"].as_str().map_or(0, str::len);
-                    let agents = std::fs::metadata(self.root.join("AGENTS.md")).map_or(0, |m| m.len() as usize);
+                    let agents = repo_text(&self.root, "AGENTS.md", 0).map_or(0, |(_, size)| size as usize);
                     anyhow::bail!(
                         "{e}; still over after compacting: the request is {} KB, of which the system prompt is {} KB \
                          (including {} KB of AGENTS.md)",
@@ -361,8 +365,8 @@ impl Agent {
             let calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
             if calls.is_empty() && message["content"].as_str().is_none_or(|c| c.trim().is_empty()) {
                 let meta = &message["meta"];
-                if nudges < 2 {
-                    nudges += 1;
+                if empties < 2 {
+                    (nudges, empties) = (nudges + 1, empties + 1);
                     let extra =
                         json!({"meta": {"usage": meta["usage"], "timing": meta["timing"]}, "finish": meta["finish"]});
                     ui::event("empty", "the model sent an empty reply; asking it to act", extra);
@@ -372,8 +376,8 @@ impl Agent {
                     continue;
                 }
                 let extra = json!({"finish": meta["finish"]});
-                ui::event("empty", "the model sent an empty reply again; ending the turn", extra);
-                cut = true;
+                ui::event("empty", "the model sent an empty reply again; finishing the turn", extra);
+                (cut, stalled) = (true, true);
             }
             if calls.is_empty() && message["meta"]["finish"] == "length" && !cut {
                 cut = true;
@@ -402,7 +406,7 @@ impl Agent {
             if changed && let Some(check) = &self.config.check {
                 let (ok, out) = self.verify(&check.clone(), true).await;
                 if !ok && !nudged {
-                    nudged = true;
+                    (nudged, stalled) = (true, false);
                     ui::event("nudge", "the check failed on the final tree: asking the model to fix it", Value::Null);
                     ui::activity("waiting for the model");
                     let gate = format!("{GATE}\n{}", compact::tail(&out, 1500));
@@ -412,17 +416,16 @@ impl Agent {
                 checked = ok;
             }
             self.current = None;
-            return self.report(Some(changed), checked, began, clock).await;
+            return self.report(Some(changed), checked, stalled && !changed, began, clock).await;
         }
         ui::event("limit", &limit, Value::Null);
         self.current = None;
         let changed = self.changed(&start, began).await;
-        self.report(Some(changed), false, began, clock).await?;
-        Ok(false)
+        self.report(Some(changed), false, true, began, clock).await
     }
 
     async fn changed(&self, start: &str, began: usize) -> bool {
-        self.moved(start).await || self.session.entries[began..].iter().any(|e| edited(&e["meta"]))
+        self.session.entries[began..].iter().any(|e| edited(&e["meta"])) || self.moved(start).await
     }
 
     fn sent(&self) -> u64 {
@@ -432,7 +435,8 @@ impl Agent {
     fn overflow(&mut self, error: &str) -> Result<()> {
         let seen = self.session.last_prompt_tokens();
         let entries = &self.session.entries;
-        let compacted = entries.iter().rposition(|e| e["compact"].is_object()).map_or(0, |i| i + 1);
+        let compacted =
+            entries.iter().rposition(|e| e["compact"].is_object() || e["mask"].is_object()).map_or(0, |i| i + 1);
         let used = (compacted..entries.len()).rev().find(|&i| entries[i]["meta"]["usage"]["prompt_tokens"].is_u64());
         let estimate = match used {
             Some(i) => {
@@ -441,13 +445,12 @@ impl Agent {
                 let sent = sent.map(|j| compact::wire(&entries[j], j, newest, masked).to_string().len() as u64);
                 seen + sent.sum::<u64>() / 4
             }
-            None => Value::from(self.session.messages()).to_string().len() as u64 / 4,
+            None => self.sent(),
         };
         let window = window(error);
         self.compact_at = self.compact_at.min(window.unwrap_or(estimate) * 9 / 10);
         self.compact_to(self.compact_at as usize / 5, true)?;
-        let floor = Value::from(self.session.messages()).to_string().len() as u64 / 4;
-        self.compact_at = self.compact_at.max(floor);
+        self.compact_at = self.compact_at.max(self.sent());
         let extra = json!({"seen": seen, "estimate": estimate, "window": window, "compact_at": self.compact_at});
         ui::event("overflow", "context window exceeded; compacted and retrying", extra);
         Ok(())
@@ -517,6 +520,9 @@ impl Agent {
         let ran = async {
             let mut reply = self.worker()?.run(code, &state).await?;
             while reply["needs_check"] == true {
+                if stale(&reply) {
+                    self.passed = None;
+                }
                 let (ok, out) = match self.config.check.clone() {
                     Some(check) => self.verify(&check, false).await,
                     None => (false, "no check command configured (set check in air.toml)".into()),
@@ -529,7 +535,7 @@ impl Agent {
             Ok(reply) => {
                 self.restarts = 0;
                 let (mut out, mut meta) = finish(reply);
-                if edited(&meta) {
+                if stale(&meta) {
                     self.passed = None;
                 }
                 if self.repeat.1 >= REPEAT_WARN {
@@ -542,7 +548,7 @@ impl Agent {
                 (out, meta)
             }
             Err(e) => {
-                self.worker = None;
+                (self.worker, self.passed) = (None, None);
                 self.restarts += usize::from(e.downcast_ref::<worker::StartFailed>().is_some());
                 if self.restarts >= RESTARTS {
                     self.broken = Some(format!("{e:#} ({RESTARTS} times in a row; ending the turn)"));
@@ -606,14 +612,10 @@ impl Agent {
         (ok, out)
     }
 
-    fn index(&self) -> PathBuf {
-        self.session.path.with_extension("index")
-    }
-
     /// The working tree as a git tree id. Git runs on the blocking pool, so Ctrl-C and the status bar stay live
     /// while a large repo is snapshotted.
     async fn tree(&self) -> Result<String> {
-        let (root, index) = (self.root.clone(), self.index());
+        let (root, index) = (self.root.clone(), self.session.index());
         tokio::task::spawn_blocking(move || snapshot(&root, &index)).await?
     }
 
@@ -627,11 +629,19 @@ impl Agent {
         )
     }
 
-    async fn report(&mut self, changed: Option<bool>, checked: bool, began: usize, clock: Instant) -> Result<bool> {
+    /// The end of a turn: a stopped one (at a limit, or silent with nothing changed) fails even when nothing changed.
+    async fn report(
+        &mut self,
+        changed: Option<bool>,
+        checked: bool,
+        stopped: bool,
+        began: usize,
+        clock: Instant,
+    ) -> Result<bool> {
         self.session.flush()?;
         let first = &self.session.entries[began];
         let snapshot = first["meta"]["snapshot"].as_str().and_then(|s| s.split(' ').next());
-        let index = self.index();
+        let index = self.session.index();
         let since = std::time::SystemTime::now() - clock.elapsed();
         let (root, base) = (self.root.clone(), snapshot.map(String::from));
         let changes =
@@ -716,14 +726,15 @@ impl Agent {
             secs % 60
         );
         rows.push(("cost", cost));
-        ui::report(&rows, verdict, !changed || checked);
+        let good = (!changed || checked) && !stopped;
+        ui::report(&rows, verdict, good);
         let changes: Vec<&str> = changes.lines().filter(|l| *l != "none").collect();
         self.session.push(json!({"report": {
-            "verdict": verdict, "changed": changed, "checked": checked, "check_inputs": inputs, "outside": outside, "criteria": state.accepted,
+            "verdict": verdict, "changed": changed, "checked": checked, "stopped": stopped, "check_inputs": inputs, "outside": outside, "criteria": state.accepted,
             "plan_steps": steps, "plan_done": done, "changes": changes, "requests": requests, "runs": runs,
             "prompt": prompt, "cached": cached, "out": out, "ms": ms,
         }}))?;
-        Ok(!changed || checked)
+        Ok(good)
     }
 
     pub fn cost(&self) {
@@ -983,6 +994,16 @@ fn edited(meta: &Value) -> bool {
     meta["actions"].as_array().is_some_and(|a| a.iter().any(|a| a["ok"] == true && a["path"].is_string()))
 }
 
+/// Whether anything since a run's last check() (or its start) may have changed files: an edit, a write, or any shell
+/// command, which can touch gitignored files the snapshot never sees. Writes from Python itself go unseen.
+fn stale(meta: &Value) -> bool {
+    let actions = meta["actions"].as_array().map_or(&[][..], Vec::as_slice);
+    let check = actions.iter().rposition(|a| a["tool"] == "check");
+    let (after, ran) = check.map_or((actions, 0), |i| (&actions[i + 1..], actions[i]["cmds"].as_u64().unwrap_or(0)));
+    let cmds = meta["cmds"].as_array().map_or(0, Vec::len);
+    after.iter().any(|a| a["ok"] == true && a["path"].is_string()) || cmds > ran as usize
+}
+
 fn finish(mut meta: Value) -> (String, Value) {
     let (out, hidden) = redact(meta["out"].as_str().unwrap_or_default());
     if let Some(fields) = meta.as_object_mut() {
@@ -1006,14 +1027,17 @@ fn system_prompt(root: &Path, yolo: bool, notes: Option<&str>) -> String {
         prompt += "\n\n## Notes for this model\n";
         prompt += notes;
     }
-    if let Ok(agents) = std::fs::read_to_string(root.join("AGENTS.md")) {
+    let mut refused = vec![];
+    if let Some((agents, size)) = repo_text(root, "AGENTS.md", AGENTS_MAX) {
         prompt += "\n\n# Project instructions (AGENTS.md)\n\n";
-        prompt += &agents[..agents.floor_char_boundary(AGENTS_MAX)];
-        if agents.len() > AGENTS_MAX {
-            let (kept, all) = (AGENTS_MAX / 1024, agents.len() / 1024);
+        prompt += &agents;
+        if size > AGENTS_MAX as u64 {
+            let (kept, all) = (AGENTS_MAX / 1024, size.div_ceil(1024));
             prompt +=
                 &format!("\n\n[AGENTS.md clipped to its first {kept} KB of {all} KB; read the file for the rest]");
         }
+    } else if std::fs::symlink_metadata(root.join("AGENTS.md")).is_ok() {
+        refused.push("AGENTS.md".to_string());
     }
     let mut skills: Vec<String> = std::fs::read_dir(root.join(".agents/skills"))
         .into_iter()
@@ -1021,12 +1045,21 @@ fn system_prompt(root: &Path, yolo: bool, notes: Option<&str>) -> String {
         .flatten()
         .filter_map(|dir| {
             let rel = format!(".agents/skills/{}/SKILL.md", dir.file_name().to_string_lossy());
-            let text = std::fs::read_to_string(root.join(&rel)).ok()?;
+            let Some((text, _)) = repo_text(root, &rel, AGENTS_MAX) else {
+                if std::fs::symlink_metadata(root.join(&rel)).is_ok() {
+                    refused.push(rel);
+                }
+                return None;
+            };
             let about = text.lines().find_map(|l| l.strip_prefix("description:"))?.trim().to_string();
             Some(format!("- {rel}: {about}"))
         })
         .collect();
     skills.sort();
+    if !refused.is_empty() {
+        let why = "outside the repo, sandbox-protected, unreadable, or not a regular file";
+        ui::note(&format!("left out of the prompt ({why}): {}", refused.join(", ")));
+    }
     if !skills.is_empty() {
         prompt += "\n\n# Skills (open() one when the task needs it)\n";
         prompt += &skills.join("\n");
@@ -1053,6 +1086,23 @@ fn system_prompt(root: &Path, yolo: bool, notes: Option<&str>) -> String {
     prompt
 }
 
+/// A file for the system prompt, if it resolves to a regular file inside the repo and outside the sandbox's secret
+/// paths: at most `max` bytes, not ending mid-character, with the file's full size.
+fn repo_text(root: &Path, rel: &str, max: usize) -> Option<(String, u64)> {
+    let path = root.join(rel).canonicalize().ok().filter(|p| p.starts_with(root) && !worker::secret(p))?;
+    let flags = libc::O_NOFOLLOW | libc::O_NONBLOCK;
+    let file = std::fs::OpenOptions::new().read(true).custom_flags(flags).open(path).ok()?;
+    let size = file.metadata().ok().filter(std::fs::Metadata::is_file)?.len();
+    let mut bytes = Vec::new();
+    file.take(max as u64).read_to_end(&mut bytes).ok()?;
+    let partial = bytes.utf8_chunks().last().map_or(0, |chunk| {
+        let tail = chunk.invalid();
+        if std::str::from_utf8(tail).is_err_and(|e| e.error_len().is_none()) { tail.len() } else { 0 }
+    });
+    bytes.truncate(bytes.len() - partial);
+    Some((String::from_utf8_lossy(&bytes).into_owned(), size))
+}
+
 fn tools() -> Value {
     json!([{"type": "function", "function": {"name": "run",
         "description": "Run Python in the persistent worker; only printed output comes back.",
@@ -1072,7 +1122,7 @@ fn git(root: &Path, index: Option<&Path>, args: &[&str]) -> Result<String> {
     let mut cmd = std::process::Command::new("git");
     let guard = GIT_GUARD.get();
     cmd.args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null"])
-        .args(["-c", "core.quotePath=false"])
+        .args(["-c", "core.quotePath=false", "-c", "core.safecrlf=false"])
         .args(guard.into_iter().flat_map(|g| &g.1))
         .args(args)
         .env("GIT_ATTR_SOURCE", guard.map_or(EMPTY_TREE, |g| g.0.as_str()))
@@ -1083,13 +1133,37 @@ fn git(root: &Path, index: Option<&Path>, args: &[&str]) -> Result<String> {
     }
     let out = cmd.output().context("running git")?;
     if !out.status.success() {
-        anyhow::bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+        let text = format!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+        return Err(GitExit(out.status.code(), text).into());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// A git command that failed: its exit code, and the command with what git printed.
+#[derive(Debug)]
+struct GitExit(Option<i32>, String);
+
+impl std::fmt::Display for GitExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+
+impl std::error::Error for GitExit {}
+
+/// The private index is a cache: a leftover lock is dropped, and an index git can no longer use is rebuilt, once.
 fn snapshot(root: &Path, index: &Path) -> Result<String> {
     let _held = INDEX.lock().unwrap_or_else(|p| p.into_inner());
+    let _ = std::fs::remove_file(index.with_extension("index.lock"));
+    snapshot_with(root, index).or_else(|e| {
+        let _ = std::fs::remove_file(index);
+        let tree = snapshot_with(root, index)?;
+        ui::note(&format!("rebuilt the change-detection index after: {e:#}"));
+        Ok(tree)
+    })
+}
+
+fn snapshot_with(root: &Path, index: &Path) -> Result<String> {
     if !index.exists() {
         let current = git(root, None, &["rev-parse", "--git-path", "index"]).unwrap_or_default();
         let _ = std::fs::copy(root.join(current.trim()), index);
@@ -1105,6 +1179,10 @@ fn snapshot(root: &Path, index: &Path) -> Result<String> {
         }
     }
     if let Err(e) = git(root, Some(index), &args.iter().map(String::as_str).collect::<Vec<_>>()) {
+        // Unlike a file git cannot add (exit 1), a fatal error (128) writes nothing: write-tree would give a stale tree.
+        if e.downcast_ref::<GitExit>().is_some_and(|g| g.0 == Some(128)) {
+            return Err(e);
+        }
         static SKIPPED: std::sync::Once = std::sync::Once::new();
         SKIPPED.call_once(|| ui::note(&format!("change detection skips what git cannot add: {e:#}")));
     }

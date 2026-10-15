@@ -123,12 +123,18 @@ impl Session {
         Ok(())
     }
 
+    /// The private git index change detection uses: a cache for this run, rebuilt from the repo's index when missing.
+    pub fn index(&self) -> PathBuf {
+        self.path.with_extension("index")
+    }
+
     pub fn keep(&self) -> usize {
         self.entries.iter().rev().find_map(|e| e["compact"]["keep"].as_u64()).map_or(1, |k| k as usize)
     }
 
+    /// The prompt size the provider last reported; 0 once a compaction or mask since then has made it stale.
     pub fn last_prompt_tokens(&self) -> u64 {
-        let current = self.entries.iter().rev().take_while(|e| e["compact"].is_null());
+        let current = self.entries.iter().rev().take_while(|e| e["compact"].is_null() && e["mask"].is_null());
         current.map(|e| &e["meta"]["usage"]["prompt_tokens"]).find_map(Value::as_u64).unwrap_or(0)
     }
 
@@ -214,6 +220,8 @@ impl Drop for Session {
         let mut totals = crate::stats::totals(&self.entries[from..]);
         totals["ms"] = (clock.elapsed().as_millis() as u64).into();
         let _ = self.push(json!({"end": totals}));
+        // One per session would pile up in ~/.air/sessions; a resumed session builds a fresh one.
+        let _ = std::fs::remove_file(self.index());
     }
 }
 

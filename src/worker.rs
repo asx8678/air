@@ -151,16 +151,14 @@ pub fn descendants(pid: i32) -> Vec<i32> {
 
 pub fn sandboxed(root: &Path, yolo: bool, log: &Path, program: &str, args: &[&str]) -> Command {
     let writable = writable(root);
-    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    let home = home.canonicalize().unwrap_or(home);
-    let secrets = SECRETS.split(',').map(|s| home.join(s.trim()));
+    let secrets = secrets();
     let log = log.canonicalize().unwrap_or_else(|_| log.into());
     let protected = protected(root);
     let mut cmd = if yolo {
         Command::new(program)
     } else if cfg!(target_os = "macos") {
         let dirs: String = writable.iter().map(|d| format!(" (subpath {d:?})")).collect();
-        let secrets: String = secrets.map(|d| format!(" (subpath {d:?})")).collect();
+        let secrets: String = secrets.iter().map(|d| format!(" (subpath {d:?})")).collect();
         let protected: String = protected.iter().map(|d| format!(" (subpath {d:?})")).collect();
         let sockets = root.join("tmp");
         let profile = format!(
@@ -185,11 +183,11 @@ pub fn sandboxed(root: &Path, yolo: bool, log: &Path, program: &str, args: &[&st
         for dir in &writable {
             cmd.arg("--bind").arg(dir).arg(dir);
         }
-        for path in secrets.filter(|p| p.exists()) {
+        for path in secrets.iter().filter(|p| p.exists()) {
             if path.is_dir() {
-                cmd.arg("--tmpfs").arg(&path);
+                cmd.arg("--tmpfs").arg(path);
             } else {
-                cmd.arg("--ro-bind").arg("/dev/null").arg(&path);
+                cmd.arg("--ro-bind").arg("/dev/null").arg(path);
             }
         }
         for dir in protected.iter().chain(&nested(root)).filter(|d| d.exists()) {
@@ -215,6 +213,52 @@ pub fn sandboxed(root: &Path, yolo: bool, log: &Path, program: &str, args: &[&st
         .envs(CACHES.split_whitespace().map(|name| (name, cache.as_os_str())))
         .kill_on_drop(true);
     cmd
+}
+
+/// The secret paths in the home directory, which the sandbox hides from the worker and the check. The sandbox matches
+/// resolved paths, so each one also brings its real path and the targets of links inside it (a dotfiles repo's ~/.ssh
+/// or ~/.aws/credentials).
+fn secrets() -> Vec<PathBuf> {
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let home = home.canonicalize().unwrap_or(home);
+    let mut paths = vec![];
+    for path in SECRETS.split(',').map(|s| home.join(s.trim())) {
+        resolved(&path, &home, &mut paths);
+        linked(&path, &home, 3, &mut paths);
+        paths.push(path);
+    }
+    paths
+}
+
+/// Adds where `path` really is, if that differs and is a file or directory other than the home directory or one above
+/// it: a history file linked to /dev/null must not take /dev/null from the worker.
+fn resolved(path: &Path, home: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(real) = path.canonicalize()
+        && real != path
+        && real.metadata().is_ok_and(|m| m.is_file() || m.is_dir())
+        && !home.starts_with(&real)
+    {
+        out.push(real);
+    }
+}
+
+/// Adds the targets of the links in `dir`, down to `depth` levels of real directories.
+fn linked(dir: &Path, home: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if depth == 0 || !dir.is_dir() {
+        return;
+    }
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        match entry.file_type() {
+            Ok(kind) if kind.is_symlink() => resolved(&entry.path(), home, out),
+            Ok(kind) if kind.is_dir() => linked(&entry.path(), home, depth - 1, out),
+            _ => {}
+        }
+    }
+}
+
+/// Whether the sandbox keeps this canonical path from the worker.
+pub fn secret(path: &Path) -> bool {
+    secrets().iter().any(|s| path.starts_with(s))
 }
 
 fn protected(root: &Path) -> Vec<PathBuf> {

@@ -188,9 +188,10 @@ def write(path, content):
 
 
 def sh(cmd, timeout=120):
+    entry = [str(cmd), None, []]
+    _report.setdefault("cmds", []).append(entry)
     out, code = _exec(cmd, timeout)
-    files = [_rel(w) for w in str(cmd).split() if os.path.isfile(os.path.join(ROOT, w))]
-    _report.setdefault("cmds", []).append([str(cmd), code, files])
+    entry[1:] = [code, [_rel(w) for w in str(cmd).split() if os.path.isfile(os.path.join(ROOT, w))]]
     return out.rstrip("\n") + (f"\n[exit {code}]" if code else "")
 
 
@@ -211,7 +212,8 @@ def check():
     if not CHECK:
         print("no check command configured (set check in air.toml)")
         return None
-    _outbox.write('{"needs_check": true}\n')
+    ran = len(_report.get("cmds", []))
+    _outbox.write(json.dumps({"needs_check": True, "actions": _report.get("actions", []), "cmds": _report.get("cmds", [])}) + "\n")
     _outbox.flush()
     answer = json.loads(_inbox.readline() or "{}")
     ok = answer.get("ok") is True
@@ -219,7 +221,7 @@ def check():
     _deadline = time.monotonic() + RUN_CAP
     _checked = _tree() if ok else None
     _report["check"] = ok
-    _report.setdefault("actions", []).append({"tool": "check", "ok": ok})
+    _report.setdefault("actions", []).append({"tool": "check", "ok": ok, "cmds": ran})
     print(answer.get("out") or f"[check {'passed' if ok else 'FAILED'}]")
     return ok
 
