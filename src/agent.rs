@@ -620,6 +620,7 @@ impl Agent {
     /// The working tree as a git tree id. Git runs on the blocking pool, so Ctrl-C and the status bar stay live
     /// while a large repo is snapshotted.
     async fn tree(&self) -> Result<String> {
+        let _busy = ui::busy("indexing the working tree");
         let (root, index) = (self.root.clone(), self.session.index());
         tokio::task::spawn_blocking(move || snapshot(&root, &index)).await?
     }
@@ -649,9 +650,11 @@ impl Agent {
         let index = self.session.index();
         let since = std::time::SystemTime::now() - clock.elapsed();
         let (root, base) = (self.root.clone(), snapshot.map(String::from));
+        let busy = ui::busy("diffing the working tree");
         let changes =
             tokio::task::spawn_blocking(move || changes(&root, base.as_deref().map(|t| (t, index.as_path())), since))
                 .await?;
+        drop(busy);
         let changed = changed.unwrap_or(changes != "none");
         let path =
             |l: &str| l.strip_suffix(" (new)").or_else(|| l.rsplit_once(" +").map(|(path, _)| path)).map(String::from);
@@ -1078,17 +1081,25 @@ fn system_prompt(root: &Path, yolo: bool, check: bool, notes: Option<&str>) -> S
 
 /// The tracked files for the system prompt: a path and size per line within LISTING bytes, else a line per folder
 /// within TREE bytes; past both, a repo of over FILES files shows its first FILES two-level folders with file counts.
+/// Tells the user which form the model got and its size.
 fn listing(root: &Path) -> String {
     let tracked = git(root, None, &["ls-files"]).unwrap_or_default();
     let files: Vec<&str> = tracked.lines().collect();
     let sizes: Vec<u64> = files.iter().map(|f| std::fs::metadata(root.join(f)).map_or(0, |m| m.len())).collect();
     let plain: String = files.iter().zip(&sizes).map(|(file, size)| format!("{file} {size}\n")).collect();
     let head = |how: &str| format!("\n\n# Repository files at session start ({} tracked, {how})\n", files.len());
+    let shown = |form: &str, text: String| {
+        let (n, bytes) = (files.len(), text.len());
+        let size = format!("{:.1} KB, ~{}", bytes as f64 / 1024.0, ui::tokens(bytes as u64 / 4));
+        let extra = json!({"files": n, "form": form, "bytes": bytes});
+        ui::event("listing", &format!("repo map for the model: {n} tracked files as {form} ({size})"), extra);
+        text
+    };
     if files.is_empty() {
         return String::new();
     }
     if plain.len() <= LISTING {
-        return head("size in bytes") + &plain;
+        return shown("a list with sizes", head("size in bytes") + &plain);
     }
     // Each folder's own files, as indexes into files, and its subfolders.
     let mut dirs = BTreeMap::<&str, (Vec<usize>, Vec<&str>)>::new();
@@ -1113,10 +1124,13 @@ fn listing(root: &Path) -> String {
         })
         .collect();
     if tree.len() <= TREE {
-        return head("sizes in KB; one line per folder: its files, then its subfolders") + &tree;
+        return shown(
+            "a folder tree",
+            head("sizes in KB; one line per folder: its files, then its subfolders") + &tree,
+        );
     }
     if files.len() <= FILES {
-        return head("size in bytes") + &plain;
+        return shown("a list with sizes", head("size in bytes") + &plain);
     }
     let mut counts = BTreeMap::new();
     for file in &files {
@@ -1128,7 +1142,9 @@ fn listing(root: &Path) -> String {
     for (path, n) in counts.iter().take(FILES) {
         out += &if path.ends_with('/') { format!("{path} ({n} files)\n") } else { format!("{path}\n") };
     }
-    out
+    let first =
+        if counts.len() > FILES { format!(", the first {FILES} of {} entries", counts.len()) } else { String::new() };
+    shown(&format!("folder counts{first}"), out)
 }
 
 /// A file for the system prompt, if it resolves to a regular file inside the repo and outside the sandbox's secret

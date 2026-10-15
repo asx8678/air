@@ -160,6 +160,23 @@ pub fn activity(text: &str) {
     draw();
 }
 
+/// Shows text as the bar's activity until dropped, then puts back what the bar showed before.
+pub struct Busy(Option<String>);
+
+pub fn busy(text: &str) -> Busy {
+    let before = BAR.lock().unwrap().as_mut().map(|bar| std::mem::replace(&mut bar.activity, text.into()));
+    draw();
+    Busy(before)
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        if let Some(before) = self.0.take() {
+            activity(&before);
+        }
+    }
+}
+
 pub fn cached(usage: &Value) -> Option<u64> {
     let cached = usage["prompt_tokens_details"]["cached_tokens"].as_u64();
     cached.or(usage["cached_tokens"].as_u64()).or(usage["prompt_cache_hit_tokens"].as_u64())
