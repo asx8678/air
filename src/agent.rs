@@ -717,15 +717,12 @@ impl Agent {
             };
             rows.push(("undo", undo));
         }
-        let usage: Vec<&Value> = turn.iter().map(|e| &e["meta"]["usage"]).filter(|u| u.is_object()).collect();
-        let prompt: u64 = usage.iter().filter_map(|u| u["prompt_tokens"].as_u64()).sum();
-        let out: u64 = usage.iter().filter_map(|u| u["completion_tokens"].as_u64()).sum();
-        let cached: u64 = usage.iter().filter_map(|u| ui::cached(u)).sum();
-        let runs = turn.iter().filter(|e| e["meta"]["tool"] == "run").count();
+        let totals = crate::stats::totals(turn);
+        let n = |v: &Value| v.as_u64().unwrap_or(0);
+        let (requests, runs, tokens) = (n(&totals["requests"]), n(&totals["runs"]), &totals["tokens"]);
+        let (prompt, cached, out) = (n(&tokens["prompt"]), n(&tokens["cached"]), n(&tokens["out"]));
         let ms = clock.elapsed().as_millis() as u64;
         let secs = ms / 1000;
-        let lost = turn.iter().filter(|e| matches!(e["event"].as_str(), Some("overthought" | "interrupted")));
-        let requests = usage.len() + lost.count();
         let cost = format!(
             "{requests} requests · {runs} runs · {} in · {} out · {}:{:02}",
             ui::tokens(prompt),
@@ -746,20 +743,16 @@ impl Agent {
     }
 
     pub fn cost(&self) {
-        let runs = self.session.entries.iter().filter(|e| e["meta"]["tool"] == "run");
-        let (runs, rejected) = runs.fold((0, 0), |(n, r), e| (n + 1, r + usize::from(e["meta"]["rejected"] == true)));
-        let (mut requests, mut tokens) = (0, [0; 3]);
-        for u in self.session.entries.iter().map(|e| &e["meta"]["usage"]).filter(|u| u.is_object()) {
-            let cached = ui::cached(u);
-            for (sum, n) in
-                tokens.iter_mut().zip([u["prompt_tokens"].as_u64(), cached, u["completion_tokens"].as_u64()])
-            {
-                *sum += n.unwrap_or(0);
-            }
-            requests += 1;
-        }
-        println!("{requests} requests · in {} (cached {}) · out {}", tokens[0], tokens[1], tokens[2]);
-        println!("{runs} runs · {rejected} rejected before acting (syntax, unknown name, wrong arguments)");
+        let t = crate::stats::totals(&self.session.entries);
+        let tokens = &t["tokens"];
+        println!(
+            "{} requests · in {} (cached {}) · out {}",
+            t["requests"], tokens["prompt"], tokens["cached"], tokens["out"]
+        );
+        println!(
+            "{} runs · {} rejected before acting (syntax, unknown name, wrong arguments)",
+            t["runs"], t["rejected"]
+        );
     }
 
     pub fn think(&self) {
