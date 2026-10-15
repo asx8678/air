@@ -20,7 +20,14 @@ pub struct State {
 }
 
 impl Session {
-    pub fn create(home: &Path, root: &Path, model: &str, system: &str, profile: Map<String, Value>) -> Result<Self> {
+    pub fn create(
+        home: &Path,
+        root: &Path,
+        provider: &str,
+        model: &str,
+        system: &str,
+        profile: Map<String, Value>,
+    ) -> Result<Self> {
         let dir = home.join(".air/sessions");
         DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
         let secs = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -28,15 +35,19 @@ impl Session {
         let file = OpenOptions::new().create_new(true).append(true).mode(0o600).open(&path)?;
         file.try_lock()?;
         let mut session = Self { path, entries: vec![], file };
-        let mut params = profile;
-        let compact_at = params.remove("compact_at");
-        let guidance = params.remove("guidance");
-        params.entry("temperature").or_insert(crate::llm::TEMPERATURE.into());
-        session.push(json!({
-            "cwd": root, "model": model, "params": params, "compact_at": compact_at, "guidance": guidance, "system": system,
-            "air": format!("{} {}", env!("CARGO_PKG_VERSION"), env!("AIR_BUILD")),
-        }))?;
+        let mut header = settings(provider, model, system, profile);
+        header["cwd"] = json!(root);
+        header["air"] = format!("{} {}", env!("CARGO_PKG_VERSION"), env!("AIR_BUILD")).into();
+        session.push(header)?;
         Ok(session)
+    }
+
+    pub fn switch(&mut self, provider: &str, model: &str, system: &str, profile: Map<String, Value>) -> Result<()> {
+        self.push(json!({"switch": settings(provider, model, system, profile), "at": crate::ui::now_ms()}))
+    }
+
+    pub fn header(&self) -> &Value {
+        self.entries.iter().rev().find_map(|e| e.get("switch")).unwrap_or(&self.entries[0])
     }
 
     pub fn resume(home: &Path, root: &Path) -> Result<Self> {
@@ -96,38 +107,21 @@ impl Session {
         current.map(|e| &e["meta"]["usage"]["prompt_tokens"]).find_map(Value::as_u64).unwrap_or(0)
     }
 
-    fn newest_task(&self) -> Option<usize> {
-        let user = |i: &usize| self.entries[*i]["role"] == "user" && self.entries[*i]["meta"]["host"].is_null();
-        (1..self.entries.len()).rev().find(user)
-    }
-
     pub fn messages(&self) -> Vec<Value> {
-        let mut out = vec![json!({"role": "system", "content": self.entries[0]["system"]})];
-        let (keep, newest) = (self.keep(), self.newest_task());
-        let mut folded = None;
+        let mut out = vec![json!({"role": "system", "content": self.header()["system"]})];
+        let (keep, newest) = (self.keep(), crate::compact::newest_task(&self.entries));
         if let Some(summary) = self.entries.iter().rev().find_map(|e| e["compact"]["summary"].as_str()) {
             let mut content = summary.to_string();
-            let first = (keep..self.entries.len()).find(|&i| self.entries[i]["role"].is_string());
-            folded = first.filter(|&i| self.entries[i]["role"] == "user");
-            for u in newest.filter(|&u| u < keep).into_iter().chain(folded) {
+            if let Some(u) = newest.filter(|&u| u < keep && !summary.contains(&crate::compact::baked(u))) {
                 let task = self.entries[u]["content"].as_str().unwrap_or_default();
-                let label = if Some(u) == newest { "Current task" } else { "User" };
-                let quoted = format!("#{u} user:\n{}", crate::compact::quote(task));
-                content = content.replacen(&quoted, &format!("#{u} user: [the current task, in full below]"), 1);
-                content += &format!("\n\n[{label}, entry #{u}]\n{task}");
+                content += &format!("\n\n[Current task, entry #{u}]\n{task}");
             }
             out.push(json!({"role": "user", "content": content}));
         }
         let mut open: Vec<Value> = vec![];
         for (i, entry) in self.entries.iter().enumerate().skip(keep) {
-            let Some(role) = entry["role"].as_str().filter(|_| folded != Some(i)) else { continue };
-            let mut message = entry.clone();
-            if let Some(fields) = message.as_object_mut() {
-                fields.remove("meta");
-                if newest.is_some_and(|u| i < u) {
-                    fields.remove("reasoning_content");
-                }
-            }
+            let Some(role) = entry["role"].as_str() else { continue };
+            let message = crate::compact::wire(entry, newest.is_some_and(|u| i < u));
             if role == "tool" {
                 if let Some(i) = open.iter().position(|id| *id == message["tool_call_id"]) {
                     open.remove(i);
@@ -136,6 +130,22 @@ impl Session {
                 continue;
             }
             answer_missing(&mut out, &mut open);
+            if role == "user"
+                && let Some(prev) = out.last_mut().filter(|m| m["role"] == "user")
+            {
+                let label = if entry["meta"]["host"].is_null() {
+                    format!("[Next user message, entry #{i}]\n")
+                } else {
+                    String::new()
+                };
+                let joined = format!(
+                    "{}\n\n{label}{}",
+                    prev["content"].as_str().unwrap_or_default(),
+                    message["content"].as_str().unwrap_or_default()
+                );
+                prev["content"] = joined.into();
+                continue;
+            }
             if role == "assistant" {
                 open = message["tool_calls"]
                     .as_array()
@@ -168,6 +178,17 @@ impl Session {
         }
         state
     }
+}
+
+fn settings(provider: &str, model: &str, system: &str, mut params: Map<String, Value>) -> Value {
+    let compact_at = params.remove("compact_at");
+    let guidance = params.remove("guidance");
+    let think_limit = params.remove("think_limit");
+    let turn_tokens = params.remove("turn_tokens");
+    params.entry("temperature").or_insert(crate::llm::TEMPERATURE.into());
+    json!({
+        "provider": provider, "model": model, "params": params, "compact_at": compact_at, "guidance": guidance, "think_limit": think_limit, "turn_tokens": turn_tokens, "system": system,
+    })
 }
 
 fn answer_missing(out: &mut Vec<Value>, open: &mut Vec<Value>) {

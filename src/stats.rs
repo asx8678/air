@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 const MIN_TURNS: u64 = 5;
-const WASTE: &[&str] = &["empty", "interrupted", "bad_call", "repeat", "limit", "worker_restart", "error"];
+const WASTE: &[&str] =
+    &["empty", "length", "interrupted", "overthought", "bad_call", "repeat", "limit", "worker_restart", "error"];
 const TEMP: &[&str] = &["/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/"];
 
 #[derive(Default)]
@@ -34,6 +35,26 @@ impl Tally {
     }
 }
 
+fn label(header: &Value) -> (String, String) {
+    let model = header["model"].as_str().unwrap_or("?");
+    let model = format!("{model} @ {}", header["provider"].as_str().unwrap_or("config"));
+    let mut settings = crate::llm::params(header).to_string();
+    if let Some(at) = header["compact_at"].as_u64() {
+        settings += &format!(" compact_at={at}");
+    }
+    if let Some(limit) = header["think_limit"].as_u64() {
+        settings += &format!(" think_limit={limit} tok");
+    }
+    if let Some(notes) = header["guidance"].as_str() {
+        let mut hasher = std::hash::DefaultHasher::new();
+        std::hash::Hash::hash(notes, &mut hasher);
+        let first: String = notes.chars().take_while(|&c| c != '\n').take(40).collect();
+        let more = if first.len() < notes.len() { "…" } else { "" };
+        settings += &format!(" guidance {:08x} \"{first}{more}\"", std::hash::Hasher::finish(&hasher) as u32);
+    }
+    (model, settings)
+}
+
 pub fn print(home: &Path) -> Result<()> {
     let mut groups: BTreeMap<(String, String), Tally> = BTreeMap::new();
     let mut skipped = 0;
@@ -53,20 +74,12 @@ pub fn print(home: &Path) -> Result<()> {
             skipped += 1;
             continue;
         }
-        let model = header["model"].as_str().unwrap_or("?").to_string();
-        let mut settings = crate::llm::params(&header).to_string();
-        if let Some(at) = header["compact_at"].as_u64() {
-            settings += &format!(" compact_at={at}");
-        }
-        if let Some(notes) = header["guidance"].as_str() {
-            let mut hasher = std::hash::DefaultHasher::new();
-            std::hash::Hash::hash(notes, &mut hasher);
-            let first: String = notes.chars().take_while(|&c| c != '\n').take(40).collect();
-            let more = if first.len() < notes.len() { "…" } else { "" };
-            settings += &format!(" guidance {:08x} \"{first}{more}\"", std::hash::Hasher::finish(&hasher) as u32);
-        }
+        let (mut model, mut settings) = label(&header);
         let (mut wasted, mut reasoning, mut stuck) = (0, 0, false);
         for entry in entries {
+            if entry["switch"].is_object() {
+                (model, settings) = label(&entry["switch"]);
+            }
             if entry["role"] == "user" && entry["meta"]["host"].is_null() {
                 (wasted, reasoning, stuck) = (0, 0, false);
             }
@@ -113,14 +126,14 @@ pub fn print(home: &Path) -> Result<()> {
     let mut last = "";
     for ((model, settings), t) in &groups {
         if model != last {
-            println!("\n{model}");
+            println!("\n{}", crate::ui::printable(model));
             last = model;
         }
         let won = best.get(model.as_str()).is_some_and(|&(_, s, n)| n > 1 && s == settings);
         let star = if won { "  ★ best" } else { "" };
         let per = |x: u64| x as f64 / t.turns as f64;
         let secs = per(t.ms) as u64 / 1000;
-        println!("  {settings}{star}");
+        println!("  {}{star}", crate::ui::printable(settings));
         println!(
             "    {} turns · verified {}/{} changing · stalled {} · {:.1} req/turn · in {} ({}% cached) · out {} ({}% reasoning) per turn",
             t.turns,

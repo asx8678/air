@@ -1,4 +1,4 @@
-import ast, contextlib, difflib, importlib.util, inspect, json, linecache, os, re, shlex, signal, subprocess, sys, tempfile, traceback
+import ast, contextlib, ctypes, difflib, importlib.util, inspect, json, linecache, os, re, shlex, signal, stat, subprocess, sys, tempfile, threading, time, traceback
 
 ROOT = os.getcwd()
 sys.path.append(ROOT)
@@ -7,6 +7,7 @@ FMT = os.environ.pop("AIR_FMT", "")
 LOG = os.environ.pop("AIR_LOG", "")
 HALF = 8000
 LIMIT = 8 << 20
+IGNORABLE = re.compile("[\u200c-\u200f\u202a-\u202e\u206a-\u206f\ufeff]")
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\r(?!\n)")
 
 _inbox = os.fdopen(os.dup(0), encoding="utf-8")
@@ -16,12 +17,45 @@ os.dup2(_null, 0)
 _report = {}
 _state = {}
 _checked = None
+_groups = set()
+
+
+def _children(pid):
+    if sys.platform == "darwin":
+        buf = (ctypes.c_int * 4096)()
+        return list(buf[:max(0, ctypes.CDLL("/usr/lib/libSystem.B.dylib").proc_listchildpids(pid, buf, 16384))])
+    with contextlib.suppress(OSError, ValueError), open(f"/proc/{pid}/task/{pid}/children") as f:
+        return [int(n) for n in f.read().split()]
+    return []
+
+
+def _kill():
+    groups, tree = set(_groups), [os.getpid()]
+    for parent in tree:
+        for pid in _children(parent):
+            tree.append(pid)
+            with contextlib.suppress(OSError):
+                groups.add(os.getpgid(pid))
+    for group in groups - {0, 1, os.getpgrp()}:
+        with contextlib.suppress(OSError):
+            os.killpg(group, signal.SIGKILL)
+    os.killpg(0, signal.SIGKILL)
+
+
+def _watch(parent):
+    while os.getppid() == parent:
+        time.sleep(1)
+    _kill()
+
+
+threading.Thread(target=_watch, args=(os.getppid(),), daemon=True).start()
 
 
 def _exec(cmd, timeout):
     with tempfile.TemporaryFile() as out:
         p = subprocess.Popen(cmd, shell=True, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                              start_new_session=True)
+        _groups.add(p.pid)
         try:
             code = p.wait(timeout=timeout)
         except BaseException as e:
@@ -33,6 +67,7 @@ def _exec(cmd, timeout):
             code = f"timeout after {timeout}s"
         with contextlib.suppress(OSError):
             os.killpg(p.pid, signal.SIGKILL)
+        _groups.discard(p.pid)
         return ANSI.sub("", _read(out).decode("utf-8", "replace")), code
 
 
@@ -69,8 +104,13 @@ def _change(tool, path, make):
     try:
         if rel.startswith("..") or not real.startswith(ROOT + os.sep):
             raise ValueError(f"{path} is outside the repo")
-        if any(real == d or real.startswith(d + os.sep) for d in PROTECTED):
+        parts = (rel + os.sep + os.path.relpath(real, ROOT)).split(os.sep)
+        if any(d == real or real.startswith(d + os.sep) for d in PROTECTED) or any(
+                IGNORABLE.sub("", p).casefold() == ".git" for p in parts):
             raise ValueError(f"{path} is off limits: git runs code from there outside the sandbox")
+        st = os.stat(real) if os.path.lexists(real) else None
+        if st and stat.S_ISREG(st.st_mode) and (st.st_nlink > 1 or st.st_dev != os.stat(ROOT).st_dev):
+            raise ValueError(f"{path} has other hard links or lives on another volume; air will not change it")
         if not (_report.get("accepted") or _state.get("accepted")):
             raise ValueError("call accept(criteria) before changing files")
         before, written = make(os.path.join(ROOT, rel), rel)
@@ -85,7 +125,7 @@ def _change(tool, path, make):
     _forget()
     note = ""
     if FMT:
-        out, code = _exec(f"{FMT} {shlex.quote(rel)}", 60)
+        out, code = _exec(f"{FMT} {shlex.quote('./' + rel if rel.startswith('-') else rel)}", 60)
         note = f"; fmt failed: {out.strip().splitlines()[0] if out.strip() else code}" if code else ""
     with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
         after = f.read()
@@ -161,17 +201,15 @@ def check():
     if not CHECK:
         print("no check command configured (set check in air.toml)")
         return None
-    before = _tree()
-    out, code = _exec(CHECK, 1800)
-    after = _tree()
-    changed = sorted(f for f in before.keys() | after.keys() if before.get(f) != after.get(f))
-    ok = code == 0 and not changed
-    why = f"check changed the working tree: {', '.join(changed[:10])}" if changed else CHECK
+    _outbox.write('{"needs_check": true}\n')
+    _outbox.flush()
+    answer = json.loads(_inbox.readline() or "{}")
+    ok = answer.get("ok") is True
     global _checked
-    _checked = after if ok else None
+    _checked = _tree() if ok else None
     _report["check"] = ok
     _report.setdefault("actions", []).append({"tool": "check", "ok": ok})
-    print(f"{out.rstrip()}\n[check {'passed' if ok else 'FAILED'}: {why}]".lstrip("\n"))
+    print(answer.get("out") or f"[check {'passed' if ok else 'FAILED'}]")
     return ok
 
 
@@ -276,6 +314,8 @@ class _Helpers:
 sh.sh = sys.modules["sh"] = sh
 sys.meta_path.append(_Helpers())
 signal.signal(signal.SIGINT, signal.SIG_IGN)
+_outbox.write('{"ready": true}\n')
+_outbox.flush()
 for request in _inbox:
     request = json.loads(request)
     code, _state = request["code"], request.get("state") or {}
@@ -331,3 +371,4 @@ for request in _inbox:
         text = f"{text[:HALF]}\n[… {len(text) - 2 * HALF} characters omitted; the full output is in _last]\n{text[-HALF:]}"
     _outbox.write(json.dumps(dict(_report, out=text or "(no output)", error=failed)) + "\n")
     _outbox.flush()
+_kill()

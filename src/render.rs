@@ -9,7 +9,11 @@ pub struct Markdown {
 
 impl Markdown {
     pub fn push(&mut self, text: &str) {
-        self.line.push_str(&printable(text));
+        let text = printable(text);
+        self.line.push_str(&text);
+        if !text.contains('\n') {
+            return;
+        }
         while let Some(end) = self.line.find('\n') {
             let line: String = self.line.drain(..=end).collect();
             self.render(line.trim_end_matches('\n'));

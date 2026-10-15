@@ -1,66 +1,188 @@
 use crate::llm::{self, Llm};
+use crate::providers::Providers;
 use crate::session::Session;
 use crate::worker::{self, Worker};
 use crate::{Config, compact, ui};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::hash::{Hash, Hasher};
+use std::io::{Read, Seek, SeekFrom};
+use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::OnceLock;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
 
 const COMPACT_AT: u64 = 100_000;
 const MAX_REQUESTS: usize = 200;
 const REPEAT_WARN: usize = 3;
 const REPEAT_BLOCK: usize = 6;
 const FILES: usize = 200;
+const AGENTS_MAX: usize = 32 * 1024;
+const RESTARTS: usize = 2;
+const WINDOW: &[&str] = &["context length is", "context length of", "context window is", "context window of"];
 const CHECK_TIMEOUT: Duration = Duration::from_secs(1800);
+const CHECK_OUT: u64 = 1 << 20;
+const BIG: u64 = 16 << 20;
+const TURN_TOKENS: u64 = 20_000_000;
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+const SECRETS: &[(&str, &str, usize, &str)] = &[
+    ("AKIA", "aws key", 16, ""),
+    ("ghp_", "github token", 36, ""),
+    ("gho_", "github token", 36, ""),
+    ("github_pat_", "github token", 22, "_"),
+    ("sk-", "api key", 20, "_-"),
+    ("xoxb-", "slack token", 10, "-"),
+    ("xoxp-", "slack token", 10, "-"),
+    ("xoxa-", "slack token", 10, "-"),
+    ("xoxs-", "slack token", 10, "-"),
+];
 const GATE: &str = "The project check failed on the current tree. Fix what fails, run check(), then finish again. \
                     If it cannot pass, say why in one line. The check output ended with:";
 const NUDGE: &str = "Don't work out every change in advance: send one run() now with the next concrete step, \
                      and adjust after you see its output.";
+const AGAIN: &str =
+    "That happened twice in a row: send one run() now with the smallest next step, and reason less first.";
+const LENGTH: &str = "Your last reply hit the output limit and was cut off. Continue from where it stopped, in smaller \
+                      steps: one run() at a time, or a shorter answer.";
 const HELPERS: &[&str] = &["sh", "show", "accept", "edit", "write", "check", "carry", "plan", "done", "recall"];
-const SANDBOX: &str = "\n\n## Sandbox\nYour code runs in a sandbox. Internet and DNS are off (localhost works), and writes \
-                       outside the repo and temp dirs fail, as do writes into .git; on macOS so does nested \
-                       sandbox-exec, and Unix sockets work only under the repo's tmp/ directory. These failures \
-                       (Operation not permitted, EPERM, Read-only file system, DNS lookup errors) are permanent. \
-                       Don't retry them and don't search the machine for another copy of what was blocked: skip that \
-                       step, finish the rest, and say in your final message what you could not run.";
+const SANDBOX: &str = "\n\n## Sandbox\nYour code runs in a sandbox. Writes outside the repo and temp dirs fail, as do \
+                       writes into any .git directory and reads of credentials and private data in the home directory \
+                       (ssh and cloud keys, shell history, browser data, other tools' configs). Only a fixed set of \
+                       environment variables is passed through (env = [\"NAME\"] in ~/.config/air/config.toml adds more).";
+static GIT_GUARD: OnceLock<(String, Vec<String>)> = OnceLock::new();
+const MACOS: &str = " Internet and DNS are off (localhost works); nested sandbox-exec fails, and Unix sockets work only \
+                     under the repo's tmp/ directory.";
+const LINUX: &str = " The network is fully isolated: Internet, DNS and the host's localhost services are off; only \
+                     servers you start inside the sandbox are reachable on localhost.";
+const PERMANENT: &str = " These failures (Operation not permitted, EPERM, Read-only file system, DNS lookup errors) are \
+                         permanent. Don't retry them and don't search the machine for another copy of what was \
+                         blocked: skip that step, finish the rest, and say in your final message what you could not run.";
 
 pub struct Agent {
     root: PathBuf,
     config: Config,
     yolo: bool,
     llm: Llm,
+    provider: String,
     session: Session,
     worker: Option<Worker>,
     compact_at: u64,
     pending: Option<Value>,
     repeat: (u64, usize),
+    current: Option<(usize, Instant)>,
+    discarded: Option<(usize, String)>,
+    restarts: usize,
+    broken: Option<String>,
+    passed: Option<(String, String)>,
 }
 
 impl Agent {
     pub fn new(root: &Path, home: &Path, config: Config, resume: bool, yolo: bool) -> Result<Self> {
+        guard_git(root);
         let session = if resume {
             Session::resume(home, root)?
         } else {
-            let model =
-                config.model.as_deref().context("no model: pass -m or set model in ~/.config/air/config.toml")?;
-            let profile = config.models.get(model).cloned().unwrap_or_default();
+            let model = config
+                .model
+                .clone()
+                .or_else(|| config.providers.values().find_map(|p| p.models.first().cloned()))
+                .context("no model: pass -m or set model in ~/.config/air/config.toml")?;
+            let only = config.providers.keys().next().filter(|_| config.providers.len() == 1);
+            let Some(provider) = holding(&config.providers, &model).or(only) else {
+                let names: Vec<&str> = config.providers.keys().map(String::as_str).collect();
+                anyhow::bail!(
+                    "no provider for {model}: set base_url in ~/.config/air/config.toml or add one to \
+                     ~/.config/air/providers.toml; to use one of [{}], list {model} under it there",
+                    names.join(", ")
+                );
+            };
+            let profile = config.models.get(&model).cloned().unwrap_or_default();
             let system = system_prompt(root, yolo, profile.get("guidance").and_then(Value::as_str));
-            Session::create(home, root, model, &system, profile)?
+            Session::create(home, root, provider, &model, &system, profile)?
         };
-        let base_url = config.base_url.as_deref().context("set base_url in ~/.config/air/config.toml")?;
-        let llm = Llm::new(base_url, &session.entries[0]);
-        let learned = session.entries.iter().rev().find_map(|e| e["compact"]["at"].as_u64());
-        let compact_at = learned.or(session.entries[0]["compact_at"].as_u64()).unwrap_or(COMPACT_AT);
+        let (provider, llm) = connect(&config.providers, session.header())?;
+        let since = || session.entries.iter().rev().take_while(|e| e["switch"].is_null());
+        if let Some(field) = since().find_map(|e| e["meta"]["reasoning_field"].as_str()) {
+            llm.replay_as(field);
+        }
+        let learned = since().find_map(|e| e["compact"]["at"].as_u64());
+        let compact_at = learned.or(session.header()["compact_at"].as_u64()).unwrap_or(COMPACT_AT);
         let repeat = (0, 0);
-        Ok(Self { root: root.into(), config, yolo, llm, session, worker: None, compact_at, pending: None, repeat })
+        Ok(Self {
+            root: root.into(),
+            config,
+            yolo,
+            llm,
+            provider,
+            session,
+            worker: None,
+            compact_at,
+            pending: None,
+            repeat,
+            current: None,
+            discarded: None,
+            restarts: 0,
+            broken: None,
+            passed: None,
+        })
     }
 
     pub fn path(&self) -> &Path {
         &self.session.path
+    }
+
+    pub fn model(&self) -> &str {
+        self.session.header()["model"].as_str().unwrap_or_default()
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    pub fn set_providers(&mut self, providers: Providers) {
+        self.config.providers = providers;
+        match connect(&self.config.providers, self.session.header()) {
+            Ok((provider, llm)) => (self.provider, self.llm) = (provider, llm),
+            Err(e) => ui::note(&format!("{e:#}; still connected as before until a provider is added")),
+        }
+    }
+
+    pub async fn models(&self) -> Vec<(String, String, bool)> {
+        let mut known: Vec<(String, String)> = self
+            .config
+            .providers
+            .iter()
+            .flat_map(|(name, p)| p.models.iter().map(move |m| (name.clone(), m.clone())))
+            .collect();
+        match self.llm.models().await {
+            Ok(listed) => known.extend(listed.into_iter().map(|m| (self.provider.clone(), m))),
+            Err(e) => ui::note(&format!("could not list {}'s models: {e:#}", self.provider)),
+        }
+        let mut seen = std::collections::HashSet::new();
+        known.retain(|pair| seen.insert(pair.clone()));
+        known
+            .into_iter()
+            .map(|(p, m)| {
+                let profiled = self.config.models.contains_key(&m);
+                (p, m, profiled)
+            })
+            .collect()
+    }
+
+    pub fn switch(&mut self, provider: &str, model: &str) -> Result<()> {
+        if !self.config.providers.contains_key(provider) {
+            anyhow::bail!("no provider named {provider}");
+        }
+        let profile = self.config.models.get(model).cloned().unwrap_or_default();
+        let system = system_prompt(&self.root, self.yolo, profile.get("guidance").and_then(Value::as_str));
+        self.session.switch(provider, model, &system, profile)?;
+        (self.provider, self.llm) = connect(&self.config.providers, self.session.header())?;
+        self.compact_at = self.session.header()["compact_at"].as_u64().unwrap_or(COMPACT_AT);
+        ui::note(&format!("now using {model} on {provider}"));
+        Ok(())
     }
 
     pub async fn run(&mut self, task: &str) -> Result<bool> {
@@ -74,11 +196,17 @@ impl Agent {
             if let Err(e) = &result {
                 let text = ui::printable(&format!("{e:#}"));
                 self.session.push(json!({"event": "error", "text": text, "at": ui::now_ms()}))?;
+                if let Err(e) = self.unfinished() {
+                    ui::note(&format!("could not write the turn report: {e:#}"));
+                }
             }
             return result;
         }
-        let settled = match &mut self.worker {
-            Some(worker) => worker.settle().await,
+        let settled = match self.worker.as_mut() {
+            Some(worker) => tokio::select! {
+                settled = worker.settle() => settled,
+                _ = tokio::signal::ctrl_c() => Err(anyhow::anyhow!("a second Ctrl-C stopped it")),
+            },
             None => Ok(None),
         };
         let mut shown = false;
@@ -94,58 +222,123 @@ impl Agent {
                 }
             }
             Ok(None) => {}
-            Err(_) => self.worker = None,
+            Err(e) => {
+                self.worker = None;
+                if let Some(id) = self.pending.take() {
+                    let content = format!(
+                        "[interrupted by the user] the run did not stop ({e:#}); the worker was restarted and its \
+                         variables are gone"
+                    );
+                    let meta = json!({"tool": "run", "error": true, "interrupted": true});
+                    self.session.push(json!({"role": "tool", "tool_call_id": id, "content": content, "meta": meta}))?;
+                }
+            }
         }
         if !shown {
             println!();
         }
         ui::event("ctrl_c", "interrupted", Value::Null);
-        self.session.flush()?;
+        self.unfinished()?;
         Ok(false)
     }
 
+    fn unfinished(&mut self) -> Result<()> {
+        match self.current.take() {
+            Some((began, clock)) => self.report(None, false, began, clock).map(drop),
+            None => self.session.flush(),
+        }
+    }
+
     async fn turn(&mut self, task: &str) -> Result<bool> {
-        (self.pending, self.repeat) = (None, (0, 0));
+        (self.pending, self.repeat, self.restarts, self.broken, self.passed) = (None, (0, 0), 0, None, None);
         if self.session.last_prompt_tokens() >= self.compact_at / 2 {
             self.compact_to(self.compact_at as usize / 10)?;
         }
         self.session.flush()?;
         let (began, clock) = (self.session.entries.len(), Instant::now());
-        let snapshot = self.snapshot();
-        self.session.push(json!({"role": "user", "content": task, "meta": {"snapshot": snapshot}}))?;
-        let start = self.fingerprint();
-        let (mut nudged, mut overflowed, mut nudges) = (false, false, 0);
+        let start = self.tree()?;
+        self.session.push(json!({"role": "user", "content": task, "meta": {"snapshot": start}}))?;
+        self.current = Some((began, clock));
+        let (mut nudged, mut overflowed, mut nudges, mut cut) = (false, false, 0, false);
+        let ceiling = self.session.header()["turn_tokens"].as_u64().unwrap_or(TURN_TOKENS);
+        let mut spent = 0;
+        let mut limit = format!("stopped after {MAX_REQUESTS} model requests in one turn");
         for _ in 0..MAX_REQUESTS {
+            if spent >= ceiling {
+                limit = format!("stopped after {} in one turn (turn_tokens = {ceiling})", ui::tokens(spent));
+                break;
+            }
             if self.session.last_prompt_tokens() >= self.compact_at {
                 self.compact()?;
             }
-            let message = match self.llm.complete(&self.session.messages(), &tools()).await {
+            let messages = self.session.messages();
+            let sent = serde_json::to_string(&messages).map_or(0, |m| m.len() as u64);
+            let result = self.llm.complete(messages, &tools(), nudges < 2).await;
+            if let Some(e) = result.as_ref().err()
+                && let Some(lost) = llm::lost(e)
+            {
+                let why =
+                    if e.is::<llm::Overthought>() { "it went over think_limit" } else { "the provider cut the stream" };
+                self.discard(why, &lost.thinking);
+            }
+            let mut message = match result {
                 Err(e) if e.is::<llm::ContextOverflow>() && !overflowed => {
                     overflowed = true;
-                    let seen = self.session.last_prompt_tokens();
-                    if seen > 0 {
-                        self.compact_at = self.compact_at.min(seen * 9 / 10);
-                    }
-                    ui::event("overflow", "context window exceeded; compacting and retrying", json!({"seen": seen}));
-                    self.compact()?;
+                    self.overflow(&e.to_string())?;
                     continue;
                 }
-                Err(e) if e.is::<llm::Interrupted>() && nudges < 2 => {
+                Err(e) if e.is::<llm::ContextOverflow>() => {
+                    let system = self.session.header()["system"].as_str().map_or(0, str::len);
+                    let agents = std::fs::metadata(self.root.join("AGENTS.md")).map_or(0, |m| m.len() as usize);
+                    anyhow::bail!(
+                        "{e}; still over after compacting: the system prompt is {} KB, including {} KB of AGENTS.md",
+                        system / 1024,
+                        agents.min(AGENTS_MAX) / 1024
+                    );
+                }
+                Err(e) if e.is::<llm::Overthought>() => {
                     nudges += 1;
-                    self.nudge("Your last reply was lost: the provider cut the stream during long reasoning.")?;
+                    ui::event("overthought", &e.to_string(), llm::lost(&e).map_or(Value::Null, llm::Lost::extra));
+                    self.nudge(&format!("You {e}; that reasoning was discarded."))?;
+                    continue;
+                }
+                Err(e) if e.is::<llm::Interrupted>() && nudges < 2 && llm::lost(&e).is_some_and(|l| !l.stalled) => {
+                    nudges += 1;
+                    let reasoning = llm::lost(&e).is_some_and(|l| !l.thinking.is_empty());
+                    let during = if reasoning { " during long reasoning" } else { "" };
+                    self.nudge(&format!("Your last reply was lost: the provider cut the stream{during}."))?;
                     continue;
                 }
                 result => result?,
             };
             overflowed = false;
+            let usage = &mut message["meta"]["usage"];
+            if !usage["prompt_tokens"].is_u64() {
+                usage["prompt_tokens"] = (sent / 4).into();
+                usage["estimated"] = true.into();
+            }
+            spent += usage["prompt_tokens"].as_u64().unwrap_or(0) + usage["completion_tokens"].as_u64().unwrap_or(0);
             ui::usage(&message["meta"]["usage"]);
             let calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
-            if calls.is_empty() && message["content"].as_str().is_none_or(|c| c.trim().is_empty()) && nudges < 2 {
-                nudges += 1;
+            if calls.is_empty() && message["content"].as_str().is_none_or(|c| c.trim().is_empty()) {
                 let meta = &message["meta"];
-                let extra = json!({"usage": meta["usage"], "timing": meta["timing"], "finish": meta["finish"]});
-                ui::event("empty", "the model sent an empty reply; asking it to act", extra);
-                self.nudge("Your last reply was empty: you reasoned at length and sent nothing.")?;
+                let extra =
+                    json!({"meta": {"usage": meta["usage"], "timing": meta["timing"]}, "finish": meta["finish"]});
+                if nudges < 2 {
+                    nudges += 1;
+                    ui::event("empty", "the model sent an empty reply; asking it to act", extra);
+                    let thinking = message["reasoning_content"].as_str().unwrap_or_default();
+                    self.discard("the reply was empty", thinking);
+                    self.nudge("Your last reply was empty: you reasoned at length and sent nothing.")?;
+                    continue;
+                }
+                ui::event("empty", "the model sent an empty reply again; ending the turn", extra);
+            }
+            if calls.is_empty() && message["meta"]["finish"] == "length" && !cut {
+                cut = true;
+                ui::event("length", "the reply hit the output limit; asking the model to continue", Value::Null);
+                self.session.push(message)?;
+                self.session.push(json!({"role": "user", "content": LENGTH, "meta": {"host": true}}))?;
                 continue;
             }
             self.session.push(message)?;
@@ -156,15 +349,18 @@ impl Agent {
                     .push(json!({"role": "tool", "tool_call_id": call["id"], "content": content, "meta": meta}))?;
                 self.pending = None;
             }
+            if let Some(why) = self.broken.take() {
+                anyhow::bail!(why);
+            }
             if !calls.is_empty() {
                 ui::activity("waiting for the model");
                 continue;
             }
-            let changed = self.fingerprint() != start;
+            let changed = self.tree()? != start;
             let mut checked = false;
             if changed && let Some(check) = &self.config.check {
                 let clock = Instant::now();
-                let (ok, out) = self.verify(check).await;
+                let (ok, out) = self.verify(&check.clone(), true).await;
                 let ms = clock.elapsed().as_millis() as u64;
                 self.session.push(json!({"check": {"ok": ok, "ms": ms, "out": compact::tail(&out, 1500)}}))?;
                 if !ok && !nudged {
@@ -177,20 +373,53 @@ impl Agent {
                 }
                 checked = ok;
             }
-            return self.report(changed, checked, began, clock);
+            self.current = None;
+            return self.report(Some(changed), checked, began, clock);
         }
-        ui::event("limit", &format!("stopped after {MAX_REQUESTS} model requests in one turn"), Value::Null);
-        self.report(self.fingerprint() != start, false, began, clock)?;
+        ui::event("limit", &limit, Value::Null);
+        self.current = None;
+        self.report(Some(self.moved(&start)), false, began, clock)?;
         Ok(false)
     }
 
-    fn nudge(&mut self, why: &str) -> Result<()> {
-        let last = self.session.entries.iter().rev().find_map(|e| e["role"].as_str());
-        if last == Some("user") {
-            return Ok(());
+    fn overflow(&mut self, error: &str) -> Result<()> {
+        let seen = self.session.last_prompt_tokens();
+        let entries = &self.session.entries;
+        let compacted = entries.iter().rposition(|e| e["compact"].is_object()).map_or(0, |i| i + 1);
+        let used = (compacted..entries.len()).rev().find(|&i| entries[i]["meta"]["usage"]["prompt_tokens"].is_u64());
+        let estimate = match used {
+            Some(i) => {
+                let sent = entries[i..].iter().filter(|e| e["role"].is_string()).map(|e| {
+                    let mut e = e.clone();
+                    e.as_object_mut().map(|fields| fields.remove("meta"));
+                    e.to_string().len() as u64
+                });
+                seen + sent.sum::<u64>() / 4
+            }
+            None => Value::from(self.session.messages()).to_string().len() as u64 / 4,
+        };
+        let window = window(error);
+        self.compact_at = self.compact_at.min(window.unwrap_or(estimate) * 9 / 10);
+        self.compact()?;
+        let floor = Value::from(self.session.messages()).to_string().len() as u64 / 4;
+        self.compact_at = self.compact_at.max(floor);
+        let extra = json!({"seen": seen, "estimate": estimate, "window": window, "compact_at": self.compact_at});
+        ui::event("overflow", "context window exceeded; compacted and retrying", extra);
+        Ok(())
+    }
+
+    fn discard(&mut self, why: &str, thinking: &str) {
+        if !thinking.trim().is_empty() {
+            self.discarded = Some((self.session.entries.len(), format!("*Discarded: {why}.*\n\n{thinking}")));
         }
+    }
+
+    fn nudge(&mut self, why: &str) -> Result<()> {
+        let last = self.session.entries.iter().rev().find(|e| e["role"].is_string());
+        let again = last.is_some_and(|e| e["meta"]["nudge"] == true);
         ui::event("nudge", why, Value::Null);
-        self.session.push(json!({"role": "user", "content": format!("{why} {NUDGE}"), "meta": {"host": true}}))
+        let content = format!("{why} {}", if again { AGAIN } else { NUDGE });
+        self.session.push(json!({"role": "user", "content": content, "meta": {"host": true, "nudge": true}}))
     }
 
     async fn call(&mut self, call: &Value) -> (String, Value) {
@@ -240,9 +469,25 @@ impl Agent {
         let state = self.session.state();
         let state = json!({"accepted": state.accepted, "carry": state.carry, "plan": state.plan});
         let clock = Instant::now();
-        match async { self.worker()?.run(code, &state).await }.await {
+        let ran = async {
+            let mut reply = self.worker()?.run(code, &state).await?;
+            while reply["needs_check"] == true {
+                let (ok, out) = match self.config.check.clone() {
+                    Some(check) => self.verify(&check, false).await,
+                    None => (false, "no check command configured (set check in air.toml)".into()),
+                };
+                reply = self.worker()?.resume(ok, &out).await?;
+            }
+            anyhow::Ok(reply)
+        };
+        match ran.await {
             Ok(reply) => {
-                let (mut out, mut meta) = finish(reply);
+                self.restarts = 0;
+                let (out, mut meta) = finish(reply);
+                let (mut out, hidden) = redact(&out);
+                if hidden > 0 {
+                    meta["redacted"] = hidden.into();
+                }
                 if self.repeat.1 >= REPEAT_WARN {
                     let n = self.repeat.1;
                     out +=
@@ -254,6 +499,10 @@ impl Agent {
             }
             Err(e) => {
                 self.worker = None;
+                self.restarts += usize::from(e.downcast_ref::<worker::StartFailed>().is_some());
+                if self.restarts >= RESTARTS {
+                    self.broken = Some(format!("{e:#} ({RESTARTS} times in a row; ending the turn)"));
+                }
                 let out = format!("error: {e:#}; the worker was restarted and its variables are gone");
                 println!();
                 ui::event("worker_restart", &out, Value::Null);
@@ -270,22 +519,42 @@ impl Agent {
         Ok(self.worker.as_mut().expect("just started"))
     }
 
-    async fn verify(&self, check: &str) -> (bool, String) {
-        ui::run("check()");
-        let before = self.fingerprint();
+    async fn verify(&mut self, check: &str, gate: bool) -> (bool, String) {
+        let before = self.tree();
+        if let (Ok(tree), Some((passed, out))) = (&before, &self.passed)
+            && tree == passed
+        {
+            let out = format!("{out}\n[reused: the tree is unchanged since this check passed]");
+            if gate {
+                ui::ran(&json!({"actions": [{"tool": "check", "ok": true}]}), &out);
+            }
+            return (true, out);
+        }
+        if gate {
+            ui::run("check()");
+        } else {
+            ui::activity("running check()");
+        }
         let script = format!("exec 2>&1\n{check}");
         let cmd = worker::sandboxed(&self.root, self.yolo, &self.session.path, "/bin/sh", &["-c", &script]);
         let (passed, out) = match tokio::time::timeout(CHECK_TIMEOUT, grouped(cmd)).await {
-            Ok(Ok(out)) => out,
+            Ok(Ok((passed, out))) => (passed, redact(&out).0),
             Ok(Err(e)) => (false, format!("{e:#}")),
             Err(_) => (false, format!("timeout after {}s", CHECK_TIMEOUT.as_secs())),
         };
-        let clean = self.fingerprint() == before;
-        let ok = passed && clean;
-        let why = if clean { check } else { "the check changed the working tree" };
+        let after = self.tree();
+        let why = match (&before, &after) {
+            (Err(e), _) | (_, Err(e)) => format!("{e:#}"),
+            (Ok(a), Ok(b)) if a != b => "the check changed the working tree".into(),
+            _ => check.into(),
+        };
+        let ok = passed && matches!((&before, &after), (Ok(a), Ok(b)) if a == b);
         let verdict = if ok { "passed" } else { "FAILED" };
         let out = format!("{}\n[check {verdict}: {why}]", out.trim_end()).trim_start().to_string();
-        ui::ran(&json!({"actions": [{"tool": "check", "ok": ok}]}), &out);
+        if gate {
+            ui::ran(&json!({"actions": [{"tool": "check", "ok": ok}]}), &out);
+        }
+        self.passed = after.ok().filter(|_| ok).map(|tree| (tree, out.clone()));
         (ok, out)
     }
 
@@ -293,35 +562,72 @@ impl Agent {
         self.session.path.with_extension("index")
     }
 
-    fn snapshot(&self) -> Option<String> {
+    fn tree(&self) -> Result<String> {
         let index = self.index();
         if !index.exists() {
             let current = git(&self.root, None, &["rev-parse", "--git-path", "index"]).unwrap_or_default();
             let _ = std::fs::copy(self.root.join(current.trim()), &index);
         }
-        git(&self.root, Some(&index), &["add", "-A"])?;
-        git(&self.root, Some(&index), &["write-tree"]).map(|tree| tree.trim().to_string())
-    }
-
-    fn fingerprint(&self) -> String {
-        let list = git(&self.root, None, &["ls-files", "-co", "--exclude-standard", "-z"]).unwrap_or_default();
+        let others = git(&self.root, Some(&index), &["ls-files", "-z", "-o", "--exclude-standard"])?;
+        let mut args = vec!["add".to_string(), "-A".into(), "--".into(), ".".into()];
         let mut hasher = std::hash::DefaultHasher::new();
-        for file in list.split('\0').filter(|f| !f.is_empty()) {
-            file.hash(&mut hasher);
-            std::fs::metadata(self.root.join(file)).ok().map(|m| (m.len(), m.modified().ok())).hash(&mut hasher);
+        for path in others.split('\0').filter(|p| !p.is_empty()) {
+            let Ok(meta) = std::fs::symlink_metadata(self.root.join(path)) else { continue };
+            if meta.len() > BIG {
+                (path, meta.len(), meta.modified().ok()).hash(&mut hasher);
+                args.push(format!(":(exclude,literal){path}"));
+            }
         }
-        format!("{:016x}", hasher.finish())
+        git(&self.root, Some(&index), &args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        let tree = git(&self.root, Some(&index), &["write-tree"])?.trim().to_string();
+        Ok(if args.len() > 4 { format!("{tree} {:016x}", hasher.finish()) } else { tree })
     }
 
-    fn report(&mut self, changed: bool, checked: bool, began: usize, clock: Instant) -> Result<bool> {
+    fn moved(&self, start: &str) -> bool {
+        self.tree().map_or_else(
+            |e| {
+                ui::event("error", &format!("could not tell whether the tree changed: {e:#}"), Value::Null);
+                true
+            },
+            |tree| tree != start,
+        )
+    }
+
+    fn report(&mut self, changed: Option<bool>, checked: bool, began: usize, clock: Instant) -> Result<bool> {
+        self.session.flush()?;
+        let first = &self.session.entries[began];
+        let snapshot = first["meta"]["snapshot"].as_str().and_then(|s| s.split(' ').next());
+        let index = self.index();
+        let since = std::time::SystemTime::now() - clock.elapsed();
+        let changes = changes(&self.root, snapshot.map(|tree| (tree, index.as_path())), since);
+        let changed = changed.unwrap_or(changes != "none");
+        let path =
+            |l: &str| l.strip_suffix(" (new)").or_else(|| l.rsplit_once(" +").map(|(path, _)| path)).map(String::from);
+        let turn = &self.session.entries[began..];
+        let actions = turn.iter().flat_map(|e| e["meta"]["actions"].as_array().into_iter().flatten());
+        let own: Vec<&str> = actions.filter(|a| a["ok"] == true).filter_map(|a| a["path"].as_str()).collect();
+        let (mine, outside): (Vec<&str>, Vec<&str>) =
+            changes.lines().filter(|l| *l != "none").partition(|l| path(l).is_some_and(|p| own.contains(&p.as_str())));
+        let outside: Vec<String> = outside.into_iter().filter_map(path).collect();
+        let named = |path: &str| {
+            let words = self
+                .config
+                .check
+                .as_deref()
+                .unwrap_or_default()
+                .split(|c: char| c.is_whitespace() || "'\"();&|<>=`".contains(c));
+            path == "air.toml" || words.map(|w| w.trim_start_matches("./")).any(|w| w == path)
+        };
+        let inputs: Vec<String> = changes.lines().filter_map(path).filter(|p| named(p)).collect();
         let (check, verdict) = match (changed, checked, &self.config.check) {
             (false, _, _) => ("-", "NO CHANGES"),
+            (true, true, _) if !inputs.is_empty() => ("passed, but this turn changed what it runs", "UNVERIFIED"),
             (true, true, _) => ("passed on the final tree", "VERIFIED"),
             (true, false, None) => ("none configured: set check in air.toml", "UNVERIFIED"),
             (true, false, Some(_)) => ("not passed on the final tree", "UNVERIFIED"),
         };
+        let checked = checked && inputs.is_empty();
         let state = self.session.state();
-        let first = &self.session.entries[began];
         let task = first["content"].as_str().unwrap_or_default();
         let mut rows = vec![("task", task.lines().next().unwrap_or_default().to_string())];
         rows.push(("criteria", state.accepted.clone().unwrap_or_else(|| "-".into())));
@@ -331,15 +637,31 @@ impl Agent {
             rows.push(("plan", format!("{done}/{steps} steps done")));
         }
         rows.push(("check", check.into()));
-        let snapshot = first["meta"]["snapshot"].as_str();
-        let index = self.index();
-        let changes = changes(&self.root, snapshot.map(|tree| (tree, index.as_path())));
+        if !inputs.is_empty() {
+            rows.push(("inputs", format!("check inputs changed: {}", inputs.join(", "))));
+        }
         rows.push(("changes", changes.clone()));
+        if !outside.is_empty() {
+            let text = format!("not through air's edit()/write(), maybe outside air: {}", outside.join(", "));
+            rows.push(("outside", text));
+        }
         if let Some(tree) = snapshot.filter(|_| changed) {
             let short = tree.get(..12).unwrap_or(tree);
-            rows.push(("undo", format!("git restore --source={short} --worktree -- .  (new files stay)")));
+            let mine: Vec<String> = mine.into_iter().filter_map(path).collect();
+            let mut args = vec!["--literal-pathspecs", "ls-tree", "-z", "--name-only", tree, "--"];
+            args.extend(mine.iter().map(String::as_str));
+            let known = if mine.is_empty() { String::new() } else { git(&self.root, None, &args).unwrap_or_default() };
+            let modified: Vec<&str> = known.split('\0').filter(|p| !p.is_empty()).collect();
+            let undo = match (outside.is_empty(), modified.is_empty()) {
+                (true, _) => format!("git restore --source={short} --worktree -- .  (new files stay)"),
+                (false, false) => format!(
+                    "git restore --source={short} --worktree -- {}  (air's edit()/write() paths; new files stay)",
+                    modified.iter().map(|p| quoted(p)).collect::<Vec<_>>().join(" ")
+                ),
+                (false, true) => format!("git restore --source={short} --worktree -- <path>  (new files stay)"),
+            };
+            rows.push(("undo", undo));
         }
-        let turn = &self.session.entries[began..];
         let usage: Vec<&Value> = turn.iter().map(|e| &e["meta"]["usage"]).filter(|u| u.is_object()).collect();
         let prompt: u64 = usage.iter().filter_map(|u| u["prompt_tokens"].as_u64()).sum();
         let out: u64 = usage.iter().filter_map(|u| u["completion_tokens"].as_u64()).sum();
@@ -347,7 +669,8 @@ impl Agent {
         let runs = turn.iter().filter(|e| e["meta"]["tool"] == "run").count();
         let ms = clock.elapsed().as_millis() as u64;
         let secs = ms / 1000;
-        let requests = usage.len();
+        let lost = turn.iter().filter(|e| matches!(e["event"].as_str(), Some("overthought" | "interrupted")));
+        let requests = usage.len() + lost.count();
         let cost = format!(
             "{requests} requests · {runs} runs · {} in · {} out · {}:{:02}",
             ui::tokens(prompt),
@@ -359,7 +682,7 @@ impl Agent {
         ui::report(&rows, verdict, !changed || checked);
         let changes: Vec<&str> = changes.lines().filter(|l| *l != "none").collect();
         self.session.push(json!({"report": {
-            "verdict": verdict, "changed": changed, "checked": checked, "criteria": state.accepted,
+            "verdict": verdict, "changed": changed, "checked": checked, "check_inputs": inputs, "outside": outside, "criteria": state.accepted,
             "plan_steps": steps, "plan_done": done, "changes": changes, "requests": requests, "runs": runs,
             "prompt": prompt, "cached": cached, "out": out, "ms": ms,
         }}))?;
@@ -384,7 +707,12 @@ impl Agent {
     }
 
     pub fn think(&self) {
-        let last = self.session.entries.iter().rev().find_map(|e| e["reasoning_content"].as_str());
+        let entries = self.session.entries.iter().enumerate().rev();
+        let stored = entries.filter_map(|(i, e)| e["reasoning_content"].as_str().map(|r| (i, r))).next();
+        let last = match (&self.discarded, stored) {
+            (Some((at, lost)), stored) if stored.is_none_or(|(i, _)| *at > i) => Some(lost.as_str()),
+            (_, stored) => stored.map(|(_, r)| r),
+        };
         let mut markdown = crate::render::Markdown::default();
         markdown.push(last.unwrap_or("no reasoning recorded yet"));
         markdown.finish();
@@ -407,30 +735,152 @@ impl Agent {
     }
 }
 
-struct Group(Option<u32>);
+struct Group(Vec<i32>);
 
 impl Drop for Group {
     fn drop(&mut self) {
-        if let Some(pid) = self.0 {
-            let group = format!("-{pid}");
-            let _ = std::process::Command::new("kill").args(["-KILL", "--", &group]).stderr(Stdio::null()).status();
+        ui::CHECK.store(0, Ordering::Relaxed);
+        let own = unsafe { libc::getpgrp() };
+        for &group in self.0.iter().filter(|&&g| g > 1 && g != own) {
+            unsafe { libc::kill(-group, libc::SIGKILL) };
         }
     }
 }
 
-async fn grouped(mut cmd: tokio::process::Command) -> Result<(bool, String)> {
-    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).process_group(0).spawn()?;
-    let group = Group(child.id());
-    let mut stdout = child.stdout.take().context("check stdout")?;
-    let mut out = vec![];
-    let wait = async {
-        let status = child.wait().await;
-        drop(group);
-        status
+fn holding<'a>(providers: &'a Providers, model: &str) -> Option<&'a String> {
+    providers.iter().find(|(_, p)| p.models.iter().any(|m| m == model)).map(|(name, _)| name)
+}
+
+fn connect(providers: &Providers, header: &Value) -> Result<(String, Llm)> {
+    let model = header["model"].as_str().unwrap_or_default();
+    let named = header["provider"].as_str().filter(|n| providers.contains_key(*n));
+    let name = match named.or(holding(providers, model).map(String::as_str)) {
+        Some(name) => name,
+        None => {
+            let first = providers.keys().next().with_context(
+                || "no provider: set base_url in ~/.config/air/config.toml or add one to ~/.config/air/providers.toml",
+            )?;
+            if providers.len() > 1 || header["provider"].is_string() {
+                ui::note(&format!("no provider lists {model}; using {first} (/models or /providers changes it)"));
+            }
+            first.as_str()
+        }
     };
-    let (status, read) = tokio::join!(wait, stdout.read_to_end(&mut out));
-    read?;
-    Ok((status?.success(), String::from_utf8_lossy(&out).into_owned()))
+    let p = &providers[name];
+    Ok((name.into(), Llm::new(&p.base_url, p.api_key.as_deref(), header)))
+}
+
+async fn grouped(mut cmd: tokio::process::Command) -> Result<(bool, String)> {
+    let path = std::env::temp_dir().join(format!("air-check-{}-{}", std::process::id(), ui::now_ms()));
+    let mut file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(&path)?;
+    let _ = std::fs::remove_file(&path);
+    let mut child = cmd.stdin(Stdio::null()).stdout(file.try_clone()?).process_group(0).spawn()?;
+    let pid = child.id().context("the check exited before it started")? as i32;
+    ui::CHECK.store(pid, Ordering::Relaxed);
+    let mut group = Group(vec![pid]);
+    let status = loop {
+        tokio::select! {
+            status = child.wait() => break status?,
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                let seen = worker::descendants(pid);
+                group.0.extend(seen.into_iter().filter(|g| !group.0.contains(g)).collect::<Vec<_>>());
+            }
+        }
+    };
+    group.0.extend(worker::descendants(pid));
+    drop(group);
+    let size = file.seek(SeekFrom::End(0))?;
+    file.seek(SeekFrom::Start(size.saturating_sub(CHECK_OUT)))?;
+    let mut out = vec![];
+    file.read_to_end(&mut out)?;
+    let out = String::from_utf8_lossy(&out);
+    let out = if size > CHECK_OUT { format!("[… {} bytes omitted]\n{out}", size - CHECK_OUT) } else { out.into() };
+    Ok((status.success(), out))
+}
+
+fn redact(text: &str) -> (String, usize) {
+    let (mut out, mut hidden, mut copied, mut i) = (String::new(), 0, 0, 0);
+    let bytes = text.as_bytes();
+    while i < bytes.len() {
+        let boundary = i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || matches!(bytes[i - 1], b'_' | b'-'));
+        if boundary
+            && matches!(bytes[i], b'A' | b'g' | b's' | b'x' | b'-')
+            && let Some((len, kind)) = secret(&text[i..])
+        {
+            out += &text[copied..i];
+            out += &format!("[redacted {kind}]");
+            (hidden, i) = (hidden + 1, i + len);
+            copied = i;
+            continue;
+        }
+        i += 1;
+    }
+    if hidden == 0 {
+        return (text.into(), 0);
+    }
+    out += &text[copied..];
+    (out, hidden)
+}
+
+fn secret(s: &str) -> Option<(usize, &'static str)> {
+    if s.starts_with("-----BEGIN ") && s.lines().next().is_some_and(|l| l.contains("PRIVATE KEY-----")) {
+        let end = s
+            .find("-----END ")
+            .map_or(s.len(), |e| e + 9 + s[e + 9..].find("-----").map_or(s.len() - e - 9, |k| k + 5));
+        return Some((end, "private key"));
+    }
+    SECRETS.iter().find_map(|&(prefix, kind, min, extra)| {
+        let body = s.strip_prefix(prefix)?;
+        let upper = prefix == "AKIA";
+        let allowed = |c: char| c.is_ascii_alphanumeric() && !(upper && c.is_ascii_lowercase()) || extra.contains(c);
+        let len = body.find(|c| !allowed(c)).unwrap_or(body.len());
+        (len >= min).then_some((prefix.len() + len, kind))
+    })
+}
+
+fn quoted(path: &str) -> String {
+    if path.chars().all(|c| c.is_ascii_alphanumeric() || "._/-+".contains(c)) {
+        path.into()
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
+}
+
+fn guard_git(root: &Path) {
+    let out = std::process::Command::new("git")
+        .args(["config", "--show-scope", "-z", "--get-regexp", r"^(filter|diff)\."])
+        .current_dir(root)
+        .process_group(0)
+        .output();
+    let text = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    let fields: Vec<&str> = text.split('\0').collect();
+    let (mut args, mut local) = (vec![], vec![]);
+    for pair in fields.chunks(2) {
+        let [scope, entry] = pair else { continue };
+        let key = entry.split('\n').next().unwrap_or_default();
+        let Some((kind, name)) = key.split_once('.').and_then(|(kind, rest)| Some((kind, rest.rsplit_once('.')?.0)))
+        else {
+            continue;
+        };
+        if *scope == "local" && !local.contains(&name) {
+            local.push(name);
+        }
+        if kind == "filter" && !name.contains(['=', '\n']) && !args.contains(&format!("filter.{name}.clean=")) {
+            for var in ["clean=", "smudge=", "process=", "required=false"] {
+                args.extend(["-c".to_string(), format!("filter.{name}.{var}")]);
+            }
+        }
+    }
+    if !local.is_empty() {
+        ui::note(&format!(
+            ".git/config defines filter or diff drivers ({}); air's own git calls skip them",
+            local.join(", ")
+        ));
+    }
+    let empty =
+        std::process::Command::new("git").args(["hash-object", "-t", "tree", "/dev/null"]).current_dir(root).output();
+    let empty = empty.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    let _ = GIT_GUARD.set((if empty.is_empty() { EMPTY_TREE.into() } else { empty }, args));
 }
 
 fn finish(mut meta: Value) -> (String, Value) {
@@ -446,6 +896,8 @@ fn system_prompt(root: &Path, yolo: bool, notes: Option<&str>) -> String {
     let mut prompt = include_str!("prompt.md").to_string();
     if !yolo {
         prompt += SANDBOX;
+        prompt += if cfg!(target_os = "macos") { MACOS } else { LINUX };
+        prompt += PERMANENT;
     }
     if let Some(notes) = notes.map(str::trim).filter(|n| !n.is_empty()) {
         prompt += "\n\n## Notes for this model\n";
@@ -453,7 +905,12 @@ fn system_prompt(root: &Path, yolo: bool, notes: Option<&str>) -> String {
     }
     if let Ok(agents) = std::fs::read_to_string(root.join("AGENTS.md")) {
         prompt += "\n\n# Project instructions (AGENTS.md)\n\n";
-        prompt += &agents;
+        prompt += &agents[..agents.floor_char_boundary(AGENTS_MAX)];
+        if agents.len() > AGENTS_MAX {
+            let (kept, all) = (AGENTS_MAX / 1024, agents.len() / 1024);
+            prompt +=
+                &format!("\n\n[AGENTS.md clipped to its first {kept} KB of {all} KB; read the file for the rest]");
+        }
     }
     let mut skills: Vec<String> = std::fs::read_dir(root.join(".agents/skills"))
         .into_iter()
@@ -499,27 +956,51 @@ fn tools() -> Value {
         "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]}}}])
 }
 
-fn git(root: &Path, index: Option<&Path>, args: &[&str]) -> Option<String> {
+fn window(error: &str) -> Option<u64> {
+    let lower = error.to_lowercase();
+    WINDOW.iter().find_map(|marker| {
+        let rest = &lower[lower.find(marker)? + marker.len()..];
+        let digits = rest.trim_start().chars().take_while(|c| c.is_ascii_digit() || *c == ',');
+        digits.filter(char::is_ascii_digit).collect::<String>().parse().ok()
+    })
+}
+
+fn git(root: &Path, index: Option<&Path>, args: &[&str]) -> Result<String> {
     let mut cmd = std::process::Command::new("git");
-    cmd.args(["-c", "core.fsmonitor=false"]).args(args).current_dir(root);
+    let guard = GIT_GUARD.get();
+    cmd.args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null"])
+        .args(["-c", "core.quotePath=false"])
+        .args(guard.into_iter().flat_map(|g| &g.1))
+        .args(args)
+        .env("GIT_ATTR_SOURCE", guard.map_or(EMPTY_TREE, |g| g.0.as_str()))
+        .current_dir(root)
+        .process_group(0);
     if let Some(index) = index {
         cmd.env("GIT_INDEX_FILE", index);
     }
-    let out = cmd.output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    let out = cmd.output().context("running git")?;
+    if !out.status.success() {
+        anyhow::bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn changes(root: &Path, snapshot: Option<(&str, &Path)>) -> String {
+fn changes(root: &Path, snapshot: Option<(&str, &Path)>, since: std::time::SystemTime) -> String {
     let (base, index) = snapshot.map_or(("HEAD", None), |(tree, index)| (tree, Some(index)));
-    let mut out: Vec<String> = git(root, index, &["diff", "--numstat", base])
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| match l.splitn(3, '\t').collect::<Vec<_>>()[..] {
-            [added, removed, path] => Some(format!("{path} +{added} −{removed}")),
-            _ => None,
-        })
-        .collect();
+    let mut out: Vec<String> =
+        git(root, index, &["diff", "--numstat", "--no-renames", "--no-ext-diff", "--no-textconv", base])
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| match l.splitn(3, '\t').collect::<Vec<_>>()[..] {
+                [added, removed, path] => Some(format!("{path} +{added} −{removed}")),
+                _ => None,
+            })
+            .collect();
     let new = git(root, index, &["ls-files", "-o", "--exclude-standard"]).unwrap_or_default();
-    out.extend(new.lines().map(|f| format!("{f} (new)")));
+    let fresh = |f: &&str| {
+        let meta = std::fs::symlink_metadata(root.join(f));
+        meta.is_ok_and(|m| m.len() <= BIG || m.modified().is_ok_and(|t| t >= since))
+    };
+    out.extend(new.lines().filter(fresh).map(|f| format!("{f} (new)")));
     if out.is_empty() { "none".into() } else { out.join("\n") }
 }

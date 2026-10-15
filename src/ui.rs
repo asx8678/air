@@ -1,6 +1,7 @@
 use serde_json::Value;
 use std::io::{IsTerminal, Write};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 struct Bar {
@@ -16,6 +17,9 @@ static BAR: Mutex<Option<Bar>> = Mutex::new(None);
 static STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static RUNNING: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 static EVENTS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
+static TERMIOS: std::sync::OnceLock<libc::termios> = std::sync::OnceLock::new();
+static BARRED: AtomicBool = AtomicBool::new(false);
+pub static CHECK: AtomicI32 = AtomicI32::new(0);
 
 pub fn styled() -> bool {
     std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
@@ -54,10 +58,7 @@ impl Turn {
             tokens: (0, 0),
         });
         draw();
-        unsafe {
-            libc::signal(libc::SIGTERM, quit as *const () as libc::sighandler_t);
-            libc::signal(libc::SIGHUP, quit as *const () as libc::sighandler_t);
-        }
+        BARRED.store(true, Ordering::Relaxed);
         Turn(Some(tokio::spawn(async {
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -72,10 +73,7 @@ impl Drop for Turn {
     fn drop(&mut self) {
         if let Some(ticker) = self.0.take() {
             ticker.abort();
-            unsafe {
-                libc::signal(libc::SIGTERM, libc::SIG_DFL);
-                libc::signal(libc::SIGHUP, libc::SIG_DFL);
-            }
+            BARRED.store(false, Ordering::Relaxed);
             if let Some(bar) = BAR.lock().unwrap().take() {
                 print!("\x1b7\x1b[{};1H\x1b[2K\x1b[r\x1b8", bar.rows);
                 let _ = std::io::stdout().flush();
@@ -84,9 +82,28 @@ impl Drop for Turn {
     }
 }
 
+pub fn guard() {
+    let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(0, &mut saved) } == 0 {
+        let _ = TERMIOS.set(saved);
+    }
+    for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
+        if unsafe { libc::signal(signal, quit as *const () as libc::sighandler_t) } == libc::SIG_IGN {
+            unsafe { libc::signal(signal, libc::SIG_IGN) };
+        }
+    }
+}
+
 extern "C" fn quit(signal: libc::c_int) {
-    let reset = b"\x1b7\x1b[999;1H\x1b[2K\x1b[r\x1b8\n";
+    let group = CHECK.load(Ordering::Relaxed);
+    let reset: &[u8] = if BARRED.load(Ordering::Relaxed) { b"\x1b7\x1b[999;1H\x1b[2K\x1b[r\x1b8\n" } else { b"" };
     unsafe {
+        if group > 1 {
+            libc::kill(-group, libc::SIGKILL);
+        }
+        if let Some(saved) = TERMIOS.get() {
+            libc::tcsetattr(0, libc::TCSANOW, saved);
+        }
         libc::write(1, reset.as_ptr().cast(), reset.len());
         libc::_exit(128 + signal);
     }
