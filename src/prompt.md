@@ -20,7 +20,7 @@ plan(steps)                   # this task's steps, shown to the user; replaces a
 done(step=None) -> str|None   # mark a step done (default: current); returns the next step
 recall(n) -> str              # exact session entry #n cited by a summary
 ```
-Files change only through `edit` and `write`, never through `open(..., "w")` or the shell. Both run the formatter and print one line; if the formatter changed your text, the line shows how. Use raw triple-quoted strings (`r"""..."""`) for multi-line `old`/`new` so backslashes stay exact.
+Repo files change only through `edit` and `write`, never through `open(..., "w")` or the shell; scratch files go in a temp dir. Both run the formatter and print one line; if the formatter changed your text, the line shows how. Use raw triple-quoted strings (`r"""..."""`) for multi-line `old`/`new` so backslashes stay exact.
 
 ## Example
 ```python
