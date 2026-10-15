@@ -56,7 +56,7 @@ impl Worker {
                 anyhow!("bwrap (bubblewrap) is not installed; install it or run with --yolo").context(StartFailed)
             );
         }
-        let mut child = sandboxed(root, yolo, log, "python3", &["-I", "-B", "-u", "-c", include_str!("worker.py")])
+        let mut child = sandboxed(root, yolo, log, &python(), &["-I", "-B", "-u", "-c", include_str!("worker.py")])
             .env("AIR_CHECK", if check.is_some() { "1" } else { "" })
             .env("AIR_FMT", fmt.unwrap_or_default())
             .env("AIR_LOG", log)
@@ -257,4 +257,48 @@ fn nested(root: &Path) -> Vec<PathBuf> {
 fn writable(root: &Path) -> Vec<PathBuf> {
     let dirs = [root.into(), std::env::temp_dir(), "/tmp".into()];
     dirs.into_iter().filter_map(|d| d.canonicalize().ok()).collect()
+}
+
+/// The worker's interpreter: the newest python3.N on PATH, else python3, which on macOS is the system's 3.9.
+fn python() -> String {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    newest_python(std::env::split_paths(&path)).map_or_else(|| "python3".into(), |p| p.to_string_lossy().into_owned())
+}
+
+/// The highest runnable python3.N in these directories; on a tie the earliest directory wins, as PATH would pick.
+fn newest_python(dirs: impl Iterator<Item = PathBuf>) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let entries = dirs.flat_map(|dir| std::fs::read_dir(dir).into_iter().flatten().flatten());
+    let minor = |e: &std::fs::DirEntry| e.file_name().to_str()?.strip_prefix("python3.")?.parse::<u32>().ok();
+    let runnable = |p: &Path| p.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+    let found = entries.filter_map(|e| Some((minor(&e)?, e.path()))).filter(|(_, p)| runnable(p));
+    found.min_by_key(|(minor, _)| std::cmp::Reverse(*minor)).map(|(_, p)| p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::newest_python;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn picks_the_newest_runnable_python() {
+        let base = std::env::temp_dir().join(format!("air-python-{}", std::process::id()));
+        let (first, second) = (base.join("a"), base.join("b"));
+        for (dir, name, mode) in [
+            (&first, "python3.9", 0o755),
+            (&first, "python3.12", 0o755),
+            (&first, "python3.12-config", 0o755),
+            (&first, "python3.13", 0o644),
+            (&second, "python3.12", 0o755),
+            (&second, "python3", 0o755),
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(name), "").unwrap();
+            std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let found = newest_python([first.clone(), second.clone()].into_iter());
+        assert_eq!(found, Some(first.join("python3.12")), "3.13 is not runnable; on a tie the first directory wins");
+        assert_eq!(newest_python([base.join("missing")].into_iter()), None);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 }
