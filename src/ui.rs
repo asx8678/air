@@ -15,7 +15,6 @@ struct Bar {
 
 static BAR: Mutex<Option<Bar>> = Mutex::new(None);
 static STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-static RUNNING: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 static EVENTS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
 static TERMIOS: std::sync::OnceLock<libc::termios> = std::sync::OnceLock::new();
 static BARRED: AtomicBool = AtomicBool::new(false);
@@ -48,7 +47,9 @@ pub struct Turn(Option<tokio::task::JoinHandle<()>>);
 
 impl Turn {
     pub fn start() -> Self {
-        STEP.store(0, std::sync::atomic::Ordering::Relaxed);
+        STEP.store(0, Ordering::Relaxed);
+        *PLAN.lock().unwrap() = Default::default();
+        LIVE.lock().unwrap().intent = None;
         let Some((rows, cols)) = size().filter(|_| styled()) else { return Turn(None) };
         reserve(rows);
         let started = Instant::now();
@@ -179,14 +180,87 @@ fn flat(text: &str, max: usize) -> String {
     if flat.chars().count() <= max { flat } else { flat.chars().take(max).collect::<String>() + "…" }
 }
 
-static LIVE: Mutex<(usize, Option<Instant>)> = Mutex::new((0, None));
+struct Live {
+    drawn: usize,
+    at: Option<Instant>,
+    rows: Vec<(&'static str, String)>,
+    group: Option<(usize, Vec<String>)>,
+    intent: Option<String>,
+    running: Option<(Instant, String)>,
+}
+
+static LIVE: Mutex<Live> =
+    Mutex::new(Live { drawn: 0, at: None, rows: Vec::new(), group: None, intent: None, running: None });
+static PLAN: Mutex<(Vec<String>, Vec<u64>)> = Mutex::new((Vec::new(), Vec::new()));
 const LIVE_LINES: usize = 3;
+const INSPECT: &str = "cat|head|tail|sed|nl|wc|ls|tree|find|grep|rg|file|stat|cd|pwd|echo|diff|sort|uniq|cut|awk|jq|\
+                       which|du|git log|git show|git diff|git status|git grep|git blame|git ls-files|git ls-tree|\
+                       git rev-parse";
+
+fn inspects(cmd: &str) -> bool {
+    let read = |part: &str| INSPECT.split('|').any(|i| part == i || part.starts_with(&format!("{i} ")));
+    cmd.replace("&&", ";").split([';', '|', '\n']).map(str::trim).filter(|p| !p.is_empty()).all(read)
+}
+
+fn redraw(live: &mut Live) {
+    let Some(cols) = BAR.lock().unwrap().as_ref().map(|b| b.cols as usize) else { return };
+    let group = live.group.as_ref().map(|(runs, files)| ("2", grouped(*runs, files)));
+    let mut out = if live.drawn > 0 { format!("\x1b[{}A", live.drawn) } else { String::new() };
+    let mut drawn = 0;
+    for (style, text) in group.iter().chain(&live.rows) {
+        let text: String = text.chars().take(cols.saturating_sub(3)).collect();
+        out += &format!("\r\x1b[2K  {}\n", paint(style, &text));
+        drawn += 1;
+    }
+    let stale = live.drawn.saturating_sub(drawn);
+    if stale > 0 {
+        out += &format!("{}\x1b[{stale}A", "\r\x1b[2K\n".repeat(stale));
+    }
+    print!("{out}");
+    let _ = std::io::stdout().flush();
+    live.drawn = drawn;
+}
+
+fn erase(live: &mut Live) {
+    let n = std::mem::take(&mut live.drawn);
+    if n > 0 {
+        print!("\x1b[{n}A{}\x1b[{n}A", "\r\x1b[2K\n".repeat(n));
+        let _ = std::io::stdout().flush();
+    }
+}
+
+pub fn settle() {
+    let mut live = LIVE.lock().unwrap();
+    erase(&mut live);
+    live.rows.clear();
+    if let Some((runs, files)) = live.group.take() {
+        println!("  {}", paint("2", &grouped(runs, &files)));
+    }
+}
+
+fn grouped(runs: usize, files: &[String]) -> String {
+    if files.is_empty() {
+        return format!("◦ {runs} run{}", if runs == 1 { "" } else { "s" });
+    }
+    let count = if runs > 1 { format!(" · {runs} runs") } else { String::new() };
+    let room = width().saturating_sub(16 + count.len()).max(20);
+    let (mut list, mut shown) = (String::new(), 0);
+    for file in files {
+        if shown > 0 && list.chars().count() + 2 + file.chars().count() > room {
+            break;
+        }
+        list += &format!("{}{file}", if shown > 0 { ", " } else { "" });
+        shown += 1;
+    }
+    let rest = if shown < files.len() { format!(" +{}", files.len() - shown) } else { String::new() };
+    format!("◦ read {list}{rest}{count}")
+}
 
 pub fn thinking(text: &str, secs: u64) {
     activity(&format!("thinking {secs}s"));
     let Some(cols) = BAR.lock().unwrap().as_ref().map(|b| b.cols as usize) else { return };
     let mut live = LIVE.lock().unwrap();
-    if live.1.is_some_and(|drawn| drawn.elapsed() < Duration::from_millis(80)) {
+    if live.at.is_some_and(|drawn| drawn.elapsed() < Duration::from_millis(80)) {
         return;
     }
     let text = printable(text);
@@ -207,70 +281,33 @@ pub fn thinking(text: &str, secs: u64) {
     let tail = &lines[lines.len().saturating_sub(LIVE_LINES)..];
     let chars = text.chars().count();
     let size = if chars >= 1000 { format!("{:.1}k chars", chars as f64 / 1000.0) } else { format!("{chars} chars") };
-    let mut out = if live.0 > 0 { format!("\x1b[{}A", live.0) } else { String::new() };
-    out += &format!("\r\x1b[2K{}\n", paint("35", &format!("◇ thinking {secs}s · {size}")));
+    live.rows = vec![("35", format!("◇ thinking {secs}s · {size}"))];
     for i in 0..LIVE_LINES {
-        let line: String = tail.get(i).map_or("", String::as_str).chars().take(width).collect();
-        out += &format!("\r\x1b[2K  {}\n", paint("2;3", &line));
+        live.rows.push(("2;3", format!("  {}", tail.get(i).map_or("", String::as_str))));
     }
-    print!("{out}");
-    let _ = std::io::stdout().flush();
-    *live = (LIVE_LINES + 1, Some(Instant::now()));
+    live.at = Some(Instant::now());
+    redraw(&mut live);
 }
 
 pub fn writing(lines: usize) {
     activity("writing code");
-    if BAR.lock().unwrap().is_none() {
+    let mut live = LIVE.lock().unwrap();
+    if BAR.lock().unwrap().is_none() || live.at.is_some_and(|drawn| drawn.elapsed() < Duration::from_millis(80)) {
         return;
     }
-    if LIVE.lock().unwrap().0 > 1 {
-        clear_live();
-    }
-    let mut live = LIVE.lock().unwrap();
-    if live.1.is_some_and(|drawn| drawn.elapsed() < Duration::from_millis(80)) {
-        return;
-    }
-    let up = if live.0 > 0 { "\x1b[1A" } else { "" };
-    let text = format!("✎ writing code · {lines} line{}", if lines == 1 { "" } else { "s" });
-    print!("{up}\r\x1b[2K    {}\n", paint("36", &text));
-    let _ = std::io::stdout().flush();
-    *live = (1, Some(Instant::now()));
+    live.rows = vec![("36", format!("✎ writing code · {lines} line{}", if lines == 1 { "" } else { "s" }))];
+    live.at = Some(Instant::now());
+    redraw(&mut live);
 }
 
-pub fn clear_live() {
-    let mut live = LIVE.lock().unwrap();
-    if live.0 > 0 {
-        let n = live.0;
-        print!("\x1b[{n}A{}\x1b[{n}A", "\r\x1b[2K\n".repeat(n));
-    }
-    *live = (0, None);
-}
-
-pub fn thought(text: &str, secs: u64) {
-    clear_live();
-    let sentences = sentences(text);
-    let body = match sentences.as_slice() {
-        [] => return,
-        [.., before, last] if last.chars().count() < 25 => format!("{before} {last}"),
-        [.., last] => last.to_string(),
+pub fn intent(said: &str, thinking: &str) {
+    let text = if said.trim().is_empty() { thinking } else { said };
+    let intent = match sentences(text).as_slice() {
+        [] => None,
+        [.., before, last] if last.chars().count() < 25 => Some(format!("{before} {last}")),
+        [.., last] => Some(last.to_string()),
     };
-    step_note(&body, text, secs, "2;3");
-}
-
-pub fn narration(text: &str, thinking: &str, secs: u64) {
-    clear_live();
-    step_note(text, thinking, secs, "2");
-}
-
-fn step_note(body: &str, thinking: &str, secs: u64, style: &str) {
-    let total = thinking.trim().chars().count();
-    let badge = if secs >= 5 || total >= 2000 {
-        format!("  ({secs}s · {:.1}k chars · /think)", total as f64 / 1000.0)
-    } else {
-        String::new()
-    };
-    let room = width().saturating_sub(8 + badge.chars().count()).max(30);
-    println!("    {} {}{}", paint("35", "◇"), paint(style, &flat(body, room)), paint("2", &badge));
+    LIVE.lock().unwrap().intent = intent;
 }
 
 fn sentences(text: &str) -> Vec<&str> {
@@ -290,140 +327,163 @@ fn sentences(text: &str) -> Vec<&str> {
     out
 }
 
-fn literal_after<'a>(line: &'a str, call: &str) -> Option<&'a str> {
-    let rest = &line[line.find(call)? + call.len()..];
-    let quote = rest.chars().next().filter(|c| matches!(c, '"' | '\''))?;
-    rest[1..].split(quote).next()
-}
-
 pub fn run(code: &str) {
+    let step = STEP.fetch_add(1, Ordering::Relaxed) + 1;
     let code = printable(code);
-    let step = STEP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     let skip = |l: &&str| l.is_empty() || l.starts_with('#') || l.starts_with("import ") || l.starts_with("from ");
     let first = code.lines().map(str::trim).find(|l| !skip(l)).unwrap_or("(no code)");
-    let single = code.lines().filter(|l| !skip(&l.trim())).count() == 1;
-    let label = match (literal_after(first, "open("), literal_after(first, "sh(")) {
-        (Some(path), _) if single && first.contains(".read") => format!("read {path}"),
-        (_, Some(cmd)) if single => format!("$ {cmd}"),
-        _ if first == "check()" => "check".to_string(),
-        _ => {
-            let more = code.lines().count().saturating_sub(1);
-            let first = flat(first, width().saturating_sub(34).max(30));
-            if more > 0 { format!("{first} {}", paint("2", &format!("+{more} lines"))) } else { first }
-        }
-    };
-    let label = if label.contains('\x1b') { label } else { flat(&label, width().saturating_sub(22).max(30)) };
-    clear_live();
-    let line = format!("{} {} {label}", paint("2", &format!("{step:>3}")), paint("36", "▸"));
-    if BAR.lock().unwrap().is_some() {
-        print!("{line}  {}", paint("2", "⋯ running"));
-    } else {
-        print!("{line}");
-    }
-    let _ = std::io::stdout().flush();
-    *RUNNING.lock().unwrap() = Some((line, Instant::now()));
-    activity(&format!("step {step} running · {}", flat(first, 60)));
+    activity(&format!("step {step} running"));
+    let mut live = LIVE.lock().unwrap();
+    let label = flat(&live.intent.take().unwrap_or_else(|| first.to_string()), 300);
+    live.rows = vec![("2", format!("▸ {label}"))];
+    live.running = Some((Instant::now(), label));
+    redraw(&mut live);
 }
 
 pub fn ran(meta: &Value, out: &str) {
-    let lines: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty() && *l != "(no output)").collect();
-    let actions = meta["actions"].as_array().cloned().unwrap_or_default();
-    let failed = meta["exception"].is_string() || actions.iter().any(|a| a["ok"] != true);
-    let exit = lines.last().and_then(|l| l.strip_prefix("[exit ")).map(|l| l.trim_end_matches(']'));
-    let result = if let Some(name) = meta["exception"].as_str() {
-        paint("31", &format!("✗ {}", flat(name, 60)))
-    } else if let Some(code) = exit {
-        paint("31", &format!("✗ exit {code}"))
-    } else if !actions.is_empty() {
-        String::new()
-    } else if lines.is_empty() {
-        paint("2", "· no output")
-    } else {
-        paint("2", &format!("→ {} line{}", lines.len(), if lines.len() == 1 { "" } else { "s" }))
+    let strings = |v: &Value| -> Vec<String> {
+        v.as_array().into_iter().flatten().filter_map(Value::as_str).map(|s| flat(s, 120)).collect()
     };
-    let took = match RUNNING.lock().unwrap().take() {
-        Some((line, started)) => {
-            if BAR.lock().unwrap().is_some() {
-                print!("\r\x1b[2K{line}");
-            }
-            let secs = started.elapsed().as_secs_f64();
-            if secs >= 1.0 { paint("2", &format!(" · {secs:.1}s")) } else { String::new() }
+    let mut reads = strings(&meta["reads"]);
+    let mut cmds = vec![];
+    for cmd in meta["cmds"].as_array().into_iter().flatten() {
+        let text = cmd[0].as_str().unwrap_or_default().trim();
+        if inspects(text) {
+            reads.extend(strings(&cmd[2]));
+        } else {
+            cmds.push((text, &cmd[1]));
         }
-        None => String::new(),
-    };
-    println!("  {result}{took}");
+    }
+    let actions = meta["actions"].as_array().cloned().unwrap_or_default();
+    let mut live = LIVE.lock().unwrap();
+    live.rows.clear();
+    let (started, label) = live.running.take().unzip();
+    let took = started.map(|s| s.elapsed().as_secs_f64()).filter(|&s| s >= 1.0);
+    let quiet =
+        cmds.is_empty() && actions.is_empty() && ["exception", "accepted", "plan"].iter().all(|k| meta[k].is_null());
+    let probe = quiet && reads.is_empty() && meta["cmds"].as_array().is_none_or(Vec::is_empty);
+    if probe && let Some(label) = label {
+        drop(live);
+        settle();
+        let took = took.map(|s| format!(" {s:.1}s")).unwrap_or_default();
+        println!("  {}", paint("2", &format!("▸ {}{took}", flat(&label, width().saturating_sub(12).max(30)))));
+        return;
+    }
+    if quiet {
+        let (runs, files) = live.group.get_or_insert_with(Default::default);
+        *runs += 1;
+        for read in reads {
+            if !files.contains(&read) {
+                files.push(read);
+            }
+        }
+        redraw(&mut live);
+        return;
+    }
+    drop(live);
+    settle();
+    let room = width().saturating_sub(8).max(30);
+    let lines: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
+    let (mut rows, mut timed) = (vec![], None);
     if let Some(criteria) = meta["accepted"].as_str() {
-        println!("      {} {}", paint("35", "◆ criteria"), flat(criteria, width().saturating_sub(18).max(30)));
+        rows.push(format!("{} {}", paint("35", "◆ criteria"), flat(criteria, room.saturating_sub(11))));
     }
-    if meta["plan"].is_object() {
-        plan(&meta["plan"]);
-    }
+    let mut failed = false;
     for act in &actions {
         let (tool, ok) = (flat(act["tool"].as_str().unwrap_or_default(), 20), act["ok"] == true);
         let mark = if ok { paint("32", "✓") } else { paint("31", "✗") };
         match act["path"].as_str().map(|p| flat(p, 120)) {
             Some(path) if ok => {
                 let (a, r) = (act["added"].as_u64().unwrap_or(0), act["removed"].as_u64().unwrap_or(0));
-                println!(
-                    "      {mark} {tool} {path}  {} {}",
-                    paint("32", &format!("+{a}")),
-                    paint("31", &format!("−{r}"))
-                );
+                let (a, r) = (paint("32", &format!("+{a}")), paint("31", &format!("−{r}")));
+                rows.push(format!("{mark} {tool} {path}  {a} {r}"));
             }
             Some(path) => {
-                let error = flat(act["error"].as_str().unwrap_or_default(), width().saturating_sub(20).max(30));
-                println!("      {mark} {tool} {path}: {error}");
+                let error = flat(act["error"].as_str().unwrap_or_default(), room.saturating_sub(20));
+                rows.push(format!("{mark} {tool} {path}: {error}"));
             }
-            None => println!("      {mark} check {}", if ok { "passed" } else { "FAILED" }),
+            None => {
+                rows.push(format!("{mark} check {}", if ok { "passed" } else { "FAILED" }));
+                (timed, failed) = (Some(rows.len() - 1), failed || !ok);
+            }
         }
     }
-    let shown: &[&str] = if failed {
-        &lines[lines.len().saturating_sub(4)..]
-    } else if actions.is_empty() && lines.len() <= 3 {
-        &lines
-    } else {
-        &[]
-    };
-    for line in shown {
-        println!("      {}", paint(if failed { "31" } else { "2" }, &flat(line, width().saturating_sub(7).max(30))));
+    if failed {
+        rows.extend(
+            lines[lines.len().saturating_sub(3)..].iter().map(|l| paint("31", &format!("  {}", flat(l, room)))),
+        );
+    }
+    for (i, (cmd, exit)) in cmds.iter().enumerate() {
+        if i == 3 {
+            rows.push(paint("2", &format!("  +{} more commands", cmds.len() - 3)));
+            break;
+        }
+        let status = match exit.as_i64() {
+            Some(0) => paint("32", "✓"),
+            Some(code) => paint("31", &format!("✗ exit {code}")),
+            None => paint("31", &format!("✗ {}", flat(exit.as_str().unwrap_or("failed"), 40))),
+        };
+        rows.push(format!("{} {}  {status}", paint("36", "$"), flat(cmd, room.saturating_sub(14))));
+        timed = Some(rows.len() - 1);
+    }
+    if meta["plan"].is_object() {
+        rows.extend(plan(&meta["plan"]));
+    }
+    if let Some(name) = meta["exception"].as_str().filter(|_| actions.iter().all(|a| a["ok"] == true)) {
+        let message = lines.iter().rev().find(|l| l.split(':').next().is_some_and(|head| head.ends_with(name)));
+        rows.push(paint("31", &format!("✗ {}", flat(message.unwrap_or(&name), room))));
+    }
+    if let (Some(i), Some(secs)) = (timed, took) {
+        rows[i] += &paint("2", &format!(" {secs:.1}s"));
+    }
+    for row in rows {
+        println!("  {row}");
     }
 }
 
 pub fn prose() {
-    if STEP.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+    settle();
+    LIVE.lock().unwrap().intent = None;
+    if STEP.load(Ordering::Relaxed) > 0 {
         println!();
     }
 }
 
-pub fn plan(plan: &Value) {
+fn plan(plan: &Value) -> Vec<String> {
     let steps: Vec<String> = plan["steps"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .map(|s| flat(s, width().saturating_sub(10).max(30)))
+        .map(|s| flat(s, width().saturating_sub(14).max(30)))
         .collect();
     let done: Vec<u64> = plan["done"].as_array().into_iter().flatten().filter_map(Value::as_u64).collect();
     let current = (1..=steps.len() as u64).find(|i| !done.contains(i));
-    for (i, step) in (1u64..).zip(&steps) {
-        let line = if done.contains(&i) {
-            paint("32", &format!("      ✓ {step}"))
-        } else if Some(i) == current {
-            paint("1", &format!("      ▸ {step}"))
-        } else {
-            paint("2", &format!("      · {step}"))
-        };
-        println!("{line}");
-    }
     let progress = match current {
         Some(i) => format!("{}/{} {}", done.len(), steps.len(), steps[i as usize - 1]),
         None => format!("{}/{} done", done.len(), steps.len()),
     };
     update(|bar| bar.plan = progress);
+    let mut shown = PLAN.lock().unwrap();
+    let rows = if shown.0 == steps {
+        let fresh = (1u64..).zip(&steps).filter(|(i, _)| done.contains(i) && !shown.1.contains(i));
+        fresh.map(|(i, step)| format!("{} {step}", paint("32", &format!("✓ step {i}/{}", steps.len())))).collect()
+    } else {
+        (1u64..)
+            .zip(&steps)
+            .map(|(i, step)| match i {
+                i if done.contains(&i) => paint("32", &format!("  ✓ {step}")),
+                i if Some(i) == current => paint("1", &format!("  ▸ {step}")),
+                _ => paint("2", &format!("  · {step}")),
+            })
+            .collect()
+    };
+    *shown = (steps, done);
+    rows
 }
 
 pub fn note(text: &str) {
-    clear_live();
+    settle();
     println!("{}", paint("33", &format!("· {}", printable(text))));
 }
 
@@ -445,10 +505,11 @@ pub fn events() -> Vec<Value> {
 }
 
 pub fn report(rows: &[(&str, String)], verdict: &str, good: bool) {
+    settle();
     let head = format!("── {verdict} ").to_string() + &"─".repeat(36);
     println!("\n{}", paint(if good { "1;32" } else { "1;31" }, &head));
     let room = width().saturating_sub(12).max(30);
-    for (label, value) in rows {
+    for (label, value) in rows.iter().filter(|(_, value)| !matches!(value.as_str(), "-" | "none")) {
         println!("{} {}", paint("2", &format!("{label:<9}")), wrap(value, room).join("\n          "));
     }
 }

@@ -189,12 +189,15 @@ def write(path, content):
 
 def sh(cmd, timeout=120):
     out, code = _exec(cmd, timeout)
+    files = [_rel(w) for w in str(cmd).split() if os.path.isfile(os.path.join(ROOT, w))]
+    _report.setdefault("cmds", []).append([str(cmd), code, files])
     return out.rstrip("\n") + (f"\n[exit {code}]" if code else "")
 
 
 def show(path, start=1, end=None):
     with open(os.path.join(ROOT, path), encoding="utf-8", errors="replace") as f:
         lines = f.read().splitlines()
+    _report.setdefault("reads", []).append(_rel(path))
     start, end = max(start, 1), min(end or len(lines), len(lines))
     print(f"[{_rel(path)}: lines {start}-{end} of {len(lines)}]")
     print("\n".join(f"{n}: {lines[n - 1]}" for n in range(start, end + 1)))

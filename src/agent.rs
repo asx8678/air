@@ -219,7 +219,7 @@ impl Agent {
             _ = tokio::signal::ctrl_c() => None,
             result = self.turn(task) => Some(result),
         };
-        ui::clear_live();
+        ui::settle();
         if let Some(result) = finished {
             if let Err(e) = &result {
                 let text = ui::printable(&format!("{e:#}"));
@@ -237,13 +237,11 @@ impl Agent {
             },
             None => Ok(None),
         };
-        let mut shown = false;
         match settled {
             Ok(Some(reply)) => {
                 let (out, mut meta) = finish(reply);
                 meta["interrupted"] = true.into();
                 ui::ran(&meta, &out);
-                shown = true;
                 if let Some(id) = self.pending.take() {
                     let content = format!("{out}\n[interrupted by the user]");
                     self.session.push(json!({"role": "tool", "tool_call_id": id, "content": content, "meta": meta}))?;
@@ -261,9 +259,6 @@ impl Agent {
                     self.session.push(json!({"role": "tool", "tool_call_id": id, "content": content, "meta": meta}))?;
                 }
             }
-        }
-        if !shown {
-            println!();
         }
         ui::event("ctrl_c", "interrupted", Value::Null);
         self.unfinished()?;
@@ -546,7 +541,6 @@ impl Agent {
                     self.broken = Some(format!("{e:#} ({RESTARTS} times in a row; ending the turn)"));
                 }
                 let out = format!("error: {e:#}; the worker was restarted and its variables are gone");
-                println!();
                 ui::event("worker_restart", &out, Value::Null);
                 (out, json!({"tool": "run", "error": true, "ms": clock.elapsed().as_millis() as u64}))
             }
@@ -567,9 +561,6 @@ impl Agent {
             && tree == passed
         {
             let out = format!("{out}\n[reused: the tree is unchanged since this check passed]");
-            if gate {
-                ui::ran(&json!({"actions": [{"tool": "check", "ok": true}]}), &out);
-            }
             return (true, out);
         }
         if gate {
@@ -593,8 +584,10 @@ impl Agent {
         let ok = passed && matches!((&before, &after), (Ok(a), Ok(b)) if a == b);
         let verdict = if ok { "passed" } else { "FAILED" };
         let out = format!("{}\n[check {verdict}: {why}]", out.trim_end()).trim_start().to_string();
-        if gate {
-            ui::ran(&json!({"actions": [{"tool": "check", "ok": ok}]}), &out);
+        if gate && ok {
+            ui::settle();
+        } else if gate {
+            ui::ran(&json!({"actions": [{"tool": "check", "ok": false}]}), &out);
         }
         self.passed = after.ok().filter(|_| ok).map(|tree| (tree, out.clone()));
         (ok, out)

@@ -212,9 +212,6 @@ impl Llm {
         let mut lines = 0;
         let (mut markdown, mut began) = (crate::render::Markdown::default(), None::<Instant>);
         let (mut held, mut answering, mut narrated) = (String::new(), false, false);
-        let thought = |thinking: &str, began: Option<Instant>| {
-            crate::ui::thought(thinking, began.map_or(0, |b: Instant| b.elapsed().as_secs()));
-        };
         let (mut broken, mut inline, mut chars, mut via) = (None, Inline::default(), 0, None);
         let (mut scan, mut eof, mut events, mut got, mut stalled, mut rejected) = (0, false, 0, 0, false, false);
         let cap = tokio::time::Instant::from_std(sent) + TOTAL;
@@ -286,7 +283,6 @@ impl Llm {
                         crate::ui::thinking(&thinking, began.elapsed().as_secs());
                     }
                     if let Some(limit) = limit.filter(|l| chars / 4 > *l && text.is_empty() && calls.is_empty()) {
-                        thought(&thinking, Some(began));
                         return Err(Overthought(limit as u64, Lost::new(&thinking, Some(began))).into());
                     }
                 }
@@ -302,7 +298,6 @@ impl Llm {
                         held += &t;
                         crate::ui::activity("writing");
                         if held.len() > 400 || held.contains("\n\n") || held.trim_start().starts_with(['#', '-', '|']) {
-                            thought(&thinking, began);
                             crate::ui::prose();
                             markdown.push(&std::mem::take(&mut held));
                             answering = true;
@@ -311,11 +306,7 @@ impl Llm {
                 }
                 if !answering && !narrated && delta["tool_calls"].is_array() {
                     narrated = true;
-                    let secs = began.map_or(0, |b: Instant| b.elapsed().as_secs());
-                    match held.trim() {
-                        "" => crate::ui::thought(&thinking, secs),
-                        prose => crate::ui::narration(prose, &thinking, secs),
-                    }
+                    crate::ui::intent(&held, &thinking);
                 }
                 for call in tools.into_iter().flatten() {
                     let (key, function) = (call["index"].as_u64(), &call["function"]);
@@ -424,13 +415,10 @@ impl Llm {
         }
         if answering {
             markdown.finish();
-        } else if !narrated {
-            thought(&thinking, began);
-            if !held.trim().is_empty() {
-                crate::ui::prose();
-                markdown.push(&held);
-                markdown.finish();
-            }
+        } else if !narrated && !held.trim().is_empty() {
+            crate::ui::prose();
+            markdown.push(&held);
+            markdown.finish();
         }
         let ms = |a: Instant, b: Option<Instant>| b.map(|b| b.duration_since(a).as_millis() as u64);
         let timing =
