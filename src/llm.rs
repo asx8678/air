@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -278,7 +278,7 @@ impl Llm {
                 events += 1;
                 if let Some(error) = event.get("error").filter(|e| !e.is_null()) {
                     rejected = refused(error);
-                    broken = Some(format!("provider error: {}", clip(&error.to_string())));
+                    broken = Some(format!("provider error: {}", clip(&crate::agent::redact(&error.to_string()).0)));
                     break 'read;
                 }
                 if event["usage"].is_object() {
@@ -476,7 +476,10 @@ impl Llm {
         let mut timed_out = false;
         for attempt in 1.. {
             let sent = Instant::now();
-            let request = request.try_clone().expect("a byte body clones");
+            // None when the builder holds an error: a malformed base_url, or an API key that is no valid header.
+            let request = request
+                .try_clone()
+                .context("could not build the request: check the provider's base_url and API key")?;
             let limit = if timed_out { IDLE } else { FIRST_BYTE };
             let (problem, detail, wait) = match tokio::time::timeout(limit, request.send()).await {
                 Ok(Ok(r)) if r.status().is_success() => return Ok((r, sent)),
@@ -541,7 +544,7 @@ async fn head(mut response: reqwest::Response) -> String {
         }
     };
     let _ = tokio::time::timeout(Duration::from_secs(10), read).await;
-    clip(&String::from_utf8_lossy(&body))
+    clip(&crate::agent::redact(&String::from_utf8_lossy(&body)).0)
 }
 
 fn refused(error: &Value) -> bool {

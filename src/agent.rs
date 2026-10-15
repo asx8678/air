@@ -41,6 +41,7 @@ const SECRETS: &[(&str, &str, usize, &str)] = &[
     ("gho_", "github token", 36, ""),
     ("github_pat_", "github token", 22, "_"),
     ("sk-", "api key", 20, "_-"),
+    ("oc_", "opencode key", 20, "_"),
     ("xoxb-", "slack token", 10, "-"),
     ("xoxp-", "slack token", 10, "-"),
     ("xoxa-", "slack token", 10, "-"),
@@ -60,6 +61,8 @@ const SANDBOX: &str = "\n\n## Sandbox\nYour code runs in a sandbox. Writes outsi
                        (ssh and cloud keys, shell history, browser data, other tools' configs). Only a fixed set of \
                        environment variables is passed through (env = [\"NAME\"] in ~/.config/air/config.toml adds more).";
 static GIT_GUARD: OnceLock<(String, Vec<String>)> = OnceLock::new();
+/// One git at a time on air's index: a snapshot abandoned by Ctrl-C keeps running on the blocking pool.
+static INDEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 const MACOS: &str = " Internet and DNS are off (localhost works); nested sandbox-exec fails, and Unix sockets work only \
                      under the repo's tmp/ directory.";
 const LINUX: &str = " The network is fully isolated: Internet, DNS and the host's localhost services are off; only \
@@ -222,9 +225,9 @@ impl Agent {
         ui::settle();
         if let Some(result) = finished {
             if let Err(e) = &result {
-                let text = ui::printable(&format!("{e:#}"));
+                let text = redact(&ui::printable(&format!("{e:#}"))).0;
                 self.session.push(json!({"event": "error", "text": text, "at": ui::now_ms()}))?;
-                if let Err(e) = self.unfinished() {
+                if let Err(e) = self.unfinished().await {
                     ui::note(&format!("could not write the turn report: {e:#}"));
                 }
             }
@@ -261,13 +264,13 @@ impl Agent {
             }
         }
         ui::event("ctrl_c", "interrupted", Value::Null);
-        self.unfinished()?;
+        self.unfinished().await?;
         Ok(false)
     }
 
-    fn unfinished(&mut self) -> Result<()> {
+    async fn unfinished(&mut self) -> Result<()> {
         match self.current.take() {
-            Some((began, clock)) => self.report(None, false, began, clock).map(drop),
+            Some((began, clock)) => self.report(None, false, began, clock).await.map(drop),
             None => self.session.flush(),
         }
     }
@@ -279,7 +282,7 @@ impl Agent {
         }
         self.session.flush()?;
         let (began, clock) = (self.session.entries.len(), Instant::now());
-        let start = self.tree()?;
+        let start = self.tree().await?;
         self.session.push(json!({"role": "user", "content": task, "meta": {"snapshot": start}}))?;
         self.current = Some((began, clock));
         let (mut nudged, mut overflowed, mut nudges, mut cut) = (false, false, 0, false);
@@ -386,7 +389,7 @@ impl Agent {
                 ui::activity("waiting for the model");
                 continue;
             }
-            let changed = self.changed(&start, began);
+            let changed = self.changed(&start, began).await;
             let mut checked = false;
             if changed && let Some(check) = &self.config.check {
                 let clock = Instant::now();
@@ -404,16 +407,17 @@ impl Agent {
                 checked = ok;
             }
             self.current = None;
-            return self.report(Some(changed), checked, began, clock);
+            return self.report(Some(changed), checked, began, clock).await;
         }
         ui::event("limit", &limit, Value::Null);
         self.current = None;
-        self.report(Some(self.changed(&start, began)), false, began, clock)?;
+        let changed = self.changed(&start, began).await;
+        self.report(Some(changed), false, began, clock).await?;
         Ok(false)
     }
 
-    fn changed(&self, start: &str, began: usize) -> bool {
-        self.moved(start) || self.session.entries[began..].iter().any(|e| edited(&e["meta"]))
+    async fn changed(&self, start: &str, began: usize) -> bool {
+        self.moved(start).await || self.session.entries[began..].iter().any(|e| edited(&e["meta"]))
     }
 
     fn sent(&self) -> u64 {
@@ -556,7 +560,7 @@ impl Agent {
     }
 
     async fn verify(&mut self, check: &str, gate: bool) -> (bool, String) {
-        let before = self.tree();
+        let before = self.tree().await;
         if let (Ok(tree), Some((passed, out))) = (&before, &self.passed)
             && tree == passed
         {
@@ -575,7 +579,7 @@ impl Agent {
             Ok(Err(e)) => (false, format!("{e:#}")),
             Err(_) => (false, format!("timeout after {}s", CHECK_TIMEOUT.as_secs())),
         };
-        let after = self.tree();
+        let after = self.tree().await;
         let why = match (&before, &after) {
             (Err(e), _) | (_, Err(e)) => format!("{e:#}"),
             (Ok(a), Ok(b)) if a != b => "the check changed the working tree".into(),
@@ -597,32 +601,15 @@ impl Agent {
         self.session.path.with_extension("index")
     }
 
-    fn tree(&self) -> Result<String> {
-        let index = self.index();
-        if !index.exists() {
-            let current = git(&self.root, None, &["rev-parse", "--git-path", "index"]).unwrap_or_default();
-            let _ = std::fs::copy(self.root.join(current.trim()), &index);
-        }
-        let others = git(&self.root, Some(&index), &["ls-files", "-z", "-o", "--exclude-standard"])?;
-        let mut args = vec!["add".to_string(), "-A".into(), "--ignore-errors".into(), "--".into(), ".".into()];
-        let mut hasher = std::hash::DefaultHasher::new();
-        for path in others.split('\0').filter(|p| !p.is_empty()) {
-            let Ok(meta) = std::fs::symlink_metadata(self.root.join(path)) else { continue };
-            if meta.len() > BIG {
-                (path, meta.len(), meta.modified().ok()).hash(&mut hasher);
-                args.push(format!(":(exclude,literal){path}"));
-            }
-        }
-        if let Err(e) = git(&self.root, Some(&index), &args.iter().map(String::as_str).collect::<Vec<_>>()) {
-            static SKIPPED: std::sync::Once = std::sync::Once::new();
-            SKIPPED.call_once(|| ui::note(&format!("change detection skips what git cannot add: {e:#}")));
-        }
-        let tree = git(&self.root, Some(&index), &["write-tree"])?.trim().to_string();
-        Ok(if args.len() > 5 { format!("{tree} {:016x}", hasher.finish()) } else { tree })
+    /// The working tree as a git tree id. Git runs on the blocking pool, so Ctrl-C and the status bar stay live
+    /// while a large repo is snapshotted.
+    async fn tree(&self) -> Result<String> {
+        let (root, index) = (self.root.clone(), self.index());
+        tokio::task::spawn_blocking(move || snapshot(&root, &index)).await?
     }
 
-    fn moved(&self, start: &str) -> bool {
-        self.tree().map_or_else(
+    async fn moved(&self, start: &str) -> bool {
+        self.tree().await.map_or_else(
             |e| {
                 ui::event("error", &format!("could not tell whether the tree changed: {e:#}"), Value::Null);
                 true
@@ -631,13 +618,16 @@ impl Agent {
         )
     }
 
-    fn report(&mut self, changed: Option<bool>, checked: bool, began: usize, clock: Instant) -> Result<bool> {
+    async fn report(&mut self, changed: Option<bool>, checked: bool, began: usize, clock: Instant) -> Result<bool> {
         self.session.flush()?;
         let first = &self.session.entries[began];
         let snapshot = first["meta"]["snapshot"].as_str().and_then(|s| s.split(' ').next());
         let index = self.index();
         let since = std::time::SystemTime::now() - clock.elapsed();
-        let changes = changes(&self.root, snapshot.map(|tree| (tree, index.as_path())), since);
+        let (root, base) = (self.root.clone(), snapshot.map(String::from));
+        let changes =
+            tokio::task::spawn_blocking(move || changes(&root, base.as_deref().map(|t| (t, index.as_path())), since))
+                .await?;
         let changed = changed.unwrap_or(changes != "none");
         let path =
             |l: &str| l.strip_suffix(" (new)").or_else(|| l.rsplit_once(" +").map(|(path, _)| path)).map(String::from);
@@ -814,6 +804,12 @@ fn connect(providers: &Providers, header: &Value) -> Result<(String, Llm)> {
         _ => {}
     }
     let p = &providers[name];
+    if !crate::providers::web_url(&p.base_url) {
+        anyhow::bail!(
+            "provider {name}: base_url {} is not an http(s) URL (/providers changes it)",
+            ui::printable(&p.base_url)
+        );
+    }
     Ok((name.into(), Llm::new(&p.base_url, p.api_key.as_deref(), header)))
 }
 
@@ -844,13 +840,13 @@ async fn grouped(mut cmd: tokio::process::Command) -> Result<(bool, String)> {
     Ok((status.success(), out))
 }
 
-fn redact(text: &str) -> (String, usize) {
+pub fn redact(text: &str) -> (String, usize) {
     let (mut out, mut hidden, mut copied, mut i) = (String::new(), 0, 0, 0);
     let bytes = text.as_bytes();
     while i < bytes.len() {
         let boundary = i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || matches!(bytes[i - 1], b'_' | b'-'));
         if boundary
-            && matches!(bytes[i], b'A' | b'g' | b's' | b'x' | b'-')
+            && matches!(bytes[i], b'A' | b'g' | b'o' | b's' | b'x' | b'-')
             && let Some((len, kind)) = secret(&text[i..])
         {
             out += &text[copied..i];
@@ -880,7 +876,7 @@ fn secret(s: &str) -> Option<(usize, &'static str)> {
         let upper = prefix == "AKIA";
         let allowed = |c: char| c.is_ascii_alphanumeric() && !(upper && c.is_ascii_lowercase()) || extra.contains(c);
         let len = body.find(|c| !allowed(c)).unwrap_or(body.len());
-        let keyish = prefix != "sk-" || body[..len].bytes().any(|b| b.is_ascii_digit());
+        let keyish = !matches!(prefix, "sk-" | "oc_") || body[..len].bytes().any(|b| b.is_ascii_digit());
         (len >= min && keyish).then_some((prefix.len() + len, kind))
     })
 }
@@ -1039,7 +1035,32 @@ fn git(root: &Path, index: Option<&Path>, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+fn snapshot(root: &Path, index: &Path) -> Result<String> {
+    let _held = INDEX.lock().unwrap_or_else(|p| p.into_inner());
+    if !index.exists() {
+        let current = git(root, None, &["rev-parse", "--git-path", "index"]).unwrap_or_default();
+        let _ = std::fs::copy(root.join(current.trim()), index);
+    }
+    let others = git(root, Some(index), &["ls-files", "-z", "-o", "--exclude-standard"])?;
+    let mut args = vec!["add".to_string(), "-A".into(), "--ignore-errors".into(), "--".into(), ".".into()];
+    let mut hasher = std::hash::DefaultHasher::new();
+    for path in others.split('\0').filter(|p| !p.is_empty()) {
+        let Ok(meta) = std::fs::symlink_metadata(root.join(path)) else { continue };
+        if meta.len() > BIG {
+            (path, meta.len(), meta.modified().ok()).hash(&mut hasher);
+            args.push(format!(":(exclude,literal){path}"));
+        }
+    }
+    if let Err(e) = git(root, Some(index), &args.iter().map(String::as_str).collect::<Vec<_>>()) {
+        static SKIPPED: std::sync::Once = std::sync::Once::new();
+        SKIPPED.call_once(|| ui::note(&format!("change detection skips what git cannot add: {e:#}")));
+    }
+    let tree = git(root, Some(index), &["write-tree"])?.trim().to_string();
+    Ok(if args.len() > 5 { format!("{tree} {:016x}", hasher.finish()) } else { tree })
+}
+
 fn changes(root: &Path, snapshot: Option<(&str, &Path)>, since: std::time::SystemTime) -> String {
+    let _held = INDEX.lock().unwrap_or_else(|p| p.into_inner());
     let (base, index) = snapshot.map_or(("HEAD", None), |(tree, index)| (tree, Some(index)));
     let diff =
         git(root, index, &["diff", "--numstat", "--summary", "--no-renames", "--no-ext-diff", "--no-textconv", base])
@@ -1061,4 +1082,16 @@ fn changes(root: &Path, snapshot: Option<(&str, &Path)>, since: std::time::Syste
     };
     out.extend(new.lines().filter(fresh).map(|f| format!("{f} (new)")));
     if out.is_empty() { "none".into() } else { out.join("\n") }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact;
+
+    #[test]
+    fn redacts_opencode_keys_but_not_identifiers() {
+        let (out, hidden) = redact("key oc_sk_4f9Qx2LmZ8rT7vW1yB3nK6hJ and oc_some_long_identifier_name");
+        assert_eq!(hidden, 1);
+        assert_eq!(out, "key [redacted opencode key] and oc_some_long_identifier_name");
+    }
 }

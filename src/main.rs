@@ -15,7 +15,7 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(version, about = "Minimal code-mode coding agent. Without a task it starts a REPL (/compact, /cost, /think, /models [filter], /providers).")]
+#[command(version = concat!(env!("CARGO_PKG_VERSION"), " ", env!("AIR_BUILD")), about = "Minimal code-mode coding agent. Without a task it starts a REPL (/compact, /cost, /think, /models [filter], /providers).")]
 struct Cli {
     #[arg(help = "Run this task once and exit (status 1 when the result is unverified)")]
     task: Option<String>,
@@ -55,7 +55,7 @@ fn load(path: &Path) -> Result<Config> {
 async fn main() {
     ui::guard();
     if let Err(e) = start().await {
-        eprintln!("error: {}", ui::printable(&format!("{e:#}")));
+        eprintln!("error: {}", agent::redact(&ui::printable(&format!("{e:#}"))).0);
         std::process::exit(1);
     }
 }
@@ -65,6 +65,9 @@ async fn start() -> Result<()> {
     let home = PathBuf::from(std::env::var("HOME")?);
     if cli.stats {
         return stats::print(&home);
+    }
+    if cli.task.as_deref().is_some_and(|t| t.trim().is_empty()) {
+        bail!("the task is empty: give air something to do, or run it without a task for the REPL");
     }
     let top = std::process::Command::new("git").args(["rev-parse", "--show-toplevel"]).output()?;
     if !top.status.success() {
@@ -112,7 +115,13 @@ async fn start() -> Result<()> {
             Err(ReadlineError::Interrupted) => continue,
             Err(_) => return Ok(()),
         };
-        let result = match line.trim() {
+        let line = line.trim();
+        if let Some(why) = unknown(line) {
+            let _ = editor.add_history_entry(line);
+            eprintln!("error: {why}");
+            continue;
+        }
+        let result = match line {
             "" => Ok(()),
             "/compact" => agent.compact(),
             "/cost" => {
@@ -141,7 +150,7 @@ async fn start() -> Result<()> {
             }
         };
         if let Err(e) = result {
-            eprintln!("error: {}", ui::printable(&format!("{e:#}")));
+            eprintln!("error: {}", agent::redact(&ui::printable(&format!("{e:#}"))).0);
         }
     }
 }
@@ -197,4 +206,35 @@ async fn pick(agent: &mut agent::Agent, editor: &mut rustyline::DefaultEditor, f
         return Ok(());
     }
     agent.switch(&provider, &model)
+}
+
+const COMMANDS: &[&str] = &["/compact", "/cost", "/think", "/models", "/providers"];
+
+/// A "/word" line that names no command is a typo, and must not reach the model as a task.
+fn unknown(line: &str) -> Option<String> {
+    let word = line.split_whitespace().next()?;
+    let name = word.strip_prefix('/')?;
+    if name.contains('/') || COMMANDS.contains(&word) {
+        return None;
+    }
+    let near = COMMANDS.iter().copied().find(|c| !name.is_empty() && (c.starts_with(word) || word.starts_with(c)));
+    Some(match near {
+        Some(near) => format!("unknown command {word}; did you mean {near}?"),
+        None => format!("unknown command {word}; the commands are {}", COMMANDS.join(" ")),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unknown;
+
+    #[test]
+    fn typos_are_not_tasks() {
+        assert_eq!(unknown("/model").as_deref(), Some("unknown command /model; did you mean /models?"));
+        assert!(unknown("/help").is_some_and(|m| m.ends_with("/compact /cost /think /models /providers")));
+        assert!(unknown("/").is_some_and(|m| m.contains("the commands are")));
+        assert_eq!(unknown("/models gpt"), None);
+        assert_eq!(unknown("/etc/hosts has a typo"), None);
+        assert_eq!(unknown("fix /model"), None);
+    }
 }

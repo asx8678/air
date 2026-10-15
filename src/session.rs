@@ -81,7 +81,8 @@ impl Session {
                     file.set_len(cut as u64)?;
                     text.truncate(cut);
                 }
-                let entries = text.lines().map(serde_json::from_str).collect::<Result<_, _>>()?;
+                let mut entries: Vec<Value> = text.lines().map(serde_json::from_str).collect::<Result<_, _>>()?;
+                backfill_id(&mut entries, &path.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default());
                 eprintln!("[resumed {}]", path.display());
                 return Ok(Self { file, path, entries });
             }
@@ -200,5 +201,38 @@ fn settings(provider: &str, model: &str, system: &str, mut params: Map<String, V
 fn answer_missing(out: &mut Vec<Value>, open: &mut Vec<Value>) {
     for id in open.drain(..) {
         out.push(json!({"role": "tool", "tool_call_id": id, "content": "tool result missing (interrupted)"}));
+    }
+}
+
+/// Logs written before the conversation id existed get the id create() would have given them, so resuming one still
+/// sends x-opencode-session.
+fn backfill_id(entries: &mut [Value], id: &str) {
+    for (i, entry) in entries.iter_mut().enumerate() {
+        let header =
+            if i == 0 { entry.as_object_mut() } else { entry.get_mut("switch").and_then(Value::as_object_mut) };
+        if let Some(header) = header.filter(|h| h.get("id").and_then(Value::as_str).is_none_or(str::is_empty)) {
+            header.insert("id".into(), id.into());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::backfill_id;
+    use serde_json::json;
+
+    #[test]
+    fn resumed_logs_get_the_file_id() {
+        let mut entries = vec![
+            json!({"model": "m"}),
+            json!({"role": "user"}),
+            json!({"switch": {"model": "n"}}),
+            json!({"switch": {"id": "kept"}}),
+        ];
+        backfill_id(&mut entries, "1792-42");
+        assert_eq!(entries[0]["id"], "1792-42");
+        assert_eq!(entries[1].get("id"), None);
+        assert_eq!(entries[2]["switch"]["id"], "1792-42");
+        assert_eq!(entries[3]["switch"]["id"], "kept");
     }
 }

@@ -54,6 +54,11 @@ fn key(provider: &Provider) -> &'static str {
     }
 }
 
+/// Whether reqwest can send to this base url: http or https, with a host.
+pub fn web_url(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.has_host())
+}
+
 pub fn ask(editor: &mut DefaultEditor, prompt: &str) -> Option<String> {
     editor.readline(prompt).ok().map(|line| line.trim().to_string())
 }
@@ -136,6 +141,10 @@ async fn add(home: &Path, providers: &mut Providers, editor: &mut DefaultEditor)
     else {
         return Ok(());
     };
+    if !web_url(&base_url) {
+        ui::note(&format!("{} is not an http(s) URL; nothing added", ui::printable(&base_url)));
+        return Ok(());
+    }
     let Some(key) = ask(editor, "api key (enter uses AIR_API_KEY or ~/.config/air/api_key, none sends no key) › ")
     else {
         return Ok(());
@@ -153,8 +162,10 @@ async fn add(home: &Path, providers: &mut Providers, editor: &mut DefaultEditor)
 
 fn edit(provider: &mut Provider, editor: &mut DefaultEditor) {
     let prompt = format!("base url [{}] (enter keeps) › ", provider.base_url);
-    if let Some(url) = ask(editor, &prompt).filter(|u| !u.is_empty()) {
-        provider.base_url = url;
+    match ask(editor, &prompt).filter(|u| !u.is_empty()) {
+        Some(url) if web_url(&url) => provider.base_url = url,
+        Some(url) => ui::note(&format!("{} is not an http(s) URL; the base url stays", ui::printable(&url))),
+        None => {}
     }
     let state = key(provider);
     match ask(editor, &format!("api key [{state}] (enter keeps, - uses the shared key, none sends no key) › "))
@@ -225,6 +236,20 @@ async fn models(home: &Path, providers: &mut Providers, name: &str, editor: &mut
                 None => ui::note("pick a model by its number, e.g. d 1"),
             },
             _ => ui::note("unknown command"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::web_url;
+
+    #[test]
+    fn base_urls_must_be_http() {
+        assert!(web_url("https://opencode.ai/inference/go/v1"));
+        assert!(web_url("http://127.0.0.1:8080/v1"));
+        for bad in ["api.example.invalid/v1", "htps://opencode.ai/v1", "http://127.0.0.1:99999/v1", ""] {
+            assert!(!web_url(bad), "{bad}");
         }
     }
 }
