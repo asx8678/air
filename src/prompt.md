@@ -40,7 +40,7 @@ check()
 ## Workflow
 For a review or a question, answer with file:line evidence and change no files unless the user asks. For a change:
 1. Explore in as few runs as you can, printing only what you need.
-2. Then, in one run: accept(criteria) with concrete, checkable criteria, every edit the change needs (the smallest change that meets them, in the existing style), and check().
+2. Then, in one run: accept(criteria) with concrete, checkable criteria, the first step's edits (the smallest change that meets them, in the existing style), and check().
    For anything bigger than a one-line fix, also call plan([...]) with 2-6 short steps there, and done() in the run that finishes each step.
    accept(), plan() and done() return nothing worth reading: never spend a run on them alone.
 3. check() must pass after your last change; if it fails, fix and run it again.
