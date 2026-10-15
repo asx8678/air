@@ -4,6 +4,8 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 pub const TEMPERATURE: f64 = 0.0;
+/// What air calls itself on the wire.
+const USER_AGENT: &str = concat!("air/", env!("CARGO_PKG_VERSION"));
 const LONG: Duration = Duration::from_secs(150);
 const FIRST_BYTE: Duration = Duration::from_secs(90);
 const IDLE: Duration = Duration::from_secs(300);
@@ -92,6 +94,18 @@ pub fn params(header: &Value) -> Value {
     }
 }
 
+/// OpenCode's gateway refuses requests without `x-opencode-session`, a stable id per
+/// conversation it routes by. That is its protocol, not air's identity — the User-Agent above
+/// is where air names itself.
+fn session_id(base_url: &str, header: &Value) -> Option<String> {
+    let host = base_url.rsplit_once("://").map_or(base_url, |(_, rest)| rest);
+    let host = host.split('/').next().unwrap_or("");
+    if host != "opencode.ai" && !host.ends_with(".opencode.ai") {
+        return None;
+    }
+    header["id"].as_str().filter(|id| !id.is_empty()).map(String::from)
+}
+
 fn overflow(text: &str) -> bool {
     let lower = text.to_lowercase();
     OVERFLOW.iter().any(|m| lower.contains(m))
@@ -108,6 +122,7 @@ pub struct Llm {
     model: String,
     params: Value,
     think_limit: Option<usize>,
+    session: Option<String>,
     field: std::cell::Cell<&'static str>,
     marked: std::cell::Cell<bool>,
 }
@@ -129,13 +144,21 @@ impl Llm {
             model: header["model"].as_str().unwrap_or_default().into(),
             params: params(header),
             think_limit: header["think_limit"].as_u64().map(|n| n as usize),
+            session: session_id(base_url, header),
             field: std::cell::Cell::new(FIELDS[0]),
             marked: Default::default(),
         }
     }
 
     pub async fn models(&self) -> Result<Vec<String>> {
-        let mut request = self.http.get(format!("{}/models", self.base)).timeout(Duration::from_secs(15));
+        let mut request = self
+            .http
+            .get(format!("{}/models", self.base))
+            .timeout(Duration::from_secs(15))
+            .header("user-agent", USER_AGENT);
+        if let Some(id) = &self.session {
+            request = request.header("x-opencode-session", id.as_str());
+        }
         if let Some(key) = &self.key {
             request = request.bearer_auth(key);
         }
@@ -166,7 +189,11 @@ impl Llm {
             .http
             .post(format!("{}/chat/completions", self.base))
             .header("content-type", "application/json")
+            .header("user-agent", USER_AGENT)
             .body(serde_json::to_vec(&body)?);
+        if let Some(id) = &self.session {
+            request = request.header("x-opencode-session", id.as_str());
+        }
         if let Some(key) = &self.key {
             request = request.bearer_auth(key);
         }
@@ -564,5 +591,25 @@ impl Inline {
     fn finish(&mut self) -> (String, String) {
         let held = std::mem::take(&mut self.held);
         if self.inside == Some(true) { (held, String::new()) } else { (String::new(), held) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_itself() {
+        assert!(USER_AGENT.starts_with("air/"));
+    }
+
+    #[test]
+    fn opencode_gets_a_session_id() {
+        assert_eq!(
+            session_id("https://opencode.ai/inference/go/v1", &json!({"id": "1792-1"})).as_deref(),
+            Some("1792-1")
+        );
+        assert_eq!(session_id("https://opencode.ai/inference/go/v1", &json!({})), None);
+        assert_eq!(session_id("https://api.primalabs.ai/v1", &json!({"id": "1792-1"})), None);
     }
 }

@@ -785,8 +785,14 @@ impl Drop for Group {
     }
 }
 
+/// The provider that lists a model; the synthesized config fallback loses to a named provider.
 fn holding<'a>(providers: &'a Providers, model: &str) -> Option<&'a String> {
-    providers.iter().find(|(_, p)| p.models.iter().any(|m| m == model)).map(|(name, _)| name)
+    providers
+        .iter()
+        .filter(|(name, _)| name.as_str() != "config")
+        .find(|(_, p)| p.models.iter().any(|m| m == model))
+        .or_else(|| providers.get_key_value("config").filter(|(_, p)| p.models.iter().any(|m| m == model)))
+        .map(|(name, _)| name)
 }
 
 fn connect(providers: &Providers, header: &Value) -> Result<(String, Llm)> {

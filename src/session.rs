@@ -38,12 +38,18 @@ impl Session {
         let mut header = settings(provider, model, system, profile);
         header["cwd"] = json!(root);
         header["air"] = format!("{} {}", env!("CARGO_PKG_VERSION"), env!("AIR_BUILD")).into();
+        // One stable id per conversation; OpenCode's gateway routes by it.
+        header["id"] = session.path.file_stem().map(|s| s.to_string_lossy().into_owned()).into();
         session.push(header)?;
         Ok(session)
     }
 
     pub fn switch(&mut self, provider: &str, model: &str, system: &str, profile: Map<String, Value>) -> Result<()> {
-        self.push(json!({"switch": settings(provider, model, system, profile), "at": crate::ui::now_ms()}))
+        let mut switched = settings(provider, model, system, profile);
+        if let Some(id) = self.header()["id"].as_str() {
+            switched["id"] = id.into();
+        }
+        self.push(json!({"switch": switched, "at": crate::ui::now_ms()}))
     }
 
     pub fn header(&self) -> &Value {
