@@ -56,7 +56,7 @@ impl Worker {
             );
         }
         let mut child = sandboxed(root, yolo, log, "python3", &["-I", "-B", "-u", "-c", include_str!("worker.py")])
-            .env("AIR_CHECK", if check.is_some_and(|c| !c.trim().is_empty()) { "1" } else { "" })
+            .env("AIR_CHECK", if check.is_some() { "1" } else { "" })
             .env("AIR_FMT", fmt.unwrap_or_default())
             .env("AIR_LOG", log)
             .stdin(Stdio::piped())
@@ -167,7 +167,7 @@ pub fn sandboxed(root: &Path, yolo: bool, log: &Path, program: &str, args: &[&st
              (deny file-write*)(allow file-write*{dirs} (subpath \"/dev\"))(deny file-write*{protected})\
              (deny file-write* (require-all (subpath {root:?}) (regex #\"/\\.[gG][iI][tT](/|$)\")))\
              (deny file-read-data{secrets})(allow file-read-data (literal {log:?}))\
-             (deny file-ioctl (regex #\"^/dev/tty\"))(deny appleevent-send)\
+             (deny file-ioctl (regex #\"^/dev/tty\"))(deny file-write* (regex #\"^/dev/tty\"))(deny appleevent-send)\
              (deny process-exec (literal \"/usr/bin/osascript\") (literal \"/usr/bin/osacompile\") \
               (literal \"/usr/bin/open\") (literal \"/bin/launchctl\") (literal \"/usr/bin/automator\"))"
         );
@@ -226,7 +226,8 @@ fn protected(root: &Path) -> Vec<PathBuf> {
 }
 
 fn nested(root: &Path) -> Vec<PathBuf> {
-    let out = std::process::Command::new("git").arg("-C").arg(root).args(["ls-files", "--stage", "-z"]).output();
+    let mut git = std::process::Command::new("git");
+    let out = git.args(["-c", "core.fsmonitor=false", "-C"]).arg(root).args(["ls-files", "--stage", "-z"]).output();
     let list = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
     let mut found: Vec<PathBuf> = list
         .split('\0')

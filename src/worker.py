@@ -7,6 +7,7 @@ FMT = os.environ.pop("AIR_FMT", "")
 LOG = os.environ.pop("AIR_LOG", "")
 HALF = 8000
 LIMIT = 8 << 20
+RUN_CAP = 570
 IGNORABLE = re.compile("[\u200c-\u200f\u202a-\u202e\u206a-\u206f\ufeff]")
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\r(?!\n)")
 
@@ -18,6 +19,7 @@ _report = {}
 _state = {}
 _checked = None
 _groups = set()
+_deadline = time.monotonic() + RUN_CAP
 
 
 def _children(pid):
@@ -52,6 +54,9 @@ threading.Thread(target=_watch, args=(os.getppid(),), daemon=True).start()
 
 
 def _exec(cmd, timeout):
+    left = _deadline - time.monotonic()
+    if not timeout or timeout > left:
+        timeout = max(1, int(left))
     with tempfile.TemporaryFile() as out:
         p = subprocess.Popen(cmd, shell=True, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                              start_new_session=True)
@@ -205,7 +210,8 @@ def check():
     _outbox.flush()
     answer = json.loads(_inbox.readline() or "{}")
     ok = answer.get("ok") is True
-    global _checked
+    global _checked, _deadline
+    _deadline = time.monotonic() + RUN_CAP
     _checked = _tree() if ok else None
     _report["check"] = ok
     _report.setdefault("actions", []).append({"tool": "check", "ok": ok})
@@ -319,6 +325,7 @@ _outbox.flush()
 for request in _inbox:
     request = json.loads(request)
     code, _state = request["code"], request.get("state") or {}
+    _deadline = time.monotonic() + RUN_CAP
     _report.clear()
     os.chdir(ROOT)
     G.update(TOOLS)

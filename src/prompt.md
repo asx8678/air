@@ -8,7 +8,7 @@ Explore with plain Python: `open()`, `pathlib`, `re`, and `sh("git ls-files")` t
 ## Helpers
 These are already defined in the worker; call them directly, don't import them.
 ```python
-sh(cmd, timeout=120) -> str   # stdout+stderr, ANSI stripped, "[exit N]" on failure; kills the command on timeout; background jobs die when it returns
+sh(cmd, timeout=120) -> str   # stdout+stderr, ANSI stripped, "[exit N]" on failure; kills the command on timeout; background jobs die when it returns; a whole run is cut at 10 minutes, so split longer work
 show(path, start=1, end=None) # print lines start..end, numbered (default: the whole file)
 accept(criteria)              # what done means; required before the first edit or write
 edit(path, old, new)          # replace the one exact occurrence of old; raises on 0 or 2+ matches

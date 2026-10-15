@@ -21,7 +21,7 @@ struct Cli {
     task: Option<String>,
     #[arg(long, help = "Resume the latest session in this repo")]
     resume: bool,
-    #[arg(short, long, help = "Model for a new session; /models switches it later")]
+    #[arg(short, long, help = "Model for a new session; with --resume it switches the session to it (so does /models)")]
     model: Option<String>,
     #[arg(long, help = "No sandbox: network on, writes anywhere (env vars stay filtered; env = [...] in ~/.config/air/config.toml passes more)")]
     yolo: bool,
@@ -79,15 +79,16 @@ async fn start() -> Result<()> {
     if !repo.env.is_empty() {
         eprintln!("air.toml: env is ignored; set env in ~/.config/air/config.toml");
     }
-    let fallback = user.base_url.clone().map(|base_url| {
+    let fallback = user.base_url.map(|base_url| {
         let models = user.model.iter().cloned().collect();
         providers::Provider { base_url, api_key: None, models }
     });
     let providers = with_config(providers::load(&home)?.unwrap_or_default(), &fallback);
+    let picked = cli.model.clone().filter(|_| cli.resume);
     let config = Config {
         model: cli.model.or(user.model),
-        base_url: user.base_url,
-        check: repo.check.or(user.check),
+        base_url: None,
+        check: repo.check.or(user.check).filter(|c| !c.trim().is_empty()),
         fmt: repo.fmt.or(user.fmt),
         env: user.env,
         models: user.models,
@@ -95,6 +96,9 @@ async fn start() -> Result<()> {
     };
     worker::allow_env(config.env.clone());
     let mut agent = agent::Agent::new(&root, &home, config, cli.resume, cli.yolo)?;
+    if let Some(model) = picked {
+        agent.resume_with(&model)?;
+    }
     if let Some(task) = cli.task {
         eprintln!("[session {}]", agent.path().display());
         let verified = agent.run(&task).await?;
@@ -119,12 +123,15 @@ async fn start() -> Result<()> {
                 agent.think();
                 Ok(())
             }
-            "/providers" => {
-                let mut providers = providers::load(&home)?.unwrap_or_default();
-                let result = providers::menu(&home, &mut providers, agent.provider(), &mut editor).await;
-                agent.set_providers(with_config(providers, &fallback));
-                result
-            }
+            "/providers" => match providers::load(&home) {
+                Ok(loaded) => {
+                    let mut providers = loaded.unwrap_or_default();
+                    let fixed = fallback.as_ref().filter(|_| !providers.contains_key("config"));
+                    let result = providers::menu(&home, &mut providers, fixed, agent.provider(), &mut editor).await;
+                    agent.set_providers(with_config(providers, &fallback)).and(result)
+                }
+                Err(e) => Err(e),
+            },
             line if line == "/models" || line.starts_with("/models ") => {
                 pick(&mut agent, &mut editor, line["/models".len()..].trim()).await
             }
@@ -141,6 +148,9 @@ async fn start() -> Result<()> {
 
 fn with_config(mut providers: providers::Providers, fallback: &Option<providers::Provider>) -> providers::Providers {
     if let Some(provider) = fallback {
+        if providers.contains_key("config") {
+            ui::note("providers.toml: its [config] entry replaces base_url and model from config.toml");
+        }
         providers.entry("config".into()).or_insert_with(|| provider.clone());
     }
     providers
@@ -148,9 +158,10 @@ fn with_config(mut providers: providers::Providers, fallback: &Option<providers:
 
 async fn pick(agent: &mut agent::Agent, editor: &mut rustyline::DefaultEditor, filter: &str) -> Result<()> {
     let needle = filter.to_lowercase();
-    let models: Vec<(String, String, bool)> =
-        agent.models().await.into_iter().filter(|(_, m, _)| m.to_lowercase().contains(&needle)).collect();
-    for (i, (provider, model, profiled)) in (1..).zip(&models) {
+    let all = agent.models().await;
+    let models: Vec<&(String, String, bool)> =
+        all.iter().filter(|(_, m, _)| m.to_lowercase().contains(&needle)).collect();
+    for (i, (provider, model, profiled)) in (1..).zip(models.iter().copied()) {
         let current = provider == agent.provider() && model == agent.model();
         let current = if current { ui::paint("32", " ● current") } else { String::new() };
         let profile = if *profiled { ui::paint("2", " (profile)") } else { String::new() };
@@ -170,13 +181,16 @@ async fn pick(agent: &mut agent::Agent, editor: &mut rustyline::DefaultEditor, f
             Some((provider, model, _)) => (provider.clone(), model.clone()),
             None => bail!("no model numbered {n}"),
         },
-        Err(_) => match models
+        Err(_) => match all
             .iter()
             .find(|(p, m, _)| p == agent.provider() && *m == choice)
-            .or_else(|| models.iter().find(|(_, m, _)| *m == choice))
+            .or_else(|| all.iter().find(|(_, m, _)| *m == choice))
         {
             Some((provider, model, _)) => (provider.clone(), model.clone()),
-            None => (agent.provider().to_string(), choice),
+            None => {
+                ui::note(&format!("{} is not listed; trying it on {}", ui::printable(&choice), agent.provider()));
+                (agent.provider().to_string(), choice)
+            }
         },
     };
     if provider == agent.provider() && model == agent.model() {

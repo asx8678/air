@@ -13,9 +13,17 @@ const BODY_MAX: usize = 2000;
 const FIELDS: [&str; 2] = ["reasoning_content", "reasoning"];
 const OPEN: &str = "<think>";
 const CLOSE: &str = "</think>";
-const OVERFLOW: &[&str] =
-    &["context_length", "context length", "context window", "maximum context", "prompt is too long", "too many tokens"];
-const QUOTA: &[&str] = &["insufficient_quota", "billing", "quota exceeded", "exceeded your current quota"];
+const OVERFLOW: &[&str] = &[
+    "context_length",
+    "context length",
+    "context window",
+    "context size",
+    "maximum context",
+    "prompt is too long",
+    "too many tokens",
+    "exceeds the maximum number of tokens",
+];
+const QUOTA: &str = "insufficient_quota";
 const REJECTED: &[&str] = &["invalid", "authentication", "permission", "not_found", "insufficient_quota"];
 
 #[derive(Debug)]
@@ -77,28 +85,6 @@ impl std::fmt::Display for Overthought {
 
 impl std::error::Error for Overthought {}
 
-#[derive(Debug)]
-pub struct NotStreaming(String);
-
-impl std::fmt::Display for NotStreaming {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "the provider did not send an event stream: {}", self.0)
-    }
-}
-
-impl std::error::Error for NotStreaming {}
-
-#[derive(Debug)]
-pub struct Stalled(String);
-
-impl std::fmt::Display for Stalled {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "the provider stalled: {}", self.0)
-    }
-}
-
-impl std::error::Error for Stalled {}
-
 pub fn params(header: &Value) -> Value {
     match &header["params"] {
         Value::Object(params) => params.clone().into(),
@@ -131,7 +117,6 @@ impl Llm {
         Self {
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(30))
-                .read_timeout(Duration::from_secs(300))
                 .build()
                 .expect("a plain rustls client builds"),
             base: base_url.trim_end_matches('/').into(),
@@ -139,17 +124,14 @@ impl Llm {
                 .map(String::from)
                 .or_else(|| std::env::var("AIR_API_KEY").ok())
                 .or_else(|| std::fs::read_to_string(key_file()).ok())
-                .map(|k| k.trim().into()),
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty()),
             model: header["model"].as_str().unwrap_or_default().into(),
             params: params(header),
             think_limit: header["think_limit"].as_u64().map(|n| n as usize),
             field: std::cell::Cell::new(FIELDS[0]),
             marked: Default::default(),
         }
-    }
-
-    pub fn replay_as(&self, field: &str) {
-        self.field.set(FIELDS.into_iter().find(|f| *f == field).unwrap_or(FIELDS[0]));
     }
 
     pub async fn models(&self) -> Result<Vec<String>> {
@@ -220,7 +202,7 @@ impl Llm {
         let kind = response.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or_default();
         let kind = kind.to_lowercase();
         if kind.contains("html") || kind.contains("json") {
-            return Err(NotStreaming(format!("{kind}: {}", head(response).await)).into());
+            bail!("the provider did not send an event stream: {kind}: {}", head(response).await);
         }
         let (mut first, mut spoke) = (None, None);
         let (mut finished, mut reason) = (false, Value::Null);
@@ -388,7 +370,19 @@ impl Llm {
         } else {
             held += &rest;
         }
-        if open && broken.is_none() {
+        let close = text.find(CLOSE).filter(|&end| {
+            via.is_none() && thinking.is_empty() && !text[..end].contains("<think") && !text[..end].contains('`')
+        });
+        if let Some(end) = close {
+            let after = text[end + CLOSE.len()..].trim_start_matches([' ', '\t']);
+            if after.is_empty() || after.starts_with(['\n', '\r']) {
+                (thinking, text) = (text[..end].trim_end().to_string(), after.trim_start().to_string());
+                if !answering && !narrated {
+                    held = text.clone();
+                }
+            }
+        }
+        if open && broken.is_none() && reason != "length" {
             let inner = std::mem::take(&mut thinking);
             text += &inner;
             held += &inner;
@@ -397,7 +391,7 @@ impl Llm {
             Some(problem) if overflow(problem) => Some(ContextOverflow(problem.into()).into()),
             Some(problem) if rejected => Some(anyhow!("{problem}")),
             None if events == 0 && !finished => {
-                Some(NotStreaming(format!("{got} bytes without a single event")).into())
+                Some(anyhow!("the provider did not send an event stream: {got} bytes without a single event"))
             }
             _ => None,
         };
@@ -448,7 +442,6 @@ impl Llm {
         }
         if let Some(field) = via {
             self.field.set(field);
-            message["meta"]["reasoning_field"] = field.into();
         }
         if !calls.is_empty() {
             message["tool_calls"] = calls
@@ -469,16 +462,17 @@ impl Llm {
         for attempt in 1.. {
             let sent = Instant::now();
             let request = request.try_clone().expect("a byte body clones");
-            let (problem, detail, wait) = match tokio::time::timeout(FIRST_BYTE, request.send()).await {
+            let limit = if timed_out { IDLE } else { FIRST_BYTE };
+            let (problem, detail, wait) = match tokio::time::timeout(limit, request.send()).await {
                 Ok(Ok(r)) if r.status().is_success() => return Ok((r, sent)),
                 Ok(Ok(r)) => {
                     let (status, after) = (r.status(), retry_after(r.headers()));
                     let text = head(r).await;
-                    if status == 413 || overflow(&text) {
+                    let retryable = status == 429 || status.is_server_error();
+                    if status == 413 || !retryable && overflow(&text) {
                         return Err(ContextOverflow(format!("{status}: {text}")).into());
                     }
-                    let lower = text.to_lowercase();
-                    if status != 429 && !status.is_server_error() || QUOTA.iter().any(|q| lower.contains(q)) {
+                    if !retryable || text.to_lowercase().contains(QUOTA) {
                         bail!("{status}: {text}")
                     }
                     (status.as_u16().to_string(), format!("{status}: {text}"), after)
@@ -488,7 +482,8 @@ impl Llm {
                     (problem.clone(), problem, None)
                 }
                 Err(_) if timed_out => {
-                    return Err(Stalled(format!("no response within {}s, twice", FIRST_BYTE.as_secs())).into());
+                    let (first, second) = (FIRST_BYTE.as_secs(), IDLE.as_secs());
+                    bail!("the provider stalled: no response within {first}s, then within {second}s");
                 }
                 Err(_) => {
                     timed_out = true;
@@ -541,27 +536,7 @@ fn refused(error: &Value) -> bool {
 }
 
 fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    let value = headers.get("retry-after")?.to_str().ok()?.trim();
-    value.parse().ok().or_else(|| {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-        Some(http_date(value)?.saturating_sub(now))
-    })
-}
-
-fn http_date(value: &str) -> Option<u64> {
-    let parts: Vec<&str> = value.split([' ', ':']).collect();
-    let [_, day, month, year, hour, min, sec, _] = parts[..] else { return None };
-    let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    let month = months.iter().position(|m| *m == month)? as i64 + 1;
-    let [day, year, hour, min, sec] = [day, year, hour, min, sec].map(|n| n.parse::<i64>().unwrap_or(-1));
-    if [day, year, hour, min, sec].contains(&-1) {
-        return None;
-    }
-    let y = if month <= 2 { year - 1 } else { year };
-    let (era, yoe) = (y.div_euclid(400), y.rem_euclid(400));
-    let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
-    let days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
-    u64::try_from(days * 86400 + hour * 3600 + min * 60 + sec).ok()
+    headers.get("retry-after")?.to_str().ok()?.trim().parse().ok()
 }
 
 #[derive(Default)]

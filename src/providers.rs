@@ -35,13 +35,23 @@ pub fn load(home: &Path) -> Result<Option<Providers>> {
 fn save(home: &Path, providers: &Providers) -> Result<()> {
     let path = file(home);
     let dir = path.parent().context("providers.toml has a parent")?;
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).with_context(|| dir.display().to_string())?;
     let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
-    let mut out = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
-    out.write_all(toml::to_string(providers)?.as_bytes())?;
-    out.sync_all()?;
-    std::fs::rename(&tmp, &path).with_context(|| path.display().to_string())?;
-    Ok(())
+    let write = || -> Result<()> {
+        let mut out = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        out.write_all(toml::to_string(providers)?.as_bytes())?;
+        out.sync_all()?;
+        Ok(std::fs::rename(&tmp, &path)?)
+    };
+    write().inspect_err(|_| drop(std::fs::remove_file(&tmp))).with_context(|| path.display().to_string())
+}
+
+fn key(provider: &Provider) -> &'static str {
+    match provider.api_key.as_deref() {
+        Some("") => "no key",
+        Some(_) => "own key",
+        None => "shared key",
+    }
 }
 
 pub fn ask(editor: &mut DefaultEditor, prompt: &str) -> Option<String> {
@@ -52,18 +62,30 @@ fn number(i: usize) -> String {
     ui::paint("2", &format!("{i:>3}"))
 }
 
-pub async fn menu(home: &Path, providers: &mut Providers, current: &str, editor: &mut DefaultEditor) -> Result<()> {
+pub async fn menu(
+    home: &Path,
+    providers: &mut Providers,
+    fixed: Option<&Provider>,
+    current: &str,
+    editor: &mut DefaultEditor,
+) -> Result<()> {
+    if std::fs::read_to_string(file(home)).is_ok_and(|t| t.lines().any(|l| l.trim_start().starts_with('#'))) {
+        ui::note("changes made here rewrite providers.toml without its comments");
+    }
+    let mark = |name: &str| if name == current { ui::paint("32", " ● current") } else { String::new() };
     loop {
         let names: Vec<String> = providers.keys().cloned().collect();
-        if names.is_empty() {
+        if let Some(p) = fixed {
+            let info = ui::paint("2", &format!("{}  {}  from config.toml", ui::printable(&p.base_url), key(p)));
+            println!("    config  {info}{}", mark("config"));
+        } else if names.is_empty() {
             ui::note("no providers yet");
         }
         for (i, name) in (1..).zip(&names) {
             let p = &providers[name];
-            let key = if p.api_key.is_some() { "own key" } else { "shared key" };
-            let mark = if name == current { ui::paint("32", " ● current") } else { String::new() };
-            let info = ui::paint("2", &format!("{}  {key}  {} model(s)", p.base_url, p.models.len()));
-            println!("{} {}  {info}{mark}", number(i), ui::printable(name));
+            let info =
+                ui::paint("2", &format!("{}  {}  {} model(s)", ui::printable(&p.base_url), key(p), p.models.len()));
+            println!("{} {}  {info}{}", number(i), ui::printable(name), mark(name));
         }
         let Some(line) = ask(editor, "a add · e <n> edit · m <n> models · d <n> delete · enter done › ") else {
             return Ok(());
@@ -101,6 +123,10 @@ pub async fn menu(home: &Path, providers: &mut Providers, current: &str, editor:
 
 async fn add(home: &Path, providers: &mut Providers, editor: &mut DefaultEditor) -> Result<()> {
     let Some(name) = ask(editor, "name › ").filter(|n| !n.is_empty()) else { return Ok(()) };
+    if name == "config" {
+        ui::note("config is the provider built from base_url in config.toml; pick another name");
+        return Ok(());
+    }
     if providers.contains_key(&name) {
         ui::note(&format!("{name} already exists; edit it with e <n>"));
         return Ok(());
@@ -110,7 +136,15 @@ async fn add(home: &Path, providers: &mut Providers, editor: &mut DefaultEditor)
     else {
         return Ok(());
     };
-    let key = ask(editor, "api key (enter uses AIR_API_KEY or ~/.config/air/api_key) › ").filter(|k| !k.is_empty());
+    let Some(key) = ask(editor, "api key (enter uses AIR_API_KEY or ~/.config/air/api_key, none sends no key) › ")
+    else {
+        return Ok(());
+    };
+    let key = match key.as_str() {
+        "" => None,
+        "none" => Some(String::new()),
+        _ => Some(key),
+    };
     providers.insert(name.clone(), Provider { base_url, api_key: key, models: vec![] });
     save(home, providers)?;
     ui::note(&format!("added {name}; now add its models"));
@@ -122,9 +156,12 @@ fn edit(provider: &mut Provider, editor: &mut DefaultEditor) {
     if let Some(url) = ask(editor, &prompt).filter(|u| !u.is_empty()) {
         provider.base_url = url;
     }
-    let state = if provider.api_key.is_some() { "own key set" } else { "shared key" };
-    match ask(editor, &format!("api key [{state}] (enter keeps, - uses the shared key) › ")).as_deref() {
+    let state = key(provider);
+    match ask(editor, &format!("api key [{state}] (enter keeps, - uses the shared key, none sends no key) › "))
+        .as_deref()
+    {
         Some("-") => provider.api_key = None,
+        Some("none") => provider.api_key = Some(String::new()),
         Some(key) if !key.is_empty() => provider.api_key = Some(key.into()),
         _ => {}
     }

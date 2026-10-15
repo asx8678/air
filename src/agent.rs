@@ -22,11 +22,18 @@ const REPEAT_BLOCK: usize = 6;
 const FILES: usize = 200;
 const AGENTS_MAX: usize = 32 * 1024;
 const RESTARTS: usize = 2;
-const WINDOW: &[&str] = &["context length is", "context length of", "context window is", "context window of"];
+const WINDOW: &[&str] = &[
+    "context length is",
+    "context length of",
+    "context window is",
+    "context window of",
+    "\"n_ctx\":",
+    "tokens allowed (",
+];
 const CHECK_TIMEOUT: Duration = Duration::from_secs(1800);
 const CHECK_OUT: u64 = 1 << 20;
 const BIG: u64 = 16 << 20;
-const TURN_TOKENS: u64 = 20_000_000;
+const TURN_BUDGET: u64 = 60;
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const SECRETS: &[(&str, &str, usize, &str)] = &[
     ("AKIA", "aws key", 16, ""),
@@ -91,7 +98,8 @@ impl Agent {
                 .or_else(|| config.providers.values().find_map(|p| p.models.first().cloned()))
                 .context("no model: pass -m or set model in ~/.config/air/config.toml")?;
             let only = config.providers.keys().next().filter(|_| config.providers.len() == 1);
-            let Some(provider) = holding(&config.providers, &model).or(only) else {
+            let fallback = config.providers.get_key_value("config").map(|(name, _)| name).or(only);
+            let Some(provider) = holding(&config.providers, &model).or(fallback) else {
                 let names: Vec<&str> = config.providers.keys().map(String::as_str).collect();
                 anyhow::bail!(
                     "no provider for {model}: set base_url in ~/.config/air/config.toml or add one to \
@@ -104,14 +112,11 @@ impl Agent {
             Session::create(home, root, provider, &model, &system, profile)?
         };
         let (provider, llm) = connect(&config.providers, session.header())?;
-        let since = || session.entries.iter().rev().take_while(|e| e["switch"].is_null());
-        if let Some(field) = since().find_map(|e| e["meta"]["reasoning_field"].as_str()) {
-            llm.replay_as(field);
-        }
-        let learned = since().find_map(|e| e["compact"]["at"].as_u64());
+        let mut since = session.entries.iter().rev().take_while(|e| e["switch"].is_null());
+        let learned = since.find_map(|e| e["compact"]["at"].as_u64());
         let compact_at = learned.or(session.header()["compact_at"].as_u64()).unwrap_or(COMPACT_AT);
         let repeat = (0, 0);
-        Ok(Self {
+        let mut agent = Self {
             root: root.into(),
             config,
             yolo,
@@ -127,7 +132,25 @@ impl Agent {
             restarts: 0,
             broken: None,
             passed: None,
-        })
+        };
+        agent.record()?;
+        Ok(agent)
+    }
+
+    fn record(&mut self) -> Result<()> {
+        if self.session.header()["provider"].as_str().is_some_and(|p| p != self.provider) {
+            let (provider, model) = (self.provider.clone(), self.model().to_string());
+            self.switch(&provider, &model)?;
+        }
+        Ok(())
+    }
+
+    pub fn resume_with(&mut self, model: &str) -> Result<()> {
+        if model == self.model() {
+            return Ok(());
+        }
+        let provider = holding(&self.config.providers, model).cloned().unwrap_or_else(|| self.provider.clone());
+        self.switch(&provider, model)
     }
 
     pub fn path(&self) -> &Path {
@@ -142,12 +165,16 @@ impl Agent {
         &self.provider
     }
 
-    pub fn set_providers(&mut self, providers: Providers) {
+    pub fn set_providers(&mut self, providers: Providers) -> Result<()> {
         self.config.providers = providers;
         match connect(&self.config.providers, self.session.header()) {
             Ok((provider, llm)) => (self.provider, self.llm) = (provider, llm),
-            Err(e) => ui::note(&format!("{e:#}; still connected as before until a provider is added")),
+            Err(e) => {
+                ui::note(&format!("{e:#}; still connected as before until a provider is added"));
+                return Ok(());
+            }
         }
+        self.record()
     }
 
     pub async fn models(&self) -> Vec<(String, String, bool)> {
@@ -252,7 +279,7 @@ impl Agent {
     async fn turn(&mut self, task: &str) -> Result<bool> {
         (self.pending, self.repeat, self.restarts, self.broken, self.passed) = (None, (0, 0), 0, None, None);
         if self.session.last_prompt_tokens() >= self.compact_at / 2 {
-            self.compact_to(self.compact_at as usize / 10)?;
+            self.compact_to(self.compact_at as usize / 10, false)?;
         }
         self.session.flush()?;
         let (began, clock) = (self.session.entries.len(), Instant::now());
@@ -260,7 +287,7 @@ impl Agent {
         self.session.push(json!({"role": "user", "content": task, "meta": {"snapshot": start}}))?;
         self.current = Some((began, clock));
         let (mut nudged, mut overflowed, mut nudges, mut cut) = (false, false, 0, false);
-        let ceiling = self.session.header()["turn_tokens"].as_u64().unwrap_or(TURN_TOKENS);
+        let ceiling = self.session.header()["turn_tokens"].as_u64().unwrap_or(self.compact_at * TURN_BUDGET);
         let mut spent = 0;
         let mut limit = format!("stopped after {MAX_REQUESTS} model requests in one turn");
         for _ in 0..MAX_REQUESTS {
@@ -271,9 +298,7 @@ impl Agent {
             if self.session.last_prompt_tokens() >= self.compact_at {
                 self.compact()?;
             }
-            let messages = self.session.messages();
-            let sent = serde_json::to_string(&messages).map_or(0, |m| m.len() as u64);
-            let result = self.llm.complete(messages, &tools(), nudges < 2).await;
+            let result = self.llm.complete(self.session.messages(), &tools(), nudges < 2).await;
             if let Some(e) = result.as_ref().err()
                 && let Some(lost) = llm::lost(e)
             {
@@ -291,18 +316,22 @@ impl Agent {
                     let system = self.session.header()["system"].as_str().map_or(0, str::len);
                     let agents = std::fs::metadata(self.root.join("AGENTS.md")).map_or(0, |m| m.len() as usize);
                     anyhow::bail!(
-                        "{e}; still over after compacting: the system prompt is {} KB, including {} KB of AGENTS.md",
+                        "{e}; still over after compacting: the request is {} KB, of which the system prompt is {} KB \
+                         (including {} KB of AGENTS.md)",
+                        self.sent() * 4 / 1024,
                         system / 1024,
                         agents.min(AGENTS_MAX) / 1024
                     );
                 }
                 Err(e) if e.is::<llm::Overthought>() => {
+                    spent += self.sent();
                     nudges += 1;
                     ui::event("overthought", &e.to_string(), llm::lost(&e).map_or(Value::Null, llm::Lost::extra));
                     self.nudge(&format!("You {e}; that reasoning was discarded."))?;
                     continue;
                 }
                 Err(e) if e.is::<llm::Interrupted>() && nudges < 2 && llm::lost(&e).is_some_and(|l| !l.stalled) => {
+                    spent += self.sent();
                     nudges += 1;
                     let reasoning = llm::lost(&e).is_some_and(|l| !l.thinking.is_empty());
                     let during = if reasoning { " during long reasoning" } else { "" };
@@ -312,27 +341,32 @@ impl Agent {
                 result => result?,
             };
             overflowed = false;
-            let usage = &mut message["meta"]["usage"];
-            if !usage["prompt_tokens"].is_u64() {
-                usage["prompt_tokens"] = (sent / 4).into();
+            if !message["meta"]["usage"]["prompt_tokens"].is_u64() {
+                let usage = &mut message["meta"]["usage"];
+                usage["prompt_tokens"] = self.sent().into();
                 usage["estimated"] = true.into();
             }
-            spent += usage["prompt_tokens"].as_u64().unwrap_or(0) + usage["completion_tokens"].as_u64().unwrap_or(0);
-            ui::usage(&message["meta"]["usage"]);
+            let usage = &message["meta"]["usage"];
+            let attempts = message["meta"]["timing"]["attempts"].as_u64().unwrap_or(1).max(1);
+            spent += usage["prompt_tokens"].as_u64().unwrap_or(0) * attempts
+                + usage["completion_tokens"].as_u64().unwrap_or(0);
+            ui::usage(usage);
             let calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
             if calls.is_empty() && message["content"].as_str().is_none_or(|c| c.trim().is_empty()) {
                 let meta = &message["meta"];
-                let extra =
-                    json!({"meta": {"usage": meta["usage"], "timing": meta["timing"]}, "finish": meta["finish"]});
                 if nudges < 2 {
                     nudges += 1;
+                    let extra =
+                        json!({"meta": {"usage": meta["usage"], "timing": meta["timing"]}, "finish": meta["finish"]});
                     ui::event("empty", "the model sent an empty reply; asking it to act", extra);
                     let thinking = message["reasoning_content"].as_str().unwrap_or_default();
                     self.discard("the reply was empty", thinking);
                     self.nudge("Your last reply was empty: you reasoned at length and sent nothing.")?;
                     continue;
                 }
+                let extra = json!({"finish": meta["finish"]});
                 ui::event("empty", "the model sent an empty reply again; ending the turn", extra);
+                cut = true;
             }
             if calls.is_empty() && message["meta"]["finish"] == "length" && !cut {
                 cut = true;
@@ -356,7 +390,7 @@ impl Agent {
                 ui::activity("waiting for the model");
                 continue;
             }
-            let changed = self.tree()? != start;
+            let changed = self.changed(&start, began);
             let mut checked = false;
             if changed && let Some(check) = &self.config.check {
                 let clock = Instant::now();
@@ -378,8 +412,16 @@ impl Agent {
         }
         ui::event("limit", &limit, Value::Null);
         self.current = None;
-        self.report(Some(self.moved(&start)), false, began, clock)?;
+        self.report(Some(self.changed(&start, began)), false, began, clock)?;
         Ok(false)
+    }
+
+    fn changed(&self, start: &str, began: usize) -> bool {
+        self.moved(start) || self.session.entries[began..].iter().any(|e| edited(&e["meta"]))
+    }
+
+    fn sent(&self) -> u64 {
+        serde_json::to_string(&self.session.messages()).map_or(0, |m| m.len() as u64) / 4
     }
 
     fn overflow(&mut self, error: &str) -> Result<()> {
@@ -400,7 +442,7 @@ impl Agent {
         };
         let window = window(error);
         self.compact_at = self.compact_at.min(window.unwrap_or(estimate) * 9 / 10);
-        self.compact()?;
+        self.compact_to(self.compact_at as usize / 5, true)?;
         let floor = Value::from(self.session.messages()).to_string().len() as u64 / 4;
         self.compact_at = self.compact_at.max(floor);
         let extra = json!({"seen": seen, "estimate": estimate, "window": window, "compact_at": self.compact_at});
@@ -483,10 +525,9 @@ impl Agent {
         match ran.await {
             Ok(reply) => {
                 self.restarts = 0;
-                let (out, mut meta) = finish(reply);
-                let (mut out, hidden) = redact(&out);
-                if hidden > 0 {
-                    meta["redacted"] = hidden.into();
+                let (mut out, mut meta) = finish(reply);
+                if edited(&meta) {
+                    self.passed = None;
                 }
                 if self.repeat.1 >= REPEAT_WARN {
                     let n = self.repeat.1;
@@ -569,7 +610,7 @@ impl Agent {
             let _ = std::fs::copy(self.root.join(current.trim()), &index);
         }
         let others = git(&self.root, Some(&index), &["ls-files", "-z", "-o", "--exclude-standard"])?;
-        let mut args = vec!["add".to_string(), "-A".into(), "--".into(), ".".into()];
+        let mut args = vec!["add".to_string(), "-A".into(), "--ignore-errors".into(), "--".into(), ".".into()];
         let mut hasher = std::hash::DefaultHasher::new();
         for path in others.split('\0').filter(|p| !p.is_empty()) {
             let Ok(meta) = std::fs::symlink_metadata(self.root.join(path)) else { continue };
@@ -578,9 +619,12 @@ impl Agent {
                 args.push(format!(":(exclude,literal){path}"));
             }
         }
-        git(&self.root, Some(&index), &args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        if let Err(e) = git(&self.root, Some(&index), &args.iter().map(String::as_str).collect::<Vec<_>>()) {
+            static SKIPPED: std::sync::Once = std::sync::Once::new();
+            SKIPPED.call_once(|| ui::note(&format!("change detection skips what git cannot add: {e:#}")));
+        }
         let tree = git(&self.root, Some(&index), &["write-tree"])?.trim().to_string();
-        Ok(if args.len() > 4 { format!("{tree} {:016x}", hasher.finish()) } else { tree })
+        Ok(if args.len() > 5 { format!("{tree} {:016x}", hasher.finish()) } else { tree })
     }
 
     fn moved(&self, start: &str) -> bool {
@@ -719,12 +763,12 @@ impl Agent {
     }
 
     pub fn compact(&mut self) -> Result<()> {
-        self.compact_to(self.compact_at as usize / 5)
+        self.compact_to(self.compact_at as usize / 5, false)
     }
 
-    fn compact_to(&mut self, keep_tokens: usize) -> Result<()> {
+    fn compact_to(&mut self, keep_tokens: usize, whole: bool) -> Result<()> {
         let prev = self.session.keep();
-        let keep = compact::cut(&self.session.entries, prev, keep_tokens);
+        let keep = compact::cut(&self.session.entries, prev, keep_tokens, whole);
         if keep <= prev {
             ui::note("nothing to compact");
             return Ok(());
@@ -753,19 +797,22 @@ fn holding<'a>(providers: &'a Providers, model: &str) -> Option<&'a String> {
 
 fn connect(providers: &Providers, header: &Value) -> Result<(String, Llm)> {
     let model = header["model"].as_str().unwrap_or_default();
-    let named = header["provider"].as_str().filter(|n| providers.contains_key(*n));
-    let name = match named.or(holding(providers, model).map(String::as_str)) {
-        Some(name) => name,
-        None => {
-            let first = providers.keys().next().with_context(
-                || "no provider: set base_url in ~/.config/air/config.toml or add one to ~/.config/air/providers.toml",
-            )?;
-            if providers.len() > 1 || header["provider"].is_string() {
-                ui::note(&format!("no provider lists {model}; using {first} (/models or /providers changes it)"));
-            }
-            first.as_str()
+    let recorded = header["provider"].as_str();
+    let listed = holding(providers, model).map(String::as_str);
+    let fallback = providers.get_key_value("config").or(providers.iter().next()).map(|(name, _)| name.as_str());
+    let name =
+        recorded.filter(|n| providers.contains_key(*n)).or(listed).or(fallback).context(
+            "no provider: set base_url in ~/.config/air/config.toml or add one to ~/.config/air/providers.toml",
+        )?;
+    match recorded {
+        Some(old) if old != name => {
+            ui::note(&format!("provider {old} is gone; sending {model} to {name} (/models or /providers changes it)"))
         }
-    };
+        None if listed.is_none() && name != "config" && providers.len() > 1 => {
+            ui::note(&format!("no provider lists {model}; using {name} (/models or /providers changes it)"))
+        }
+        _ => {}
+    }
     let p = &providers[name];
     Ok((name.into(), Llm::new(&p.base_url, p.api_key.as_deref(), header)))
 }
@@ -787,7 +834,6 @@ async fn grouped(mut cmd: tokio::process::Command) -> Result<(bool, String)> {
             }
         }
     };
-    group.0.extend(worker::descendants(pid));
     drop(group);
     let size = file.seek(SeekFrom::End(0))?;
     file.seek(SeekFrom::Start(size.saturating_sub(CHECK_OUT)))?;
@@ -834,7 +880,8 @@ fn secret(s: &str) -> Option<(usize, &'static str)> {
         let upper = prefix == "AKIA";
         let allowed = |c: char| c.is_ascii_alphanumeric() && !(upper && c.is_ascii_lowercase()) || extra.contains(c);
         let len = body.find(|c| !allowed(c)).unwrap_or(body.len());
-        (len >= min).then_some((prefix.len() + len, kind))
+        let keyish = prefix != "sk-" || body[..len].bytes().any(|b| b.is_ascii_digit());
+        (len >= min && keyish).then_some((prefix.len() + len, kind))
     })
 }
 
@@ -883,10 +930,17 @@ fn guard_git(root: &Path) {
     let _ = GIT_GUARD.set((if empty.is_empty() { EMPTY_TREE.into() } else { empty }, args));
 }
 
+fn edited(meta: &Value) -> bool {
+    meta["actions"].as_array().is_some_and(|a| a.iter().any(|a| a["ok"] == true && a["path"].is_string()))
+}
+
 fn finish(mut meta: Value) -> (String, Value) {
-    let out = meta["out"].as_str().unwrap_or_default().to_string();
+    let (out, hidden) = redact(meta["out"].as_str().unwrap_or_default());
     if let Some(fields) = meta.as_object_mut() {
         fields.remove("out");
+    }
+    if hidden > 0 {
+        meta["redacted"] = hidden.into();
     }
     meta["tool"] = "run".into();
     (out, meta)
@@ -987,15 +1041,19 @@ fn git(root: &Path, index: Option<&Path>, args: &[&str]) -> Result<String> {
 
 fn changes(root: &Path, snapshot: Option<(&str, &Path)>, since: std::time::SystemTime) -> String {
     let (base, index) = snapshot.map_or(("HEAD", None), |(tree, index)| (tree, Some(index)));
-    let mut out: Vec<String> =
-        git(root, index, &["diff", "--numstat", "--no-renames", "--no-ext-diff", "--no-textconv", base])
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| match l.splitn(3, '\t').collect::<Vec<_>>()[..] {
-                [added, removed, path] => Some(format!("{path} +{added} −{removed}")),
-                _ => None,
-            })
-            .collect();
+    let diff =
+        git(root, index, &["diff", "--numstat", "--summary", "--no-renames", "--no-ext-diff", "--no-textconv", base])
+            .unwrap_or_default();
+    let created: Vec<&str> =
+        diff.lines().filter_map(|l| l.strip_prefix(" create mode ")?.split_once(' ')).map(|(_, p)| p).collect();
+    let mut out: Vec<String> = diff
+        .lines()
+        .filter_map(|l| match l.splitn(3, '\t').collect::<Vec<_>>()[..] {
+            [_, _, path] if created.contains(&path) => Some(format!("{path} (new)")),
+            [added, removed, path] => Some(format!("{path} +{added} −{removed}")),
+            _ => None,
+        })
+        .collect();
     let new = git(root, index, &["ls-files", "-o", "--exclude-standard"]).unwrap_or_default();
     let fresh = |f: &&str| {
         let meta = std::fs::symlink_metadata(root.join(f));

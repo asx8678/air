@@ -30,7 +30,10 @@ pub fn paint(code: &str, text: &str) -> String {
 }
 
 pub fn printable(text: &str) -> String {
-    text.chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).collect()
+    text.chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .filter(|c| !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200b}' | '\u{feff}'))
+        .collect()
 }
 
 fn size() -> Option<(u16, u16)> {
@@ -328,7 +331,7 @@ pub fn ran(meta: &Value, out: &str) {
     let failed = meta["exception"].is_string() || actions.iter().any(|a| a["ok"] != true);
     let exit = lines.last().and_then(|l| l.strip_prefix("[exit ")).map(|l| l.trim_end_matches(']'));
     let result = if let Some(name) = meta["exception"].as_str() {
-        paint("31", &format!("✗ {name}"))
+        paint("31", &format!("✗ {}", flat(name, 60)))
     } else if let Some(code) = exit {
         paint("31", &format!("✗ exit {code}"))
     } else if !actions.is_empty() {
@@ -356,7 +359,7 @@ pub fn ran(meta: &Value, out: &str) {
         plan(&meta["plan"]);
     }
     for act in &actions {
-        let (tool, ok) = (act["tool"].as_str().unwrap_or_default(), act["ok"] == true);
+        let (tool, ok) = (flat(act["tool"].as_str().unwrap_or_default(), 20), act["ok"] == true);
         let mark = if ok { paint("32", "✓") } else { paint("31", "✗") };
         match act["path"].as_str().map(|p| flat(p, 120)) {
             Some(path) if ok => {

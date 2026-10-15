@@ -23,13 +23,13 @@ pub fn wire(entry: &Value, stripped: bool) -> Value {
     message
 }
 
-pub fn cut(entries: &[Value], prev: usize, keep_tokens: usize) -> usize {
+pub fn cut(entries: &[Value], prev: usize, keep_tokens: usize, whole: bool) -> usize {
     let newest = newest_task(entries);
     let (mut tail, mut keep) = (0, entries.len());
     for i in (prev + 1..entries.len()).rev() {
         let Some(role) = entries[i]["role"].as_str() else { continue };
         tail += wire(&entries[i], newest.is_some_and(|u| i < u)).to_string().len() / 4;
-        if tail > keep_tokens && keep < entries.len() {
+        if tail > keep_tokens && (whole || keep < entries.len()) {
             break;
         }
         if role == "assistant" {
