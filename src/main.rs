@@ -25,8 +25,6 @@ struct Cli {
     model: Option<String>,
     #[arg(long, help = "No sandbox: network on, writes anywhere (env vars stay filtered; env = [...] in ~/.config/air/config.toml passes more)")]
     yolo: bool,
-    #[arg(long, help = "Compare model settings across all sessions: outcomes, waste and cost per turn")]
-    stats: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -63,9 +61,6 @@ async fn main() {
 async fn start() -> Result<()> {
     let cli = Cli::parse();
     let home = PathBuf::from(std::env::var("HOME")?);
-    if cli.stats {
-        return stats::print(&home);
-    }
     if cli.task.as_deref().is_some_and(|t| t.trim().is_empty()) {
         bail!("the task is empty: give air something to do, or run it without a task for the REPL");
     }
