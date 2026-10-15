@@ -46,7 +46,7 @@ fn save(home: &Path, providers: &Providers) -> Result<()> {
     write().inspect_err(|_| drop(std::fs::remove_file(&tmp))).with_context(|| path.display().to_string())
 }
 
-fn key(provider: &Provider) -> &'static str {
+pub fn key(provider: &Provider) -> &'static str {
     match provider.api_key.as_deref() {
         Some("") => "no key",
         Some(_) => "own key",

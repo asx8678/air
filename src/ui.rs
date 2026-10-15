@@ -483,8 +483,7 @@ fn plan(plan: &Value) -> Vec<String> {
 }
 
 pub fn note(text: &str) {
-    settle();
-    println!("{}", paint("33", &format!("· {}", printable(text))));
+    event("note", text, Value::Null);
 }
 
 pub fn now_ms() -> u64 {
@@ -492,11 +491,23 @@ pub fn now_ms() -> u64 {
 }
 
 pub fn event(kind: &str, text: &str, extra: Value) {
-    note(text);
-    let mut entry = serde_json::json!({"event": kind, "text": text, "at": now_ms()});
+    settle();
+    println!("{}", paint("33", &format!("· {}", printable(text))));
+    record(kind, text, extra);
+}
+
+/// Logs an event to the session without showing it.
+pub fn record(kind: &str, text: &str, extra: Value) {
+    let mut entry = serde_json::json!({"event": kind, "text": text});
     if let (Some(entry), Some(extra)) = (entry.as_object_mut(), extra.as_object()) {
         entry.extend(extra.clone());
     }
+    log(entry);
+}
+
+/// Queues an entry for the session's next write, stamped now.
+pub fn log(mut entry: Value) {
+    entry["at"] = now_ms().into();
     EVENTS.lock().unwrap().push(entry);
 }
 

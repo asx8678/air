@@ -27,6 +27,9 @@ const OVERFLOW: &[&str] = &[
 ];
 const QUOTA: &str = "insufficient_quota";
 const REJECTED: &[&str] = &["invalid", "authentication", "permission", "not_found", "insufficient_quota"];
+/// Stream chunk fields air reads itself or that carry nothing; the rest (id, model, provider, …) go in the log.
+const CHUNK: &[&str] = &["choices", "object", "created", "usage", "error", "obfuscation"];
+const HEADERS: &[&str] = &["request-id", "cf-ray", "server", "via", "retry-after", "server-timing"];
 
 #[derive(Debug)]
 pub struct ContextOverflow(String);
@@ -45,6 +48,7 @@ pub struct Lost {
     pub text: usize,
     pub stalled: bool,
     pub ms: u64,
+    pub response: Value,
 }
 
 impl Lost {
@@ -57,7 +61,10 @@ impl Lost {
     }
 
     pub fn extra(&self) -> Value {
-        json!({"chars": self.thinking.chars().count(), "text_chars": self.text, "stalled": self.stalled, "think_ms": self.ms})
+        json!({
+            "chars": self.thinking.chars().count(), "text_chars": self.text, "stalled": self.stalled,
+            "think_ms": self.ms, "response": self.response,
+        })
     }
 }
 
@@ -113,6 +120,30 @@ fn overflow(text: &str) -> bool {
 
 pub fn key_file() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/air/api_key")
+}
+
+/// The URL without credentials, fit for the session log.
+pub fn endpoint(url: &str) -> String {
+    let mut parsed = reqwest::Url::parse(url).ok();
+    if let Some(url) = parsed.as_mut() {
+        let _ = url.set_username("");
+        let _ = url.set_password(None);
+    }
+    crate::agent::redact(&parsed.map_or_else(|| url.to_string(), String::from)).0
+}
+
+/// The response headers worth keeping: request ids, rate limits, timing and routing; never cookies or credentials.
+fn headers(map: &reqwest::header::HeaderMap) -> Value {
+    let kept = map.iter().filter(|(name, _)| {
+        let name = name.as_str();
+        let wanted = ["x-", "openai-", "anthropic-"].iter().any(|p| name.starts_with(p)) || HEADERS.contains(&name);
+        // Not "token" anywhere: x-ratelimit-remaining-tokens is the point; x-csrf-token is not.
+        let secret = ["cookie", "auth", "key", "secret"].iter().any(|s| name.contains(s)) || name.ends_with("token");
+        wanted && !secret
+    });
+    let value =
+        |v: &reqwest::header::HeaderValue| clip(&crate::agent::redact(&String::from_utf8_lossy(v.as_bytes())).0);
+    kept.map(|(name, v)| (name.as_str().to_string(), Value::from(value(v)))).collect()
 }
 
 pub struct Llm {
@@ -179,18 +210,17 @@ impl Llm {
                 fields.insert(field.into(), reasoning);
             }
         }
+        let count = messages.len();
         let mut body = self.params.as_object().cloned().unwrap_or_default();
         body.insert("model".into(), self.model.as_str().into());
         body.insert("messages".into(), Value::Array(messages));
         body.insert("tools".into(), tools.clone());
         body.insert("stream".into(), true.into());
         body.insert("stream_options".into(), json!({"include_usage": true}));
-        let mut request = self
-            .http
-            .post(format!("{}/chat/completions", self.base))
-            .header("content-type", "application/json")
-            .header("user-agent", USER_AGENT)
-            .body(serde_json::to_vec(&body)?);
+        let (url, bytes) = (format!("{}/chat/completions", self.base), serde_json::to_vec(&body)?);
+        let asked = json!({"url": endpoint(&url), "model": self.model, "messages": count, "bytes": bytes.len()});
+        let mut request =
+            self.http.post(url).header("content-type", "application/json").header("user-agent", USER_AGENT).body(bytes);
         if let Some(id) = &self.session {
             request = request.header("x-opencode-session", id.as_str());
         }
@@ -206,6 +236,7 @@ impl Llm {
                     let mut extra = lost(&e).map_or(json!({}), Lost::extra);
                     extra["attempt"] = attempt.into();
                     extra["ms"] = (began.elapsed().as_millis() as u64).into();
+                    extra["request"] = asked.clone();
                     if attempt == 4 || began.elapsed() > LONG {
                         crate::ui::event("interrupted", &e.to_string(), extra);
                         return Err(e);
@@ -216,6 +247,7 @@ impl Llm {
                 Ok(mut message) => {
                     message["meta"]["timing"]["ms"] = (start.elapsed().as_millis() as u64).into();
                     message["meta"]["timing"]["attempts"] = attempt.into();
+                    message["meta"]["request"] = asked;
                     return Ok(message);
                 }
                 result => return result,
@@ -226,6 +258,7 @@ impl Llm {
 
     async fn stream(&self, request: &reqwest::RequestBuilder, limit: Option<usize>) -> Result<Value> {
         let (mut response, sent) = self.send(request).await?;
+        let mut served = json!({"status": response.status().as_u16(), "headers": headers(response.headers())});
         let kind = response.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or_default();
         let kind = kind.to_lowercase();
         if kind.contains("html") || kind.contains("json") {
@@ -281,6 +314,11 @@ impl Llm {
                     broken = Some(format!("provider error: {}", clip(&crate::agent::redact(&error.to_string()).0)));
                     break 'read;
                 }
+                for (key, value) in event.as_object().into_iter().flatten() {
+                    if !CHUNK.contains(&key.as_str()) && !value.is_null() {
+                        served[key.as_str()] = value.clone();
+                    }
+                }
                 if event["usage"].is_object() {
                     usage = event["usage"].clone();
                 }
@@ -310,7 +348,10 @@ impl Llm {
                         crate::ui::thinking(&thinking, began.elapsed().as_secs());
                     }
                     if let Some(limit) = limit.filter(|l| chars / 4 > *l && text.is_empty() && calls.is_empty()) {
-                        return Err(Overthought(limit as u64, Lost::new(&thinking, Some(began))).into());
+                        let mut lost = Lost::new(&thinking, Some(began));
+                        (served["bytes"], served["events"]) = (got.into(), events.into());
+                        lost.response = served;
+                        return Err(Overthought(limit as u64, lost).into());
                     }
                 }
                 if delta["tool_calls"].is_array() || !t.is_empty() {
@@ -379,6 +420,7 @@ impl Llm {
                 break;
             }
         }
+        (served["bytes"], served["events"]) = (got.into(), events.into());
         let open = inline.inside == Some(true) && via.is_none();
         let (inner, rest) = inline.finish();
         thinking += &inner;
@@ -438,6 +480,7 @@ impl Llm {
             let mut lost = Lost::new(&thinking, began);
             lost.text = text.chars().count() + calls.iter().map(|c| c[2].len()).sum::<usize>();
             lost.stalled = stalled;
+            lost.response = served;
             return Err(Interrupted(why, lost).into());
         }
         if answering {
@@ -447,11 +490,16 @@ impl Llm {
             markdown.push(&held);
             markdown.finish();
         }
+        let end = Instant::now();
         let ms = |a: Instant, b: Option<Instant>| b.map(|b| b.duration_since(a).as_millis() as u64);
-        let timing =
-            json!({"ttft_ms": ms(sent, first), "think_ms": began.and_then(|b| ms(b, spoke.or(Some(Instant::now()))))});
-        let mut message =
-            json!({"role": "assistant", "content": text, "meta": {"usage": usage, "timing": timing, "finish": reason}});
+        // Output tokens (reasoning included) per second, from the first token to the end of the stream.
+        let speed = |(first, out): (Instant, u64)| (out as f64 / (end - first).as_secs_f64() * 10.0).round() / 10.0;
+        let timing = json!({
+            "ttft_ms": ms(sent, first), "think_ms": began.and_then(|b| ms(b, spoke.or(Some(end)))),
+            "stream_ms": ms(sent, Some(end)), "tps": first.zip(usage["completion_tokens"].as_u64()).map(speed),
+        });
+        let meta = json!({"usage": usage, "timing": timing, "finish": reason, "response": served});
+        let mut message = json!({"role": "assistant", "content": text, "meta": meta});
         if !thinking.is_empty() {
             message["reasoning_content"] = thinking.into();
         }
@@ -604,6 +652,35 @@ mod tests {
     #[test]
     fn names_itself() {
         assert!(USER_AGENT.starts_with("air/"));
+    }
+
+    #[test]
+    fn logs_no_credentials() {
+        assert_eq!(
+            endpoint("https://me:pw@api.example.com/v1/chat/completions"),
+            "https://api.example.com/v1/chat/completions"
+        );
+        let mut map = reqwest::header::HeaderMap::new();
+        for (name, value) in [
+            ("x-request-id", "req_1"),
+            ("x-ratelimit-remaining-tokens", "9000"),
+            ("cf-ray", "8a1-AMS"),
+            ("x-echo", "sk-abc123def456ghi789jkl0"),
+            ("set-cookie", "session=1"),
+            ("x-api-key", "k"),
+            ("x-csrf-token", "t"),
+            ("content-type", "text/event-stream"),
+        ] {
+            map.insert(
+                reqwest::header::HeaderName::from_static(name),
+                reqwest::header::HeaderValue::from_static(value),
+            );
+        }
+        let kept = json!({
+            "x-request-id": "req_1", "x-ratelimit-remaining-tokens": "9000", "cf-ray": "8a1-AMS",
+            "x-echo": "[redacted api key]",
+        });
+        assert_eq!(headers(&map), kept);
     }
 
     #[test]

@@ -325,7 +325,7 @@ class _Helpers:
 sh.sh = sys.modules["sh"] = sh
 sys.meta_path.append(_Helpers())
 signal.signal(signal.SIGINT, signal.SIG_IGN)
-_outbox.write('{"ready": true}\n')
+_outbox.write(json.dumps({"ready": True, "python": sys.version.split()[0]}) + "\n")
 _outbox.flush()
 for request in _inbox:
     request = json.loads(request)

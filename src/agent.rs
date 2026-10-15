@@ -92,8 +92,9 @@ pub struct Agent {
 impl Agent {
     pub fn new(root: &Path, home: &Path, config: Config, resume: bool, yolo: bool) -> Result<Self> {
         guard_git(root);
+        let context = context(root, &config, yolo);
         let session = if resume {
-            Session::resume(home, root)?
+            Session::resume(home, root, context)?
         } else {
             let model = config
                 .model
@@ -112,7 +113,7 @@ impl Agent {
             };
             let profile = config.models.get(&model).cloned().unwrap_or_default();
             let system = system_prompt(root, yolo, profile.get("guidance").and_then(Value::as_str));
-            Session::create(home, root, provider, &model, &system, profile)?
+            Session::create(home, root, provider, &model, &system, profile, context)?
         };
         let (provider, llm) = connect(&config.providers, session.header())?;
         let mut since = session.entries.iter().rev().take_while(|e| e["switch"].is_null());
@@ -283,7 +284,9 @@ impl Agent {
         self.session.flush()?;
         let (began, clock) = (self.session.entries.len(), Instant::now());
         let start = self.tree().await?;
-        self.session.push(json!({"role": "user", "content": task, "meta": {"snapshot": start}}))?;
+        let snapshot_ms = clock.elapsed().as_millis() as u64;
+        self.session
+            .push(json!({"role": "user", "content": task, "meta": {"snapshot": start, "snapshot_ms": snapshot_ms}}))?;
         self.current = Some((began, clock));
         let (mut nudged, mut overflowed, mut nudges, mut cut) = (false, false, 0, false);
         let ceiling = self.session.header()["turn_tokens"].as_u64().unwrap_or(self.compact_at * TURN_BUDGET);
@@ -392,10 +395,7 @@ impl Agent {
             let changed = self.changed(&start, began).await;
             let mut checked = false;
             if changed && let Some(check) = &self.config.check {
-                let clock = Instant::now();
                 let (ok, out) = self.verify(&check.clone(), true).await;
-                let ms = clock.elapsed().as_millis() as u64;
-                self.session.push(json!({"check": {"ok": ok, "ms": ms, "out": compact::tail(&out, 1500)}}))?;
                 if !ok && !nudged {
                     nudged = true;
                     ui::event("nudge", "the check failed on the final tree: asking the model to fix it", Value::Null);
@@ -560,11 +560,15 @@ impl Agent {
     }
 
     async fn verify(&mut self, check: &str, gate: bool) -> (bool, String) {
+        let clock = Instant::now();
         let before = self.tree().await;
         if let (Ok(tree), Some((passed, out))) = (&before, &self.passed)
             && tree == passed
         {
             let out = format!("{out}\n[reused: the tree is unchanged since this check passed]");
+            ui::log(
+                json!({"check": {"ok": true, "gate": gate, "reused": true, "ms": clock.elapsed().as_millis() as u64}}),
+            );
             return (true, out);
         }
         if gate {
@@ -594,6 +598,8 @@ impl Agent {
             ui::ran(&json!({"actions": [{"tool": "check", "ok": false}]}), &out);
         }
         self.passed = after.ok().filter(|_| ok).map(|tree| (tree, out.clone()));
+        let ms = clock.elapsed().as_millis() as u64;
+        ui::log(json!({"check": {"ok": ok, "gate": gate, "ms": ms, "out": compact::tail(&out, 1500)}}));
         (ok, out)
     }
 
@@ -810,6 +816,9 @@ fn connect(providers: &Providers, header: &Value) -> Result<(String, Llm)> {
             ui::printable(&p.base_url)
         );
     }
+    let url = llm::endpoint(&p.base_url);
+    let extra = json!({"provider": name, "model": model, "base_url": url, "key": crate::providers::key(p)});
+    ui::record("connect", &format!("{model} on {name} at {url}"), extra);
     Ok((name.into(), Llm::new(&p.base_url, p.api_key.as_deref(), header)))
 }
 
@@ -924,6 +933,25 @@ fn guard_git(root: &Path) {
         std::process::Command::new("git").args(["hash-object", "-t", "tree", "/dev/null"]).current_dir(root).output();
     let empty = empty.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
     let _ = GIT_GUARD.set((if empty.is_empty() { EMPTY_TREE.into() } else { empty }, args));
+}
+
+/// What a reader of the session log needs to know about this process: the build, git, the sandbox, the check.
+fn context(root: &Path, config: &Config, yolo: bool) -> serde_json::Map<String, Value> {
+    let rev = |args: &[&str]| git(root, None, args).ok().map(|out| out.trim().to_string()).filter(|s| !s.is_empty());
+    let sandbox = match (yolo, cfg!(target_os = "macos")) {
+        (true, _) => "none (--yolo)",
+        (false, true) => "sandbox-exec",
+        (false, false) => "bwrap",
+    };
+    let context = json!({
+        "air": format!("{} {}", env!("CARGO_PKG_VERSION"), env!("AIR_BUILD")),
+        "pid": std::process::id(), "os": std::env::consts::OS, "arch": std::env::consts::ARCH,
+        "branch": rev(&["symbolic-ref", "--short", "-q", "HEAD"]),
+        "head": rev(&["rev-parse", "-q", "--verify", "HEAD"]),
+        "sandbox": sandbox, "env": config.env,
+        "check": config.check.as_deref().map(|c| redact(c).0), "fmt": config.fmt.as_deref().map(|f| redact(f).0),
+    });
+    context.as_object().cloned().unwrap_or_default()
 }
 
 fn edited(meta: &Value) -> bool {

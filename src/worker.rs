@@ -45,6 +45,7 @@ pub struct Worker {
     busy: bool,
     ready: bool,
     child: Child,
+    started: std::time::Instant,
 }
 
 impl Worker {
@@ -67,16 +68,20 @@ impl Worker {
             .context(StartFailed)?;
         let stdin = child.stdin.take().context("worker stdin")?;
         let stdout = BufReader::new(child.stdout.take().context("worker stdout")?).lines();
-        Ok(Self { stdin, stdout, busy: false, ready: false, child })
+        Ok(Self { stdin, stdout, busy: false, ready: false, child, started: std::time::Instant::now() })
     }
 
     pub async fn run(&mut self, code: &str, state: &Value) -> Result<Value> {
         if !self.ready {
             let line = tokio::time::timeout(Duration::from_secs(60), self.stdout.next_line()).await;
-            if !matches!(line, Ok(Ok(Some(_)))) {
+            let Ok(Ok(Some(line))) = line else {
                 return Err(anyhow!("the worker exited before it was ready").context(StartFailed));
-            }
+            };
             self.ready = true;
+            let python = serde_json::from_str::<Value>(&line).unwrap_or_default()["python"].take();
+            let ms = self.started.elapsed().as_millis() as u64;
+            let text = format!("python {} worker ready in {ms} ms", python.as_str().unwrap_or("?"));
+            crate::ui::record("worker", &text, json!({"pid": self.child.id(), "python": python, "ms": ms}));
         }
         self.send(json!({"code": code, "state": state})).await
     }

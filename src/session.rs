@@ -1,15 +1,25 @@
+//! A session is one JSONL file in ~/.air/sessions, named <unix secs>-<pid>. Line 0 is the header: settings, cwd,
+//! build, git and sandbox. Each later line is one of
+//! - a message {role, content, tool_calls?, reasoning_content?, meta}: an assistant's meta holds the request's
+//!   usage, timing, request and response; a tool's meta holds the run's actions, commands, errors and ms
+//! - {event, text, ...}: retries, cut streams, nudges, the notes shown to the user, connects, commands
+//! - {check}, {report} per turn, {compact}, {switch}, {resume}, and {end} with this run's totals
+//!
+//! Every line has a wall-clock `at` in ms, in meta for messages since meta never goes on the wire. The sandboxed
+//! worker can read the log (recall()), so nothing secret goes into it.
 use anyhow::{Result, bail};
 use serde_json::{Map, Value, json};
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub struct Session {
     pub path: PathBuf,
     pub entries: Vec<Value>,
     file: File,
+    opened: (usize, Instant),
 }
 
 #[derive(Default)]
@@ -27,6 +37,7 @@ impl Session {
         model: &str,
         system: &str,
         profile: Map<String, Value>,
+        context: Map<String, Value>,
     ) -> Result<Self> {
         let dir = home.join(".air/sessions");
         DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
@@ -34,13 +45,16 @@ impl Session {
         let path = dir.join(format!("{secs}-{}.jsonl", std::process::id()));
         let file = OpenOptions::new().create_new(true).append(true).mode(0o600).open(&path)?;
         file.try_lock()?;
-        let mut session = Self { path, entries: vec![], file };
+        let mut session = Self { path, entries: vec![], file, opened: (0, Instant::now()) };
         let mut header = settings(provider, model, system, profile);
         header["cwd"] = json!(root);
-        header["air"] = format!("{} {}", env!("CARGO_PKG_VERSION"), env!("AIR_BUILD")).into();
         // One stable id per conversation; OpenCode's gateway routes by it.
         header["id"] = session.path.file_stem().map(|s| s.to_string_lossy().into_owned()).into();
-        session.push(header)?;
+        if let Some(fields) = header.as_object_mut() {
+            fields.extend(context);
+        }
+        // Not push(): events noted before the session existed must not land above the header.
+        session.write(header)?;
         Ok(session)
     }
 
@@ -56,7 +70,7 @@ impl Session {
         self.entries.iter().rev().find_map(|e| e.get("switch")).unwrap_or(&self.entries[0])
     }
 
-    pub fn resume(home: &Path, root: &Path) -> Result<Self> {
+    pub fn resume(home: &Path, root: &Path, context: Map<String, Value>) -> Result<Self> {
         let mut paths: Vec<PathBuf> = fs::read_dir(home.join(".air/sessions"))
             .into_iter()
             .flatten()
@@ -84,7 +98,10 @@ impl Session {
                 let mut entries: Vec<Value> = text.lines().map(serde_json::from_str).collect::<Result<_, _>>()?;
                 backfill_id(&mut entries, &path.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default());
                 eprintln!("[resumed {}]", path.display());
-                return Ok(Self { file, path, entries });
+                let opened = (entries.len(), Instant::now());
+                let mut session = Self { file, path, entries, opened };
+                session.push(json!({"resume": context}))?;
+                return Ok(session);
             }
         }
         bail!("no session to resume for {}", root.display())
@@ -99,7 +116,8 @@ impl Session {
         crate::ui::events().into_iter().try_for_each(|event| self.write(event))
     }
 
-    fn write(&mut self, entry: Value) -> Result<()> {
+    fn write(&mut self, mut entry: Value) -> Result<()> {
+        stamp(&mut entry, crate::ui::now_ms());
         self.file.write_all(format!("{entry}\n").as_bytes())?;
         self.entries.push(entry);
         Ok(())
@@ -187,6 +205,24 @@ impl Session {
     }
 }
 
+/// Every way out of air short of a signal drops the session, so each run ends with its totals.
+impl Drop for Session {
+    fn drop(&mut self) {
+        let _ = self.flush();
+        let (from, clock) = self.opened;
+        let mut totals = crate::stats::totals(&self.entries[from..]);
+        totals["ms"] = (clock.elapsed().as_millis() as u64).into();
+        let _ = self.push(json!({"end": totals}));
+    }
+}
+
+fn stamp(entry: &mut Value, at: u64) {
+    let fields = if entry["role"].is_string() { &mut entry["meta"] } else { entry };
+    if fields.get("at").is_none() {
+        fields["at"] = at.into();
+    }
+}
+
 fn settings(provider: &str, model: &str, system: &str, mut params: Map<String, Value>) -> Value {
     let compact_at = params.remove("compact_at");
     let guidance = params.remove("guidance");
@@ -218,8 +254,18 @@ fn backfill_id(entries: &mut [Value], id: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::backfill_id;
+    use super::{backfill_id, stamp};
     use serde_json::json;
+
+    #[test]
+    fn stamps_stay_off_the_wire() {
+        let (mut user, mut event) = (json!({"role": "user", "content": "x"}), json!({"event": "retry", "at": 1}));
+        stamp(&mut user, 7);
+        stamp(&mut event, 7);
+        assert_eq!(user, json!({"role": "user", "content": "x", "meta": {"at": 7}}));
+        assert_eq!(event["at"], 1);
+        assert_eq!(crate::compact::wire(&user, false), json!({"role": "user", "content": "x"}));
+    }
 
     #[test]
     fn resumed_logs_get_the_file_id() {

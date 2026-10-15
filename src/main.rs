@@ -76,11 +76,15 @@ async fn start() -> Result<()> {
     let root = PathBuf::from(String::from_utf8(top.stdout)?.trim()).canonicalize()?;
     let user = load(&home.join(".config/air/config.toml"))?;
     let repo = load(&root.join("air.toml"))?;
+    let warn = |text: &str| {
+        eprintln!("{text}");
+        ui::record("note", text, serde_json::Value::Null);
+    };
     if repo.model.is_some() || repo.base_url.is_some() || !repo.models.is_empty() {
-        eprintln!("air.toml: model, base_url and models are ignored; set them in ~/.config/air/config.toml");
+        warn("air.toml: model, base_url and models are ignored; set them in ~/.config/air/config.toml");
     }
     if !repo.env.is_empty() {
-        eprintln!("air.toml: env is ignored; set env in ~/.config/air/config.toml");
+        warn("air.toml: env is ignored; set env in ~/.config/air/config.toml");
     }
     let fallback = user.base_url.map(|base_url| {
         let models = user.model.iter().cloned().collect();
@@ -102,8 +106,10 @@ async fn start() -> Result<()> {
     if let Some(model) = picked {
         agent.resume_with(&model)?;
     }
-    if let Some(task) = cli.task {
+    if !cli.resume {
         eprintln!("[session {}]", agent.path().display());
+    }
+    if let Some(task) = cli.task {
         let verified = agent.run(&task).await?;
         drop(agent);
         std::process::exit(if verified { 0 } else { 1 });
@@ -149,8 +155,12 @@ async fn start() -> Result<()> {
                 agent.run(task).await.map(drop)
             }
         };
-        if let Err(e) = result {
-            eprintln!("error: {}", agent::redact(&ui::printable(&format!("{e:#}"))).0);
+        let error = result.err().map(|e| agent::redact(&ui::printable(&format!("{e:#}"))).0);
+        if COMMANDS.contains(&line.split_whitespace().next().unwrap_or_default()) {
+            ui::record("command", line, serde_json::json!({"error": error}));
+        }
+        if let Some(error) = error {
+            eprintln!("error: {error}");
         }
     }
 }
