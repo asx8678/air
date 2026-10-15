@@ -1,0 +1,1150 @@
+   Compiling air v0.1.0 (/Users/adam2/projects/air)
+warning: binding's name is too similar to existing binding
+   --> src/agent.rs:285:46
+    |
+285 |         let (mut nudged, mut overflowed, mut nudges, mut cut) = (false, false, 0, false);
+    |                                              ^^^^^^
+    |
+note: existing binding defined here
+   --> src/agent.rs:285:18
+    |
+285 |         let (mut nudged, mut overflowed, mut nudges, mut cut) = (false, false, 0, false);
+    |                  ^^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#similar_names
+    = note: `-W clippy::similar-names` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::similar_names)]`
+
+warning: binding's name is too similar to existing binding
+   --> src/agent.rs:640:13
+    |
+640 |         let changes = changes(&self.root, snapshot.map(|tree| (tree, index.as_path())), since);
+    |             ^^^^^^^
+    |
+note: existing binding defined here
+   --> src/agent.rs:634:26
+    |
+634 |     fn report(&mut self, changed: Option<bool>, checked: bool, began: usize, clock: Instant) -> Result<bool> {
+    |                          ^^^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#similar_names
+
+warning: binding's name is too similar to existing binding
+   --> src/agent.rs:721:13
+    |
+721 |         let changes: Vec<&str> = changes.lines().filter(|l| *l != "none").collect();
+    |             ^^^^^^^
+    |
+note: existing binding defined here
+   --> src/agent.rs:634:26
+    |
+634 |     fn report(&mut self, changed: Option<bool>, checked: bool, began: usize, clock: Instant) -> Result<bool> {
+    |                          ^^^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#similar_names
+
+warning: binding's name is too similar to existing binding
+  --> src/compact.rs:58:13
+   |
+58 |         let user = if Some(u) == current {
+   |             ^^^^
+   |
+note: existing binding defined here
+  --> src/compact.rs:52:28
+   |
+52 |     let (mut dialogue, mut used) = (vec![], 0);
+   |                            ^^^^
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#similar_names
+
+warning: binding's name is too similar to existing binding
+   --> src/ui.rs:271:13
+    |
+271 |         let line = lines.last_mut().expect("never empty");
+    |             ^^^^
+    |
+note: existing binding defined here
+   --> src/ui.rs:262:13
+    |
+262 |     let mut live = LIVE.lock().unwrap();
+    |             ^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#similar_names
+
+warning: binding's name is too similar to existing binding
+   --> src/ui.rs:275:13
+    |
+275 |         let line = lines.last_mut().expect("never empty");
+    |             ^^^^
+    |
+note: existing binding defined here
+   --> src/ui.rs:262:13
+    |
+262 |     let mut live = LIVE.lock().unwrap();
+    |             ^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#similar_names
+
+warning: binding's name is too similar to existing binding
+   --> src/ui.rs:393:14
+    |
+393 |         let (tool, ok) = (flat(act["tool"].as_str().unwrap_or_default(), 20), act["ok"] == true);
+    |              ^^^^
+    |
+note: existing binding defined here
+   --> src/ui.rs:361:9
+    |
+361 |     let took = started.map(|s| s.elapsed().as_secs_f64()).filter(|&s| s >= 1.0);
+    |         ^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#similar_names
+
+warning: constructing a `Duration` using a smaller unit when a larger unit would be more readable
+  --> src/agent.rs:33:33
+   |
+33 | const CHECK_TIMEOUT: Duration = Duration::from_secs(1800);
+   |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#duration_suboptimal_units
+   = note: `-W clippy::duration-suboptimal-units` implied by `-W clippy::pedantic`
+   = help: to override `-W clippy::pedantic` add `#[allow(clippy::duration_suboptimal_units)]`
+help: try using `Duration::from_mins`
+   |
+33 - const CHECK_TIMEOUT: Duration = Duration::from_secs(1800);
+33 + const CHECK_TIMEOUT: Duration = Duration::from_mins(30);
+   |
+
+warning: this function has too many lines (139/100)
+   --> src/agent.rs:275:5
+    |
+275 |     async fn turn(&mut self, task: &str) -> Result<bool> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#too_many_lines
+    = note: `-W clippy::too-many-lines` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::too_many_lines)]`
+
+warning: casting `u64` to `usize` may truncate the value on targets with 32-bit wide pointers
+   --> src/agent.rs:278:29
+    |
+278 |             self.compact_to(self.compact_at as usize / 10, false)?;
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+    = note: `-W clippy::cast-possible-truncation` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::cast_possible_truncation)]`
+help: ... or use `try_from` and handle the error accordingly
+    |
+278 -             self.compact_to(self.compact_at as usize / 10, false)?;
+278 +             self.compact_to(usize::try_from(self.compact_at) / 10, false)?;
+    |
+
+warning: casting `u64` to `usize` may truncate the value on targets with 32-bit wide pointers
+   --> src/agent.rs:313:95
+    |
+313 |                     let agents = std::fs::metadata(self.root.join("AGENTS.md")).map_or(0, |m| m.len() as usize);
+    |                                                                                               ^^^^^^^^^^^^^^^^
+    |
+    = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+help: ... or use `try_from` and handle the error accordingly
+    |
+313 -                     let agents = std::fs::metadata(self.root.join("AGENTS.md")).map_or(0, |m| m.len() as usize);
+313 +                     let agents = std::fs::metadata(self.root.join("AGENTS.md")).map_or(0, |m| usize::try_from(m.len()));
+    |
+
+warning: casting `u128` to `u64` may truncate the value
+   --> src/agent.rs:394:26
+    |
+394 |                 let ms = clock.elapsed().as_millis() as u64;
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+help: ... or use `try_from` and handle the error accordingly
+    |
+394 -                 let ms = clock.elapsed().as_millis() as u64;
+394 +                 let ms = u64::try_from(clock.elapsed().as_millis());
+    |
+
+warning: casting `u64` to `usize` may truncate the value on targets with 32-bit wide pointers
+   --> src/agent.rs:441:25
+    |
+441 |         self.compact_to(self.compact_at as usize / 5, true)?;
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+help: ... or use `try_from` and handle the error accordingly
+    |
+441 -         self.compact_to(self.compact_at as usize / 5, true)?;
+441 +         self.compact_to(usize::try_from(self.compact_at) / 5, true)?;
+    |
+
+warning: `format!(..)` appended to existing `String`
+   --> src/agent.rs:530:21
+    |
+530 | /                     out +=
+531 | |                         &format!("\n[the same code has now run {n} times in a row; at {REPEAT_BLOCK} it is blocked]");
+    | |_____________________________________________________________________________________________________________________^
+    |
+    = note: you may need to import the `std::fmt::Write` trait
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#format_push_string
+    = note: `-W clippy::format-push-string` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::format_push_string)]`
+help: consider using `write!` to avoid the extra allocation
+    |
+530 -                     out +=
+531 -                         &format!("\n[the same code has now run {n} times in a row; at {REPEAT_BLOCK} it is blocked]");
+530 +                     let _ = write!(out, "\n[the same code has now run {n} times in a row; at {REPEAT_BLOCK} it is blocked]");
+    |
+
+warning: casting `u128` to `u64` may truncate the value
+   --> src/agent.rs:533:30
+    |
+533 |                 meta["ms"] = (clock.elapsed().as_millis() as u64).into();
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+help: ... or use `try_from` and handle the error accordingly
+    |
+533 -                 meta["ms"] = (clock.elapsed().as_millis() as u64).into();
+533 +                 meta["ms"] = u64::try_from(clock.elapsed().as_millis()).into();
+    |
+
+warning: casting `u128` to `u64` may truncate the value
+   --> src/agent.rs:545:66
+    |
+545 |                 (out, json!({"tool": "run", "error": true, "ms": clock.elapsed().as_millis() as u64}))
+    |                                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+help: ... or use `try_from` and handle the error accordingly
+    |
+545 -                 (out, json!({"tool": "run", "error": true, "ms": clock.elapsed().as_millis() as u64}))
+545 +                 (out, json!({"tool": "run", "error": true, "ms": u64::try_from(clock.elapsed().as_millis())}))
+    |
+
+warning: casting `u128` to `u64` may truncate the value
+   --> src/agent.rs:708:18
+    |
+708 |         let ms = clock.elapsed().as_millis() as u64;
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+help: ... or use `try_from` and handle the error accordingly
+    |
+708 -         let ms = clock.elapsed().as_millis() as u64;
+708 +         let ms = u64::try_from(clock.elapsed().as_millis());
+    |
+
+warning: called `filter_map(..).next()` on an `Iterator`
+   --> src/agent.rs:749:22
+    |
+749 |         let stored = entries.filter_map(|(i, e)| e["reasoning_content"].as_str().map(|r| (i, r))).next();
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#filter_map_next
+    = note: `-W clippy::filter-map-next` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::filter_map_next)]`
+help: use `.find_map(..)` instead
+    |
+749 -         let stored = entries.filter_map(|(i, e)| e["reasoning_content"].as_str().map(|r| (i, r))).next();
+749 +         let stored = entries.find_map(|(i, e)| e["reasoning_content"].as_str().map(|r| (i, r)));
+    |
+
+warning: casting `u64` to `usize` may truncate the value on targets with 32-bit wide pointers
+   --> src/agent.rs:760:25
+    |
+760 |         self.compact_to(self.compact_at as usize / 5, false)
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+help: ... or use `try_from` and handle the error accordingly
+    |
+760 -         self.compact_to(self.compact_at as usize / 5, false)
+760 +         self.compact_to(usize::try_from(self.compact_at) / 5, false)
+    |
+
+warning: consider adding a `;` to the last statement for consistent formatting
+   --> src/agent.rs:809:13
+    |
+809 |             ui::note(&format!("provider {old} is gone; sending {model} to {name} (/models or /providers changes it)"))
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: add a `;` here: `ui::note(&format!("provider {old} is gone; sending {model} to {name} (/models or /providers changes it)"));`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#semicolon_if_nothing_returned
+    = note: `-W clippy::semicolon-if-nothing-returned` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::semicolon_if_nothing_returned)]`
+
+warning: consider adding a `;` to the last statement for consistent formatting
+   --> src/agent.rs:812:13
+    |
+812 |             ui::note(&format!("no provider lists {model}; using {name} (/models or /providers changes it)"))
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: add a `;` here: `ui::note(&format!("no provider lists {model}; using {name} (/models or /providers changes it)"));`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#semicolon_if_nothing_returned
+
+warning: casting `u32` to `i32` may wrap around the value
+   --> src/agent.rs:825:15
+    |
+825 |     let pid = child.id().context("the check exited before it started")? as i32;
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, use `cast_signed()` instead: `child.id().context("the check exited before it started")?.cast_signed()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_wrap
+    = note: `-W clippy::cast-possible-wrap` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::cast_possible_wrap)]`
+
+warning: matching over `()` is more explicit
+   --> src/agent.rs:831:13
+    |
+831 |             _ = tokio::time::sleep(Duration::from_secs(1)) => {
+    |             ^ help: use `()` instead of `_`: `()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#ignored_unit_patterns
+    = note: `-W clippy::ignored-unit-patterns` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::ignored_unit_patterns)]`
+
+warning: `format!(..)` appended to existing `String`
+   --> src/agent.rs:857:13
+    |
+857 |             out += &format!("[redacted {kind}]");
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: you may need to import the `std::fmt::Write` trait
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#format_push_string
+help: consider using `write!` to avoid the extra allocation
+    |
+857 -             out += &format!("[redacted {kind}]");
+857 +             let _ = write!(out, "[redacted {kind}]");
+    |
+
+warning: `format!(..)` appended to existing `String`
+   --> src/agent.rs:965:13
+    |
+965 | /             prompt +=
+966 | |                 &format!("\n\n[AGENTS.md clipped to its first {kept} KB of {all} KB; read the file for the rest]");
+    | |__________________________________________________________________________________________________________________^
+    |
+    = note: you may need to import the `std::fmt::Write` trait
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#format_push_string
+help: consider using `write!` to avoid the extra allocation
+    |
+965 -             prompt +=
+966 -                 &format!("\n\n[AGENTS.md clipped to its first {kept} KB of {all} KB; read the file for the rest]");
+965 +             let _ = write!(prompt, "\n\n[AGENTS.md clipped to its first {kept} KB of {all} KB; read the file for the rest]");
+    |
+
+warning: `format!(..)` appended to existing `String`
+   --> src/agent.rs:993:9
+    |
+993 |         prompt += &format!("\n\n# Repository at session start ({} tracked files; folders show counts)\n", files.len());
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: you may need to import the `std::fmt::Write` trait
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#format_push_string
+help: consider using `write!` to avoid the extra allocation
+    |
+993 -         prompt += &format!("\n\n# Repository at session start ({} tracked files; folders show counts)\n", files.len());
+993 +         let _ = write!(prompt, "\n\n# Repository at session start ({} tracked files; folders show counts)\n", files.len());
+    |
+
+warning: `format!(..)` appended to existing `String`
+   --> src/agent.rs:995:13
+    |
+995 |             prompt += &if path.ends_with('/') { format!("{path} ({n} files)\n") } else { format!("{path}\n") };
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-------------------------------^^^^^^^^^^-------------------^^
+    |                                                 |                                        |
+    |                                                 |                                        `format!` used here
+    |                                                 `format!` used here
+    |
+    = help: consider using `write!` to avoid the extra allocation
+    = note: you may need to import the `std::fmt::Write` trait
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#format_push_string
+
+warning: `format!(..)` appended to existing `String`
+   --> src/agent.rs:998:9
+    |
+998 |         prompt += &format!("\n\n# Repository files at session start ({} tracked, size in bytes)\n", files.len());
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: you may need to import the `std::fmt::Write` trait
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#format_push_string
+help: consider using `write!` to avoid the extra allocation
+    |
+998 -         prompt += &format!("\n\n# Repository files at session start ({} tracked, size in bytes)\n", files.len());
+998 +         let _ = write!(prompt, "\n\n# Repository files at session start ({} tracked, size in bytes)\n", files.len());
+    |
+
+warning: `format!(..)` appended to existing `String`
+    --> src/agent.rs:1001:13
+     |
+1001 |             prompt += &format!("{file} {size}\n");
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: you may need to import the `std::fmt::Write` trait
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#format_push_string
+help: consider using `write!` to avoid the extra allocation
+     |
+1001 -             prompt += &format!("{file} {size}\n");
+1001 +             let _ = write!(prompt, "{file} {size}\n");
+     |
+
+warning: this function has too many lines (175/100)
+  --> src/compact.rs:42:1
+   |
+42 | pub fn summary(entries: &[Value], keep: usize) -> String {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#too_many_lines
+
+warning: `format!(..)` appended to existing `String`
+   --> src/compact.rs:219:9
+    |
+219 |         out += &format!("\n\n{}\n{}", baked(u), text(u));
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: you may need to import the `std::fmt::Write` trait
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#format_push_string
+help: consider using `write!` to avoid the extra allocation
+    |
+219 -         out += &format!("\n\n{}\n{}", baked(u), text(u));
+219 +         let _ = write!(out, "\n\n{}\n{}", baked(u), text(u));
+    |
+
+warning: casting `u128` to `u64` may truncate the value
+  --> src/llm.rs:54:37
+   |
+54 |             ms: began.map_or(0, |b| b.elapsed().as_millis() as u64),
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+help: ... or use `try_from` and handle the error accordingly
+   |
+54 -             ms: began.map_or(0, |b| b.elapsed().as_millis() as u64),
+54 +             ms: began.map_or(0, |b| u64::try_from(b.elapsed().as_millis())),
+   |
+
+warning: item in documentation is missing backticks
+  --> src/llm.rs:97:5
+   |
+97 | /// OpenCode's gateway refuses requests without `x-opencode-session`, a stable id per
+   |     ^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#doc_markdown
+   = note: `-W clippy::doc-markdown` implied by `-W clippy::pedantic`
+   = help: to override `-W clippy::pedantic` add `#[allow(clippy::doc_markdown)]`
+help: try
+   |
+97 - /// OpenCode's gateway refuses requests without `x-opencode-session`, a stable id per
+97 + /// `OpenCode`'s gateway refuses requests without `x-opencode-session`, a stable id per
+   |
+
+warning: casting `u64` to `usize` may truncate the value on targets with 32-bit wide pointers
+   --> src/llm.rs:146:65
+    |
+146 |             think_limit: header["think_limit"].as_u64().map(|n| n as usize),
+    |                                                                 ^^^^^^^^^^
+    |
+    = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+help: ... or use `try_from` and handle the error accordingly
+    |
+146 -             think_limit: header["think_limit"].as_u64().map(|n| n as usize),
+146 +             think_limit: header["think_limit"].as_u64().map(|n| usize::try_from(n)),
+    |
+
+warning: calling `Cell::default()` is more clear than this expression
+   --> src/llm.rs:149:21
+    |
+149 |             marked: Default::default(),
+    |                     ^^^^^^^^^^^^^^^^^^ help: try: `Cell::default()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#default_trait_access
+    = note: `-W clippy::default-trait-access` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::default_trait_access)]`
+
+warning: casting `u128` to `u64` may truncate the value
+   --> src/llm.rs:208:35
+    |
+208 |                     extra["ms"] = (began.elapsed().as_millis() as u64).into();
+    |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+help: ... or use `try_from` and handle the error accordingly
+    |
+208 -                     extra["ms"] = (began.elapsed().as_millis() as u64).into();
+208 +                     extra["ms"] = u64::try_from(began.elapsed().as_millis()).into();
+    |
+
+warning: casting `u128` to `u64` may truncate the value
+   --> src/llm.rs:217:55
+    |
+217 |                     message["meta"]["timing"]["ms"] = (start.elapsed().as_millis() as u64).into();
+    |                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+help: ... or use `try_from` and handle the error accordingly
+    |
+217 -                     message["meta"]["timing"]["ms"] = (start.elapsed().as_millis() as u64).into();
+217 +                     message["meta"]["timing"]["ms"] = u64::try_from(start.elapsed().as_millis()).into();
+    |
+
+warning: this function has too many lines (247/100)
+   --> src/llm.rs:227:5
+    |
+227 |     async fn stream(&self, request: &reqwest::RequestBuilder, limit: Option<usize>) -> Result<Value> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#too_many_lines
+
+warning: this boolean expression can be simplified
+   --> src/llm.rs:425:24
+    |
+425 |           let accepted = !finished
+    |  ________________________^
+426 | |             && broken.is_none()
+427 | |             && !self.marked.get()
+428 | |             && !(text.is_empty() && calls.is_empty())
+    | |_____________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#nonminimal_bool
+    = note: `-W clippy::nonminimal-bool` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::nonminimal_bool)]`
+help: try
+    |
+425 -         let accepted = !finished
+426 -             && broken.is_none()
+427 -             && !self.marked.get()
+428 -             && !(text.is_empty() && calls.is_empty())
+425 +         let accepted = !(finished || broken.is_some() || self.marked.get() || text.is_empty() && calls.is_empty())
+    |
+
+warning: casting `u128` to `u64` may truncate the value
+   --> src/llm.rs:450:61
+    |
+450 |         let ms = |a: Instant, b: Option<Instant>| b.map(|b| b.duration_since(a).as_millis() as u64);
+    |                                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+help: ... or use `try_from` and handle the error accordingly
+    |
+450 -         let ms = |a: Instant, b: Option<Instant>| b.map(|b| b.duration_since(a).as_millis() as u64);
+450 +         let ms = |a: Instant, b: Option<Instant>| b.map(|b| u64::try_from(b.duration_since(a).as_millis()));
+    |
+
+warning: casts from `u32` to `u64` can be expressed infallibly using `From`
+   --> src/llm.rs:516:82
+    |
+516 |             tokio::time::sleep(Duration::from_secs(wait) + Duration::from_millis(jitter.subsec_millis() as u64)).await;
+    |                                                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: an `as` cast can become silently lossy if the types change in the future
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_lossless
+    = note: `-W clippy::cast-lossless` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::cast_lossless)]`
+help: use `u64::from` instead
+    |
+516 -             tokio::time::sleep(Duration::from_secs(wait) + Duration::from_millis(jitter.subsec_millis() as u64)).await;
+516 +             tokio::time::sleep(Duration::from_secs(wait) + Duration::from_millis(u64::from(jitter.subsec_millis()))).await;
+    |
+
+warning: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`
+   --> src/providers.rs:204:34
+    |
+204 |                           Ok(n) => match listed.get(n.wrapping_sub(1)) {
+    |  __________________________________^
+205 | |                             Some(model) => model.clone(),
+206 | |                             None => {
+207 | |                                 ui::note(&format!("no model numbered {n}"));
+...   |
+210 | |                         },
+    | |_________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#single_match_else
+    = note: `-W clippy::single-match-else` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::single_match_else)]`
+help: try
+    |
+204 ~                         Ok(n) => if let Some(model) = listed.get(n.wrapping_sub(1)) { model.clone() } else {
+205 +                             ui::note(&format!("no model numbered {n}"));
+206 +                             continue;
+207 ~                         },
+    |
+
+warning: struct constructor field order is inconsistent with struct definition field order
+  --> src/session.rs:86:34
+   |
+86 |                 return Ok(Self { file, path, entries });
+   |                                  ^^^^^^^^^^^^^^^^^^^ help: try: `path, entries, file`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#inconsistent_struct_constructor
+   = note: `-W clippy::inconsistent-struct-constructor` implied by `-W clippy::pedantic`
+   = help: to override `-W clippy::pedantic` add `#[allow(clippy::inconsistent_struct_constructor)]`
+
+warning: casting `u64` to `usize` may truncate the value on targets with 32-bit wide pointers
+   --> src/session.rs:108:93
+    |
+108 |         self.entries.iter().rev().find_map(|e| e["compact"]["keep"].as_u64()).map_or(1, |k| k as usize)
+    |                                                                                             ^^^^^^^^^^
+    |
+    = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+help: ... or use `try_from` and handle the error accordingly
+    |
+108 -         self.entries.iter().rev().find_map(|e| e["compact"]["keep"].as_u64()).map_or(1, |k| k as usize)
+108 +         self.entries.iter().rev().find_map(|e| e["compact"]["keep"].as_u64()).map_or(1, |k| usize::try_from(k))
+    |
+
+warning: `format!(..)` appended to existing `String`
+   --> src/session.rs:123:17
+    |
+123 |                 content += &format!("\n\n[Current task, entry #{u}]\n{task}");
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: you may need to import the `std::fmt::Write` trait
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#format_push_string
+help: consider using `write!` to avoid the extra allocation
+    |
+123 -                 content += &format!("\n\n[Current task, entry #{u}]\n{task}");
+123 +                 let _ = write!(content, "\n\n[Current task, entry #{u}]\n{task}");
+    |
+
+warning: casting `u64` to `f64` may cause a loss of precision (`u64` is 64 bits wide, but `f64`'s mantissa is only 52 bits wide)
+  --> src/stats.rs:32:21
+   |
+32 |         let price = (self.prompt - self.cached) as f64 + self.cached as f64 / 10.0 + self.out as f64 * 4.0;
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_precision_loss
+   = note: `-W clippy::cast-precision-loss` implied by `-W clippy::pedantic`
+   = help: to override `-W clippy::pedantic` add `#[allow(clippy::cast_precision_loss)]`
+
+warning: casting `u64` to `f64` may cause a loss of precision (`u64` is 64 bits wide, but `f64`'s mantissa is only 52 bits wide)
+  --> src/stats.rs:32:58
+   |
+32 |         let price = (self.prompt - self.cached) as f64 + self.cached as f64 / 10.0 + self.out as f64 * 4.0;
+   |                                                          ^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_precision_loss
+
+warning: casting `u64` to `f64` may cause a loss of precision (`u64` is 64 bits wide, but `f64`'s mantissa is only 52 bits wide)
+  --> src/stats.rs:32:86
+   |
+32 |         let price = (self.prompt - self.cached) as f64 + self.cached as f64 / 10.0 + self.out as f64 * 4.0;
+   |                                                                                      ^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_precision_loss
+
+warning: casting `u64` to `f64` may cause a loss of precision (`u64` is 64 bits wide, but `f64`'s mantissa is only 52 bits wide)
+  --> src/stats.rs:34:17
+   |
+34 |         price / good as f64
+   |                 ^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_precision_loss
+
+warning: `format!(..)` appended to existing `String`
+  --> src/stats.rs:43:9
+   |
+43 |         settings += &format!(" compact_at={at}");
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: you may need to import the `std::fmt::Write` trait
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#format_push_string
+help: consider using `write!` to avoid the extra allocation
+   |
+43 -         settings += &format!(" compact_at={at}");
+43 +         let _ = write!(settings, " compact_at={at}");
+   |
+
+warning: `format!(..)` appended to existing `String`
+  --> src/stats.rs:46:9
+   |
+46 |         settings += &format!(" think_limit={limit} tok");
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: you may need to import the `std::fmt::Write` trait
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#format_push_string
+help: consider using `write!` to avoid the extra allocation
+   |
+46 -         settings += &format!(" think_limit={limit} tok");
+46 +         let _ = write!(settings, " think_limit={limit} tok");
+   |
+
+warning: `format!(..)` appended to existing `String`
+  --> src/stats.rs:53:9
+   |
+53 |         settings += &format!(" guidance {:08x} \"{first}{more}\"", std::hash::Hasher::finish(&hasher) as u32);
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: you may need to import the `std::fmt::Write` trait
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#format_push_string
+help: consider using `write!` to avoid the extra allocation
+   |
+53 -         settings += &format!(" guidance {:08x} \"{first}{more}\"", std::hash::Hasher::finish(&hasher) as u32);
+53 +         let _ = write!(settings, " guidance {:08x} \"{first}{more}\"", std::hash::Hasher::finish(&hasher) as u32);
+   |
+
+warning: casting `u64` to `u32` may truncate the value
+  --> src/stats.rs:53:68
+   |
+53 |         settings += &format!(" guidance {:08x} \"{first}{more}\"", std::hash::Hasher::finish(&hasher) as u32);
+   |                                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+help: ... or use `try_from` and handle the error accordingly
+   |
+53 -         settings += &format!(" guidance {:08x} \"{first}{more}\"", std::hash::Hasher::finish(&hasher) as u32);
+53 +         settings += &format!(" guidance {:08x} \"{first}{more}\"", u32::try_from(std::hash::Hasher::finish(&hasher)));
+   |
+
+warning: this function has too many lines (104/100)
+  --> src/stats.rs:58:1
+   |
+58 | pub fn print(home: &Path) -> Result<()> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#too_many_lines
+
+warning: this function's return value is unnecessary
+   --> src/stats.rs:58:1
+    |
+ 58 | pub fn print(home: &Path) -> Result<()> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#unnecessary_wraps
+    = note: `-W clippy::unnecessary-wraps` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::unnecessary_wraps)]`
+help: remove the return type...
+    |
+ 58 - pub fn print(home: &Path) -> Result<()> {
+ 58 + pub fn print(home: &Path) -> () {
+    |
+help: ...and then remove returned values
+    |
+116 ~         return ;
+117 |     }
+...
+161 |     );
+162 ~     
+    |
+
+warning: casting `u64` to `f64` may cause a loss of precision (`u64` is 64 bits wide, but `f64`'s mantissa is only 52 bits wide)
+   --> src/stats.rs:134:28
+    |
+134 |         let per = |x: u64| x as f64 / t.turns as f64;
+    |                            ^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_precision_loss
+
+warning: casting `u64` to `f64` may cause a loss of precision (`u64` is 64 bits wide, but `f64`'s mantissa is only 52 bits wide)
+   --> src/stats.rs:134:39
+    |
+134 |         let per = |x: u64| x as f64 / t.turns as f64;
+    |                                       ^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_precision_loss
+
+warning: casting `f64` to `u64` may truncate the value
+   --> src/stats.rs:135:20
+    |
+135 |         let secs = per(t.ms) as u64 / 1000;
+    |                    ^^^^^^^^^^^^^^^^
+    |
+    = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+
+warning: casting `f64` to `u64` may lose the sign of the value
+   --> src/stats.rs:135:20
+    |
+135 |         let secs = per(t.ms) as u64 / 1000;
+    |                    ^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_sign_loss
+    = note: `-W clippy::cast-sign-loss` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::cast_sign_loss)]`
+
+warning: casting `f64` to `u64` may truncate the value
+   --> src/stats.rs:144:31
+    |
+144 |             crate::ui::tokens(per(t.prompt) as u64),
+    |                               ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+
+warning: casting `f64` to `u64` may lose the sign of the value
+   --> src/stats.rs:144:31
+    |
+144 |             crate::ui::tokens(per(t.prompt) as u64),
+    |                               ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_sign_loss
+
+warning: casting `f64` to `u64` may truncate the value
+   --> src/stats.rs:146:31
+    |
+146 |             crate::ui::tokens(per(t.out) as u64),
+    |                               ^^^^^^^^^^^^^^^^^
+    |
+    = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+
+warning: casting `f64` to `u64` may lose the sign of the value
+   --> src/stats.rs:146:31
+    |
+146 |             crate::ui::tokens(per(t.out) as u64),
+    |                               ^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_sign_loss
+
+warning: casting `u64` to `f64` may cause a loss of precision (`u64` is 64 bits wide, but `f64`'s mantissa is only 52 bits wide)
+   --> src/stats.rs:151:21
+    |
+151 |             100.0 * t.waste as f64 / t.requests.max(1) as f64,
+    |                     ^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_precision_loss
+
+warning: casting `u64` to `f64` may cause a loss of precision (`u64` is 64 bits wide, but `f64`'s mantissa is only 52 bits wide)
+   --> src/stats.rs:151:38
+    |
+151 |             100.0 * t.waste as f64 / t.requests.max(1) as f64,
+    |                                      ^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_precision_loss
+
+warning: implicit borrow as raw pointer
+  --> src/ui.rs:91:36
+   |
+91 |     if unsafe { libc::tcgetattr(0, &mut saved) } == 0 {
+   |                                    ^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#borrow_as_ptr
+   = note: `-W clippy::borrow-as-ptr` implied by `-W clippy::pedantic`
+   = help: to override `-W clippy::pedantic` add `#[allow(clippy::borrow_as_ptr)]`
+help: use a raw pointer instead
+   |
+91 |     if unsafe { libc::tcgetattr(0, &raw mut saved) } == 0 {
+   |                                     +++
+
+warning: casting `u64` to `f64` may cause a loss of precision (`u64` is 64 bits wide, but `f64`'s mantissa is only 52 bits wide)
+   --> src/ui.rs:150:42
+    |
+150 |     if n >= 1000 { format!("{:.1}k tok", n as f64 / 1000.0) } else { format!("{n} tok") }
+    |                                          ^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_precision_loss
+
+warning: `format!(..)` appended to existing `String`
+   --> src/ui.rs:212:9
+    |
+212 |         out += &format!("\r\x1b[2K  {}\n", paint(style, &text));
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: you may need to import the `std::fmt::Write` trait
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#format_push_string
+help: consider using `write!` to avoid the extra allocation
+    |
+212 -         out += &format!("\r\x1b[2K  {}\n", paint(style, &text));
+212 +         let _ = write!(out, "\r\x1b[2K  {}\n", paint(style, &text));
+    |
+
+warning: `format!(..)` appended to existing `String`
+   --> src/ui.rs:217:9
+    |
+217 |         out += &format!("{}\x1b[{stale}A", "\r\x1b[2K\n".repeat(stale));
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: you may need to import the `std::fmt::Write` trait
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#format_push_string
+help: consider using `write!` to avoid the extra allocation
+    |
+217 -         out += &format!("{}\x1b[{stale}A", "\r\x1b[2K\n".repeat(stale));
+217 +         let _ = write!(out, "{}\x1b[{stale}A", "\r\x1b[2K\n".repeat(stale));
+    |
+
+warning: `format!(..)` appended to existing `String`
+   --> src/ui.rs:252:9
+    |
+252 |         list += &format!("{}{file}", if shown > 0 { ", " } else { "" });
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: you may need to import the `std::fmt::Write` trait
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#format_push_string
+help: consider using `write!` to avoid the extra allocation
+    |
+252 -         list += &format!("{}{file}", if shown > 0 { ", " } else { "" });
+252 +         let _ = write!(list, "{}{file}", if shown > 0 { ", " } else { "" });
+    |
+
+warning: casting `usize` to `f64` may cause a loss of precision (`usize` can be up to 64 bits wide depending on the target architecture, but `f64`'s mantissa is only 52 bits wide)
+   --> src/ui.rs:283:59
+    |
+283 |     let size = if chars >= 1000 { format!("{:.1}k chars", chars as f64 / 1000.0) } else { format!("{chars} chars") };
+    |                                                           ^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_precision_loss
+
+warning: casting `u64` to `usize` may truncate the value on targets with 32-bit wide pointers
+   --> src/ui.rs:463:71
+    |
+463 |         Some(i) => format!("{}/{} {}", done.len(), steps.len(), steps[i as usize - 1]),
+    |                                                                       ^^^^^^^^^^
+    |
+    = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+help: ... or use `try_from` and handle the error accordingly
+    |
+463 -         Some(i) => format!("{}/{} {}", done.len(), steps.len(), steps[i as usize - 1]),
+463 +         Some(i) => format!("{}/{} {}", done.len(), steps.len(), steps[usize::try_from(i) - 1]),
+    |
+
+warning: casting `u128` to `u64` may truncate the value
+   --> src/ui.rs:491:86
+    |
+491 |     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+    |                                                                                      ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_truncation
+help: ... or use `try_from` and handle the error accordingly
+    |
+491 -     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+491 +     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| u64::try_from(d.as_millis()))
+    |
+
+warning: this argument is passed by value, but not consumed in the function body
+   --> src/ui.rs:494:45
+    |
+494 | pub fn event(kind: &str, text: &str, extra: Value) {
+    |                                             ^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#needless_pass_by_value
+    = note: `-W clippy::needless-pass-by-value` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::needless_pass_by_value)]`
+help: consider taking a reference instead
+    |
+494 | pub fn event(kind: &str, text: &str, extra: &Value) {
+    |                                             +
+
+warning: constructing a `Duration` using a smaller unit when a larger unit would be more readable
+  --> src/worker.rs:11:31
+   |
+11 | const RUN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+   |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#duration_suboptimal_units
+help: try using `Duration::from_mins`
+   |
+11 - const RUN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+11 + const RUN_TIMEOUT: Duration = Duration::from_mins(10);
+   |
+
+warning: casting `u32` to `i32` may wrap around the value
+   --> src/worker.rs:103:33
+    |
+103 |             unsafe { libc::kill(pid as i32, libc::SIGINT) };
+    |                                 ^^^^^^^^^^ help: if this is intentional, use `cast_signed()` instead: `pid.cast_signed()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_wrap
+
+warning: casting `u32` to `i32` may wrap around the value
+   --> src/worker.rs:124:34
+    |
+124 |         for group in descendants(pid as i32).into_iter().chain([pid as i32]).filter(|&g| g > 1 && g != own) {
+    |                                  ^^^^^^^^^^ help: if this is intentional, use `cast_signed()` instead: `pid.cast_signed()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_wrap
+
+warning: casting `u32` to `i32` may wrap around the value
+   --> src/worker.rs:124:65
+    |
+124 |         for group in descendants(pid as i32).into_iter().chain([pid as i32]).filter(|&g| g > 1 && g != own) {
+    |                                                                 ^^^^^^^^^^ help: if this is intentional, use `cast_signed()` instead: `pid.cast_signed()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cast_possible_wrap
+
+warning: use of `format!` to build up a string from an iterator
+   --> src/worker.rs:157:28
+    |
+157 |         let dirs: String = writable.iter().map(|d| format!(" (subpath {d:?})")).collect();
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: call `fold` instead
+   --> src/worker.rs:157:44
+    |
+157 |         let dirs: String = writable.iter().map(|d| format!(" (subpath {d:?})")).collect();
+    |                                            ^^^
+help: ... and use the `write!` macro here
+   --> src/worker.rs:157:52
+    |
+157 |         let dirs: String = writable.iter().map(|d| format!(" (subpath {d:?})")).collect();
+    |                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: this can be written more efficiently by appending to a `String` directly
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#format_collect
+    = note: `-W clippy::format-collect` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::format_collect)]`
+
+warning: unnecessary `Debug` formatting in `format!` args
+   --> src/worker.rs:157:72
+    |
+157 |         let dirs: String = writable.iter().map(|d| format!(" (subpath {d:?})")).collect();
+    |                                                                        ^
+    |
+    = help: use `Display` formatting and change this to `d.display()`
+    = note: switching to `Display` formatting will change how the value is shown; escaped characters will no longer be escaped and surrounding quotes will be removed
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#unnecessary_debug_formatting
+    = note: `-W clippy::unnecessary-debug-formatting` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::unnecessary_debug_formatting)]`
+
+warning: use of `format!` to build up a string from an iterator
+   --> src/worker.rs:158:31
+    |
+158 |         let secrets: String = secrets.map(|d| format!(" (subpath {d:?})")).collect();
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: call `fold` instead
+   --> src/worker.rs:158:39
+    |
+158 |         let secrets: String = secrets.map(|d| format!(" (subpath {d:?})")).collect();
+    |                                       ^^^
+help: ... and use the `write!` macro here
+   --> src/worker.rs:158:47
+    |
+158 |         let secrets: String = secrets.map(|d| format!(" (subpath {d:?})")).collect();
+    |                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: this can be written more efficiently by appending to a `String` directly
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#format_collect
+
+warning: unnecessary `Debug` formatting in `format!` args
+   --> src/worker.rs:158:67
+    |
+158 |         let secrets: String = secrets.map(|d| format!(" (subpath {d:?})")).collect();
+    |                                                                   ^
+    |
+    = help: use `Display` formatting and change this to `d.display()`
+    = note: switching to `Display` formatting will change how the value is shown; escaped characters will no longer be escaped and surrounding quotes will be removed
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#unnecessary_debug_formatting
+
+warning: use of `format!` to build up a string from an iterator
+   --> src/worker.rs:159:33
+    |
+159 |         let protected: String = protected.iter().map(|d| format!(" (subpath {d:?})")).collect();
+    |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: call `fold` instead
+   --> src/worker.rs:159:50
+    |
+159 |         let protected: String = protected.iter().map(|d| format!(" (subpath {d:?})")).collect();
+    |                                                  ^^^
+help: ... and use the `write!` macro here
+   --> src/worker.rs:159:58
+    |
+159 |         let protected: String = protected.iter().map(|d| format!(" (subpath {d:?})")).collect();
+    |                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: this can be written more efficiently by appending to a `String` directly
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#format_collect
+
+warning: unnecessary `Debug` formatting in `format!` args
+   --> src/worker.rs:159:78
+    |
+159 |         let protected: String = protected.iter().map(|d| format!(" (subpath {d:?})")).collect();
+    |                                                                              ^
+    |
+    = help: use `Display` formatting and change this to `d.display()`
+    = note: switching to `Display` formatting will change how the value is shown; escaped characters will no longer be escaped and surrounding quotes will be removed
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#unnecessary_debug_formatting
+
+warning: unnecessary `Debug` formatting in `format!` args
+   --> src/worker.rs:166:44
+    |
+166 |               (local unix-socket (subpath {sockets:?})) (remote unix-socket (subpath {sockets:?})))\
+    |                                            ^^^^^^^
+    |
+    = help: use `Display` formatting and change this to `sockets.display()`
+    = note: switching to `Display` formatting will change how the value is shown; escaped characters will no longer be escaped and surrounding quotes will be removed
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#unnecessary_debug_formatting
+
+warning: unnecessary `Debug` formatting in `format!` args
+   --> src/worker.rs:168:55
+    |
+168 |              (deny file-write* (require-all (subpath {root:?}) (regex #\"/\\.[gG][iI][tT](/|$)\")))\
+    |                                                       ^^^^
+    |
+    = help: use `Display` formatting and change this to `root.display()`
+    = note: switching to `Display` formatting will change how the value is shown; escaped characters will no longer be escaped and surrounding quotes will be removed
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#unnecessary_debug_formatting
+
+warning: unnecessary `Debug` formatting in `format!` args
+   --> src/worker.rs:169:76
+    |
+169 |              (deny file-read-data{secrets})(allow file-read-data (literal {log:?}))\
+    |                                                                            ^^^
+    |
+    = help: use `Display` formatting and change this to `log.display()`
+    = note: switching to `Display` formatting will change how the value is shown; escaped characters will no longer be escaped and surrounding quotes will be removed
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#unnecessary_debug_formatting
+
+warning: boolean to int conversion using if
+   --> src/main.rs:106:28
+    |
+106 |         std::process::exit(if verified { 0 } else { 1 });
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace with from: `i32::from(!verified)`
+    |
+    = note: `!verified as i32` or `(!verified).into()` can also be valid options
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#bool_to_int_with_if
+    = note: `-W clippy::bool-to-int-with-if` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::bool_to_int_with_if)]`
+
+warning: it is more idiomatic to use `Option<&T>` instead of `&Option<T>`
+   --> src/main.rs:149:1
+    |
+149 | / fn with_config(mut providers: providers::Providers, fallback: &Option<providers::Provider>) -> providers::Providers {
+150 | |     if let Some(provider) = fallback {
+151 | |         if providers.contains_key("config") {
+152 | |             ui::note("providers.toml: its [config] entry replaces base_url and model from config.toml");
+...   |
+156 | |     providers
+157 | | }
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#ref_option
+    = note: `-W clippy::ref-option` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::ref_option)]`
+help: change this to
+    |
+149 - fn with_config(mut providers: providers::Providers, fallback: &Option<providers::Provider>) -> providers::Providers {
+149 + fn with_config(mut providers: providers::Providers, fallback: Option<&providers::Provider>) -> providers::Providers {
+    |
+
+warning: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`
+   --> src/main.rs:184:19
+    |
+184 |           Err(_) => match all
+    |  ___________________^
+185 | |             .iter()
+186 | |             .find(|(p, m, _)| p == agent.provider() && *m == choice)
+187 | |             .or_else(|| all.iter().find(|(_, m, _)| *m == choice))
+...   |
+194 | |         },
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#single_match_else
+help: try
+    |
+184 ~         Err(_) => if let Some((provider, model, _)) = all
+185 +             .iter()
+186 +             .find(|(p, m, _)| p == agent.provider() && *m == choice)
+187 +             .or_else(|| all.iter().find(|(_, m, _)| *m == choice)) { (provider.clone(), model.clone()) } else {
+188 +             ui::note(&format!("{} is not listed; trying it on {}", ui::printable(&choice), agent.provider()));
+189 +             (agent.provider().to_string(), choice)
+190 ~         },
+    |
+
+warning: `air` (bin "air" test) generated 90 warnings (44 duplicates) (run `cargo clippy --fix --bin "air" -p air --tests -- -W clippy::pedantic` to apply 9 suggestions)
+warning: `air` (bin "air") generated 90 warnings (46 duplicates) (run `cargo clippy --fix --bin "air" -p air -- -W clippy::pedantic` to apply 4 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.12s
