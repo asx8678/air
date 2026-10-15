@@ -299,12 +299,6 @@ def _hint(e, misuse):
     if misuse:
         name = text.split("(")[0]
         return f"signature: {name}{inspect.signature(G[name])}"
-    for marker, advice in (("old text not found", "print the exact current lines first, then copy them into old"),
-                           ("old text occurs", "include more surrounding lines so old matches exactly once"),
-                           ("call accept(", "call accept(criteria) before edit() or write()"),
-                           ("exists; use edit", "use edit() to change an existing file")):
-        if marker in text:
-            return advice
     return None
 
 
