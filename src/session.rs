@@ -3,7 +3,7 @@
 //! - a message {role, content, tool_calls?, reasoning_content?, meta}: an assistant's meta holds the request's
 //!   usage, timing, request and response; a tool's meta holds the run's actions, commands, errors and ms
 //! - {event, text, ...}: retries, cut streams, nudges, the notes shown to the user, connects, commands
-//! - {check}, {report} per turn, {compact}, {switch}, {resume}, and {end} with this run's totals
+//! - {check}, {report} per turn, {compact}, {mask}, {switch}, {resume}, and {end} with this run's totals
 //!
 //! Every line has a wall-clock `at` in ms, in meta for messages since meta never goes on the wire. The sandboxed
 //! worker can read the log (recall()), so nothing secret goes into it.
@@ -134,7 +134,8 @@ impl Session {
 
     pub fn messages(&self) -> Vec<Value> {
         let mut out = vec![json!({"role": "system", "content": self.header()["system"]})];
-        let (keep, newest) = (self.keep(), crate::compact::newest_task(&self.entries));
+        let (keep, newest, masked) =
+            (self.keep(), crate::compact::newest_task(&self.entries), crate::compact::masked(&self.entries));
         if let Some(summary) = self.entries.iter().rev().find_map(|e| e["compact"]["summary"].as_str()) {
             let mut content = summary.to_string();
             if let Some(u) = newest.filter(|&u| u < keep && !summary.contains(&crate::compact::baked(u))) {
@@ -146,7 +147,7 @@ impl Session {
         let mut open: Vec<Value> = vec![];
         for (i, entry) in self.entries.iter().enumerate().skip(keep) {
             let Some(role) = entry["role"].as_str() else { continue };
-            let message = crate::compact::wire(entry, newest.is_some_and(|u| i < u));
+            let message = crate::compact::wire(entry, i, newest, masked);
             if role == "tool" {
                 if let Some(i) = open.iter().position(|id| *id == message["tool_call_id"]) {
                     open.remove(i);
@@ -264,7 +265,7 @@ mod tests {
         stamp(&mut event, 7);
         assert_eq!(user, json!({"role": "user", "content": "x", "meta": {"at": 7}}));
         assert_eq!(event["at"], 1);
-        assert_eq!(crate::compact::wire(&user, false), json!({"role": "user", "content": "x"}));
+        assert_eq!(crate::compact::wire(&user, 1, None, 0), json!({"role": "user", "content": "x"}));
     }
 
     #[test]

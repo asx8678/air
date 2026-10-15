@@ -71,6 +71,7 @@ pub fn totals(entries: &[Value]) -> Value {
         }
         count(&mut n, "turns", u64::from(e["role"] == "user" && meta["host"].is_null()));
         count(&mut n, "compactions", u64::from(e["compact"].is_object()));
+        count(&mut n, "masks", u64::from(e["mask"].is_object()));
         if usage.is_object() {
             let out = usage["completion_tokens"].as_u64();
             count(&mut n, "replies", 1);
@@ -128,7 +129,7 @@ pub fn totals(entries: &[Value]) -> Value {
         "edits": {"ok": get("edits_ok"), "failed": get("edits_failed")},
         "shell": {"ok": get("shell_ok"), "failed": get("shell_failed")},
         "checks": {"passed": get("checks_passed"), "failed": get("checks_failed"), "reused": get("checks_reused")},
-        "compactions": get("compactions"), "redacted": get("redacted"), "events": events,
+        "compactions": get("compactions"), "masks": get("masks"), "redacted": get("redacted"), "events": events,
     })
 }
 
