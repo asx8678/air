@@ -5,6 +5,7 @@ use crate::worker::{self, Worker};
 use crate::{Config, compact, ui};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt;
@@ -21,6 +22,8 @@ const MAX_REQUESTS: usize = 200;
 const REPEAT_WARN: usize = 3;
 const REPEAT_BLOCK: usize = 6;
 const FILES: usize = 200;
+const LISTING: usize = 8 * 1024;
+const TREE: usize = 10 * 1024;
 const AGENTS_MAX: usize = 32 * 1024;
 const RESTARTS: usize = 2;
 const WINDOW: &[&str] = &[
@@ -1064,26 +1067,63 @@ fn system_prompt(root: &Path, yolo: bool, notes: Option<&str>) -> String {
         prompt += "\n\n# Skills (open() one when the task needs it)\n";
         prompt += &skills.join("\n");
     }
-    let files: Vec<String> = git(root, None, &["ls-files"]).unwrap_or_default().lines().map(String::from).collect();
-    if files.len() > FILES {
-        let mut dirs = std::collections::BTreeMap::new();
-        for file in &files {
-            let parts: Vec<&str> = file.splitn(3, '/').collect();
-            let key = if parts.len() == 3 { format!("{}/{}/", parts[0], parts[1]) } else { file.clone() };
-            *dirs.entry(key).or_insert(0) += 1;
-        }
-        prompt += &format!("\n\n# Repository at session start ({} tracked files; folders show counts)\n", files.len());
-        for (path, n) in dirs.iter().take(FILES) {
-            prompt += &if path.ends_with('/') { format!("{path} ({n} files)\n") } else { format!("{path}\n") };
-        }
-    } else if !files.is_empty() {
-        prompt += &format!("\n\n# Repository files at session start ({} tracked, size in bytes)\n", files.len());
-        for file in &files {
-            let size = std::fs::metadata(root.join(file)).map_or(0, |m| m.len());
-            prompt += &format!("{file} {size}\n");
-        }
-    }
+    prompt += &listing(root);
     prompt
+}
+
+/// The tracked files for the system prompt: a path and size per line within LISTING bytes, else a line per folder
+/// within TREE bytes; past both, a repo of over FILES files shows its first FILES two-level folders with file counts.
+fn listing(root: &Path) -> String {
+    let tracked = git(root, None, &["ls-files"]).unwrap_or_default();
+    let files: Vec<&str> = tracked.lines().collect();
+    let sizes: Vec<u64> = files.iter().map(|f| std::fs::metadata(root.join(f)).map_or(0, |m| m.len())).collect();
+    let plain: String = files.iter().zip(&sizes).map(|(file, size)| format!("{file} {size}\n")).collect();
+    let head = |how: &str| format!("\n\n# Repository files at session start ({} tracked, {how})\n", files.len());
+    if files.is_empty() {
+        return String::new();
+    }
+    if plain.len() <= LISTING {
+        return head("size in bytes") + &plain;
+    }
+    // Each folder's own files, as indexes into files, and its subfolders.
+    let mut dirs = BTreeMap::<&str, (Vec<usize>, Vec<&str>)>::new();
+    for (i, file) in files.iter().enumerate() {
+        let mut parent = "";
+        for (j, _) in file.match_indices('/') {
+            let dir = &file[..=j];
+            if !dirs.contains_key(dir) {
+                dirs.entry(parent).or_default().1.push(dir);
+            }
+            dirs.entry(dir).or_default();
+            parent = dir;
+        }
+        dirs.entry(parent).or_default().0.push(i);
+    }
+    let tree: String = dirs
+        .iter()
+        .map(|(dir, (own, subs))| {
+            let own = own.iter().map(|&i| format!("{} {}K", &files[i][dir.len()..], sizes[i].div_ceil(1024)));
+            let names: Vec<String> = own.chain(subs.iter().map(|sub| sub[dir.len()..].to_string())).collect();
+            format!("{}: {}\n", if dir.is_empty() { "./" } else { dir }, names.join(", "))
+        })
+        .collect();
+    if tree.len() <= TREE {
+        return head("sizes in KB; one line per folder: its files, then its subfolders") + &tree;
+    }
+    if files.len() <= FILES {
+        return head("size in bytes") + &plain;
+    }
+    let mut counts = BTreeMap::new();
+    for file in &files {
+        let parts: Vec<&str> = file.splitn(3, '/').collect();
+        let key = if parts.len() == 3 { format!("{}/{}/", parts[0], parts[1]) } else { file.to_string() };
+        *counts.entry(key).or_insert(0) += 1;
+    }
+    let mut out = format!("\n\n# Repository at session start ({} tracked files; folders show counts)\n", files.len());
+    for (path, n) in counts.iter().take(FILES) {
+        out += &if path.ends_with('/') { format!("{path} ({n} files)\n") } else { format!("{path}\n") };
+    }
+    out
 }
 
 /// A file for the system prompt, if it resolves to a regular file inside the repo and outside the sandbox's secret
