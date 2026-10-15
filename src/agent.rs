@@ -116,7 +116,8 @@ impl Agent {
                 );
             };
             let profile = config.models.get(&model).cloned().unwrap_or_default();
-            let system = system_prompt(root, yolo, profile.get("guidance").and_then(Value::as_str));
+            let notes = profile.get("guidance").and_then(Value::as_str);
+            let system = system_prompt(root, yolo, config.check.is_some(), notes);
             Session::create(home, root, provider, &model, &system, profile, context)?
         };
         let (provider, llm) = connect(&config.providers, session.header())?;
@@ -212,7 +213,8 @@ impl Agent {
             anyhow::bail!("no provider named {provider}");
         }
         let profile = self.config.models.get(model).cloned().unwrap_or_default();
-        let system = system_prompt(&self.root, self.yolo, profile.get("guidance").and_then(Value::as_str));
+        let notes = profile.get("guidance").and_then(Value::as_str);
+        let system = system_prompt(&self.root, self.yolo, self.config.check.is_some(), notes);
         self.session.switch(provider, model, &system, profile)?;
         (self.provider, self.llm) = connect(&self.config.providers, self.session.header())?;
         self.compact_at = self.session.header()["compact_at"].as_u64().unwrap_or(COMPACT_AT);
@@ -673,7 +675,7 @@ impl Agent {
             (false, _, _) => ("-", "NO CHANGES"),
             (true, true, _) if !inputs.is_empty() => ("passed, but this turn changed what it runs", "UNVERIFIED"),
             (true, true, _) => ("passed on the final tree", "VERIFIED"),
-            (true, false, None) => ("none configured: set check in air.toml", "UNVERIFIED"),
+            (true, false, None) => ("none configured: set check in air.toml", "NO CHECK"),
             (true, false, Some(_)) => ("not passed on the final tree", "UNVERIFIED"),
         };
         let checked = checked && inputs.is_empty();
@@ -729,7 +731,7 @@ impl Agent {
             secs % 60
         );
         rows.push(("cost", cost));
-        let good = (!changed || checked) && !stopped;
+        let good = (!changed || checked || self.config.check.is_none()) && !stopped;
         ui::report(&rows, verdict, good);
         let changes: Vec<&str> = changes.lines().filter(|l| *l != "none").collect();
         self.session.push(json!({"report": {
@@ -1019,8 +1021,11 @@ fn finish(mut meta: Value) -> (String, Value) {
     (out, meta)
 }
 
-fn system_prompt(root: &Path, yolo: bool, notes: Option<&str>) -> String {
+fn system_prompt(root: &Path, yolo: bool, check: bool, notes: Option<&str>) -> String {
     let mut prompt = include_str!("prompt.md").to_string();
+    if !check {
+        prompt += "\nNo check command is configured, so check() runs nothing.";
+    }
     if !yolo {
         prompt += SANDBOX;
         prompt += if cfg!(target_os = "macos") { MACOS } else { LINUX };

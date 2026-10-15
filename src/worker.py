@@ -151,6 +151,8 @@ def _forget():
 
 
 def edit(path, old, new=None):
+    if new is None and isinstance(old, (list, tuple)) and len(old) == 2 and all(isinstance(s, str) for s in old):
+        old, new = old  # one pair given as [old, new]
     pairs = [(old, new)] if new is not None else old
     if isinstance(pairs, str) or not pairs or not all(
             isinstance(p, (list, tuple)) and len(p) == 2 and all(isinstance(s, str) for s in p) for p in pairs):

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 #[derive(Parser)]
 #[command(version = concat!(env!("CARGO_PKG_VERSION"), " ", env!("AIR_BUILD")), about = "Minimal code-mode coding agent. Without a task it starts a REPL (/compact, /cost, /think, /models [filter], /providers).")]
 struct Cli {
-    #[arg(help = "Run this task once and exit (status 1 when the result is unverified or the turn stopped short)")]
+    #[arg(help = "Run this task once and exit (status 1 when a configured check did not pass on the final tree or the turn stopped short)")]
     task: Option<String>,
     #[arg(long, help = "Resume the latest session in this repo")]
     resume: bool,
