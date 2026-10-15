@@ -69,7 +69,7 @@ impl Lost {
 }
 
 pub fn lost(e: &anyhow::Error) -> Option<&Lost> {
-    e.downcast_ref::<Interrupted>().map(|i| &i.1).or_else(|| e.downcast_ref::<Overthought>().map(|o| &o.1))
+    e.downcast_ref::<Interrupted>().map(|i| &i.1)
 }
 
 #[derive(Debug)]
@@ -82,17 +82,6 @@ impl std::fmt::Display for Interrupted {
 }
 
 impl std::error::Error for Interrupted {}
-
-#[derive(Debug)]
-pub struct Overthought(u64, Lost);
-
-impl std::fmt::Display for Overthought {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "reasoned past {} tokens without acting", self.0)
-    }
-}
-
-impl std::error::Error for Overthought {}
 
 pub fn params(header: &Value) -> Value {
     match &header["params"] {
@@ -152,7 +141,6 @@ pub struct Llm {
     key: Option<String>,
     model: String,
     params: Value,
-    think_limit: Option<usize>,
     session: Option<String>,
     field: std::cell::Cell<&'static str>,
     marked: std::cell::Cell<bool>,
@@ -174,7 +162,6 @@ impl Llm {
                 .filter(|k| !k.is_empty()),
             model: header["model"].as_str().unwrap_or_default().into(),
             params: params(header),
-            think_limit: header["think_limit"].as_u64().map(|n| n as usize),
             session: session_id(base_url, header),
             field: std::cell::Cell::new(FIELDS[0]),
             marked: Default::default(),
@@ -203,7 +190,7 @@ impl Llm {
         Ok(ids.map(String::from).collect())
     }
 
-    pub async fn complete(&self, mut messages: Vec<Value>, tools: &Value, limited: bool) -> Result<Value> {
+    pub async fn complete(&self, mut messages: Vec<Value>, tools: &Value) -> Result<Value> {
         let field = self.field.get();
         for fields in messages.iter_mut().filter(|_| field != FIELDS[0]).filter_map(Value::as_object_mut) {
             if let Some(reasoning) = fields.remove(FIELDS[0]) {
@@ -231,7 +218,7 @@ impl Llm {
         let start = Instant::now();
         for attempt in 1.. {
             let began = Instant::now();
-            match self.stream(&request, self.think_limit.filter(|_| limited)).await {
+            match self.stream(&request).await {
                 Err(e) if e.is::<Interrupted>() => {
                     let mut extra = lost(&e).map_or(json!({}), Lost::extra);
                     extra["attempt"] = attempt.into();
@@ -256,7 +243,7 @@ impl Llm {
         unreachable!()
     }
 
-    async fn stream(&self, request: &reqwest::RequestBuilder, limit: Option<usize>) -> Result<Value> {
+    async fn stream(&self, request: &reqwest::RequestBuilder) -> Result<Value> {
         let (mut response, sent) = self.send(request).await?;
         let mut served = json!({"status": response.status().as_u16(), "headers": headers(response.headers())});
         let kind = response.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or_default();
@@ -272,7 +259,7 @@ impl Llm {
         let mut lines = 0;
         let (mut markdown, mut began) = (crate::render::Markdown::default(), None::<Instant>);
         let (mut held, mut answering, mut narrated) = (String::new(), false, false);
-        let (mut broken, mut inline, mut chars, mut via) = (None, Inline::default(), 0, None);
+        let (mut broken, mut inline, mut via) = (None, Inline::default(), None);
         let (mut scan, mut eof, mut events, mut got, mut stalled, mut rejected) = (0, false, 0, 0, false, false);
         let cap = tokio::time::Instant::from_std(sent) + TOTAL;
         let mut idle = tokio::time::Instant::now() + IDLE;
@@ -341,17 +328,10 @@ impl Llm {
                 if !reasoning.is_empty() {
                     via = via.or(field);
                     thinking += &reasoning;
-                    chars += reasoning.chars().count();
                     let began = *began.get_or_insert_with(Instant::now);
                     first.get_or_insert(began);
                     if text.is_empty() {
                         crate::ui::thinking(&thinking, began.elapsed().as_secs());
-                    }
-                    if let Some(limit) = limit.filter(|l| chars / 4 > *l && text.is_empty() && calls.is_empty()) {
-                        let mut lost = Lost::new(&thinking, Some(began));
-                        (served["bytes"], served["events"]) = (got.into(), events.into());
-                        lost.response = served;
-                        return Err(Overthought(limit as u64, lost).into());
                     }
                 }
                 if delta["tool_calls"].is_array() || !t.is_empty() {

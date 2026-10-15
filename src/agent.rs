@@ -116,8 +116,7 @@ impl Agent {
                 );
             };
             let profile = config.models.get(&model).cloned().unwrap_or_default();
-            let notes = profile.get("guidance").and_then(Value::as_str);
-            let system = system_prompt(root, yolo, config.check.is_some(), notes);
+            let system = system_prompt(root, yolo, config.check.is_some());
             Session::create(home, root, provider, &model, &system, profile, context)?
         };
         let (provider, llm) = connect(&config.providers, session.header())?;
@@ -213,8 +212,7 @@ impl Agent {
             anyhow::bail!("no provider named {provider}");
         }
         let profile = self.config.models.get(model).cloned().unwrap_or_default();
-        let notes = profile.get("guidance").and_then(Value::as_str);
-        let system = system_prompt(&self.root, self.yolo, self.config.check.is_some(), notes);
+        let system = system_prompt(&self.root, self.yolo, self.config.check.is_some());
         self.session.switch(provider, model, &system, profile)?;
         (self.provider, self.llm) = connect(&self.config.providers, self.session.header())?;
         self.compact_at = self.session.header()["compact_at"].as_u64().unwrap_or(COMPACT_AT);
@@ -299,12 +297,12 @@ impl Agent {
         self.current = Some((began, clock));
         let (mut nudged, mut overflowed, mut nudges, mut empties, mut cut, mut stalled) =
             (false, false, 0, 0, false, false);
-        let ceiling = self.session.header()["turn_tokens"].as_u64().unwrap_or(self.compact_at * TURN_BUDGET);
+        let ceiling = self.compact_at * TURN_BUDGET;
         let mut spent = 0;
         let mut limit = format!("stopped after {MAX_REQUESTS} model requests in one turn");
         for _ in 0..MAX_REQUESTS {
             if spent >= ceiling {
-                limit = format!("stopped after {} in one turn (turn_tokens = {ceiling})", ui::tokens(spent));
+                limit = format!("stopped after {} in one turn ({TURN_BUDGET} × compact_at)", ui::tokens(spent));
                 break;
             }
             let prompt = self.session.last_prompt_tokens();
@@ -314,13 +312,9 @@ impl Agent {
                     self.compact()?;
                 }
             }
-            let result = self.llm.complete(self.session.messages(), &tools(), nudges < 2).await;
-            if let Some(e) = result.as_ref().err()
-                && let Some(lost) = llm::lost(e)
-            {
-                let why =
-                    if e.is::<llm::Overthought>() { "it went over think_limit" } else { "the provider cut the stream" };
-                self.discard(why, &lost.thinking);
+            let result = self.llm.complete(self.session.messages(), &tools()).await;
+            if let Some(lost) = result.as_ref().err().and_then(llm::lost) {
+                self.discard("the provider cut the stream", &lost.thinking);
             }
             let mut message = match result {
                 Err(e) if e.is::<llm::ContextOverflow>() && !overflowed => {
@@ -338,13 +332,6 @@ impl Agent {
                         system / 1024,
                         agents.min(AGENTS_MAX) / 1024
                     );
-                }
-                Err(e) if e.is::<llm::Overthought>() => {
-                    spent += self.sent();
-                    nudges += 1;
-                    ui::event("overthought", &e.to_string(), llm::lost(&e).map_or(Value::Null, llm::Lost::extra));
-                    self.nudge(&format!("You {e}; that reasoning was discarded."))?;
-                    continue;
                 }
                 Err(e) if e.is::<llm::Interrupted>() && nudges < 2 && llm::lost(&e).is_some_and(|l| !l.stalled) => {
                     spent += self.sent();
@@ -1017,7 +1004,7 @@ fn finish(mut meta: Value) -> (String, Value) {
     (out, meta)
 }
 
-fn system_prompt(root: &Path, yolo: bool, check: bool, notes: Option<&str>) -> String {
+fn system_prompt(root: &Path, yolo: bool, check: bool) -> String {
     let mut prompt = include_str!("prompt.md").to_string();
     if !check {
         prompt += "\nNo check command is configured, so check() runs nothing.";
@@ -1026,10 +1013,6 @@ fn system_prompt(root: &Path, yolo: bool, check: bool, notes: Option<&str>) -> S
         prompt += SANDBOX;
         prompt += if cfg!(target_os = "macos") { MACOS } else { LINUX };
         prompt += PERMANENT;
-    }
-    if let Some(notes) = notes.map(str::trim).filter(|n| !n.is_empty()) {
-        prompt += "\n\n## Notes for this model\n";
-        prompt += notes;
     }
     let mut refused = vec![];
     if let Some((agents, size)) = repo_text(root, "AGENTS.md", AGENTS_MAX) {

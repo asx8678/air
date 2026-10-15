@@ -234,13 +234,8 @@ fn stamp(entry: &mut Value, at: u64) {
 
 fn settings(provider: &str, model: &str, system: &str, mut params: Map<String, Value>) -> Value {
     let compact_at = params.remove("compact_at");
-    let guidance = params.remove("guidance");
-    let think_limit = params.remove("think_limit");
-    let turn_tokens = params.remove("turn_tokens");
     params.entry("temperature").or_insert(crate::llm::TEMPERATURE.into());
-    json!({
-        "provider": provider, "model": model, "params": params, "compact_at": compact_at, "guidance": guidance, "think_limit": think_limit, "turn_tokens": turn_tokens, "system": system,
-    })
+    json!({"provider": provider, "model": model, "params": params, "compact_at": compact_at, "system": system})
 }
 
 fn answer_missing(out: &mut Vec<Value>, open: &mut Vec<Value>) {

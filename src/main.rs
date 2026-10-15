@@ -75,6 +75,11 @@ async fn start() -> Result<()> {
     }
     let root = PathBuf::from(String::from_utf8(top.stdout)?.trim()).canonicalize()?;
     let user = load(&home.join(".config/air/config.toml"))?;
+    for (model, profile) in &user.models {
+        if let Some(key) = ["think_limit", "turn_tokens", "guidance"].into_iter().find(|k| profile.contains_key(*k)) {
+            bail!("~/.config/air/config.toml: [models.\"{model}\"] sets {key}, which air no longer supports; remove it");
+        }
+    }
     let repo = load(&root.join("air.toml"))?;
     let warn = |text: &str| {
         eprintln!("{text}");
