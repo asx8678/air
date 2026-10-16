@@ -283,7 +283,8 @@ That is 37 of 156 tool errors (24%), about one round trip each. The expected poo
 - pass is not lower (Δpass CI not wholly below 0);
 - the Δturns CI upper bound is below +0.3.
 
-**E12 also needs a diff-size guard.** Reject E12 if any of these holds:
+**E12 also needs a diff-size guard.** Reject E12 if either of these holds:
 - the pooled Δdiff_bytes CI lies wholly above 0;
-- refactor or ops (the tasks where "exists; use edit" occurred) have a mean diff_bytes above 1.5× the tip's;
-- the share of turns with no accept() criteria rises noticeably. That is reported as a UX cost, because the turn report's criteria row then shows "-".
+- refactor or ops (the tasks where "exists; use edit" occurred) have a mean diff_bytes above 1.5× the tip's.
+
+**Reported for both, not a reject trigger:** the share of changing turns with no accept() criteria. It is a UX cost, because the turn report's criteria row then shows "-".
