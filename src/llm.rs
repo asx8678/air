@@ -127,13 +127,16 @@ fn window(error: &str) -> Option<u64> {
     let lower = error.to_lowercase();
     WINDOW.iter().find_map(|marker| {
         let rest = lower[lower.find(marker)? + marker.len()..].trim_start();
-        let run: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == ',').collect();
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == ',').collect();
+        let run = digits.trim_end_matches(',');
         let n: u64 = run.chars().filter(char::is_ascii_digit).collect::<String>().parse().ok()?;
-        Some(match rest[run.len()..].chars().next() {
+        let n = match rest[run.len()..].chars().next() {
             Some('k') => n * 1_000,
             Some('m') => n * 1_000_000,
             _ => n,
-        })
+        };
+        // Under 1024 tokens it is a misread, not a context window.
+        (n >= 1024).then_some(n)
     })
 }
 
@@ -643,6 +646,8 @@ mod tests {
         assert_eq!(window("context length is 32k tokens"), Some(32_000));
         assert_eq!(window("the context window of 200,000"), Some(200_000));
         assert_eq!(window("no size here"), None);
+        assert_eq!(window("context length of 4096,max_tokens=10"), Some(4096), "a comma ends the number");
+        assert_eq!(window("context length is 1 million tokens"), None, "too small to be a window");
     }
 
     #[test]
