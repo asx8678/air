@@ -18,8 +18,6 @@ use std::time::{Duration, Instant};
 
 const COMPACT_AT: u64 = 100_000;
 const MAX_REQUESTS: usize = 200;
-const REPEAT_WARN: usize = 3;
-const REPEAT_BLOCK: usize = 6;
 const FILES: usize = 200;
 const LISTING: usize = 8 * 1024;
 const TREE: usize = 10 * 1024;
@@ -44,12 +42,7 @@ const SECRETS: &[(&str, &str, usize, &str)] = &[
 ];
 const GATE: &str = "The project check failed on the current tree. Fix what fails, run check(), then finish again. \
                     If it cannot pass, say why in one line. The check output ended with:";
-const NUDGE: &str = "Don't work out every change in advance: send one run() now with the next concrete step, \
-                     and adjust after you see its output.";
-const AGAIN: &str =
-    "That happened twice in a row: send one run() now with the smallest next step, and reason less first.";
-const LENGTH: &str = "Your last reply hit the output limit and was cut off. Continue from where it stopped, in smaller \
-                      steps: one run() at a time, or a shorter answer.";
+const RETRY: &str = "Send one run() now with the next step, or a shorter answer.";
 const HELPERS: &[&str] = &["sh", "show", "accept", "edit", "write", "check", "plan", "done", "recall"];
 const SANDBOX: &str = "\n\n## Sandbox\nYour code runs in a sandbox. Writes outside the repo and temp dirs fail, as do \
                        writes into any .git directory and reads of credentials and private data in the home directory \
@@ -76,7 +69,6 @@ pub struct Agent {
     worker: Option<Worker>,
     compact_at: u64,
     pending: Option<Value>,
-    repeat: (u64, usize),
     current: Option<(usize, Instant)>,
     discarded: Option<(usize, String)>,
     restarts: usize,
@@ -115,7 +107,6 @@ impl Agent {
         let mut since = session.entries.iter().rev().take_while(|e| e["switch"].is_null());
         let learned = since.find_map(|e| e["compact"]["at"].as_u64());
         let compact_at = learned.or(session.header()["compact_at"].as_u64()).filter(|&at| at > 0).unwrap_or(COMPACT_AT);
-        let repeat = (0, 0);
         let mut agent = Self {
             root: root.into(),
             config,
@@ -126,7 +117,6 @@ impl Agent {
             worker: None,
             compact_at,
             pending: None,
-            repeat,
             current: None,
             discarded: None,
             restarts: 0,
@@ -277,7 +267,7 @@ impl Agent {
     }
 
     async fn turn(&mut self, task: &str) -> Result<bool> {
-        (self.pending, self.repeat, self.restarts, self.broken, self.passed) = (None, (0, 0), 0, None, None);
+        (self.pending, self.restarts, self.broken, self.passed) = (None, 0, None, None);
         self.session.flush()?;
         let clock = Instant::now();
         let why = "air's change detection (a private git index, not your staging area) could not snapshot the tree";
@@ -288,8 +278,7 @@ impl Agent {
         // The push first writes what the snapshot logged, so the turn begins at the task itself.
         let began = self.session.entries.len() - 1;
         self.current = Some((began, clock));
-        let (mut nudged, mut overflowed, mut nudges, mut empties, mut cut, mut stalled) =
-            (false, false, 0, 0, false, false);
+        let (mut nudged, mut overflowed, mut retries, mut stalled) = (false, false, 0, false);
         let ceiling = self.compact_at * TURN_BUDGET;
         let mut spent = 0;
         let mut limit = format!("stopped after {MAX_REQUESTS} model requests in one turn");
@@ -322,12 +311,9 @@ impl Agent {
                         agents.min(AGENTS_MAX) / 1024
                     );
                 }
-                Err(e) if e.is::<llm::Interrupted>() && nudges < 2 && llm::lost(&e).is_some_and(|l| !l.stalled) => {
-                    spent += self.sent();
-                    nudges += 1;
-                    let reasoning = llm::lost(&e).is_some_and(|l| !l.thinking.is_empty());
-                    let during = if reasoning { " during long reasoning" } else { "" };
-                    self.nudge(&format!("Your last reply was lost: the provider cut the stream{during}."))?;
+                Err(e) if e.is::<llm::Interrupted>() && retries < 2 && llm::lost(&e).is_some_and(|l| !l.stalled) => {
+                    (spent, retries) = (spent + self.sent(), retries + 1);
+                    self.retry("was lost: the provider cut the stream")?;
                     continue;
                 }
                 result => result?,
@@ -344,28 +330,27 @@ impl Agent {
                 + usage["completion_tokens"].as_u64().unwrap_or(0);
             ui::usage(usage);
             let calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
-            if calls.is_empty() && message["content"].as_str().is_none_or(|c| c.trim().is_empty()) {
+            let empty = calls.is_empty() && message["content"].as_str().is_none_or(|c| c.trim().is_empty());
+            if calls.is_empty() && (empty || message["meta"]["finish"] == "length") && retries < 2 {
+                retries += 1;
                 let meta = &message["meta"];
-                if empties < 2 {
-                    (nudges, empties) = (nudges + 1, empties + 1);
-                    let extra =
-                        json!({"meta": {"usage": meta["usage"], "timing": meta["timing"]}, "finish": meta["finish"]});
+                let extra =
+                    json!({"meta": {"usage": meta["usage"], "timing": meta["timing"]}, "finish": meta["finish"]});
+                if empty {
                     ui::event("empty", "the model sent an empty reply; asking it to act", extra);
                     let thinking = message["reasoning_content"].as_str().unwrap_or_default();
                     self.discard("the reply was empty", thinking);
-                    self.nudge("Your last reply was empty: you reasoned at length and sent nothing.")?;
-                    continue;
+                    self.retry("was empty")?;
+                } else {
+                    ui::event("length", "the reply hit the output limit; asking the model to continue", extra);
+                    self.session.push(message)?;
+                    self.retry("hit the output limit and was cut off; continue from where it stopped")?;
                 }
-                let extra = json!({"finish": meta["finish"]});
-                ui::event("empty", "the model sent an empty reply again; finishing the turn", extra);
-                (cut, stalled) = (true, true);
-            }
-            if calls.is_empty() && message["meta"]["finish"] == "length" && !cut {
-                cut = true;
-                ui::event("length", "the reply hit the output limit; asking the model to continue", Value::Null);
-                self.session.push(message)?;
-                self.session.push(json!({"role": "user", "content": LENGTH, "meta": {"host": true}}))?;
                 continue;
+            }
+            if empty {
+                ui::event("empty", "the model sent an empty reply again; finishing the turn", Value::Null);
+                stalled = true;
             }
             self.session.push(message)?;
             for call in &calls {
@@ -442,11 +427,10 @@ impl Agent {
         }
     }
 
-    fn nudge(&mut self, why: &str) -> Result<()> {
-        let last = self.session.entries.iter().rev().find(|e| e["role"].is_string());
-        let again = last.is_some_and(|e| e["meta"]["nudge"] == true);
-        ui::event("nudge", why, Value::Null);
-        let content = format!("{why} {}", if again { AGAIN } else { NUDGE });
+    /// Asks again after a reply that came back unusable: lost, empty, or cut off at the output limit.
+    fn retry(&mut self, what: &str) -> Result<()> {
+        let content = format!("Your last reply {what}. {RETRY}");
+        ui::event("nudge", &content, Value::Null);
         self.session.push(json!({"role": "user", "content": content, "meta": {"host": true, "nudge": true}}))
     }
 
@@ -481,18 +465,6 @@ impl Agent {
     }
 
     async fn run_code(&mut self, code: &str) -> (String, Value) {
-        let mut hasher = std::hash::DefaultHasher::new();
-        code.hash(&mut hasher);
-        let key = hasher.finish();
-        self.repeat = (key, if self.repeat.0 == key { self.repeat.1 + 1 } else { 1 });
-        if self.repeat.1 >= REPEAT_BLOCK {
-            let out = format!(
-                "error: this exact code already ran {} times in a row, so it was blocked: change the approach or finish",
-                self.repeat.1 - 1
-            );
-            ui::event("repeat", &out, Value::Null);
-            return (out, json!({"tool": "run", "error": true, "rejected": true}));
-        }
         ui::run(code);
         let state = self.session.state();
         let state = json!({"accepted": state.accepted, "plan": state.plan});
@@ -514,14 +486,9 @@ impl Agent {
         match ran.await {
             Ok(reply) => {
                 self.restarts = 0;
-                let (mut out, mut meta) = finish(reply);
+                let (out, mut meta) = finish(reply);
                 if stale(&meta) {
                     self.passed = None;
-                }
-                if self.repeat.1 >= REPEAT_WARN {
-                    let n = self.repeat.1;
-                    out +=
-                        &format!("\n[the same code has now run {n} times in a row; at {REPEAT_BLOCK} it is blocked]");
                 }
                 meta["ms"] = (clock.elapsed().as_millis() as u64).into();
                 ui::ran(&meta, &out);
