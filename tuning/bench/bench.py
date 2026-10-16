@@ -348,15 +348,20 @@ def summary(rows):
             "outcomes": len({outcome(r) for r in rows})}
 
 
+def balanced(by_task, key):
+    """The mean over tasks of each task's mean, so every task weighs the same whatever its number of runs."""
+    return mean([mean([float(r[key]) for r in rs]) for rs in by_task.values()])
+
+
 def bootstrap(base, var, key, n=4000, seed=1):
-    """95% CI of the pooled per-run mean difference var − base, resampling runs within each task."""
+    """95% CI of the task-balanced difference var − base, resampling runs within each task."""
     rng = random.Random(seed)
     tasks_ = sorted(set(base) & set(var))
     diffs = []
     for _ in range(n):
-        b = [rng.choice(base[t])[key] for t in tasks_ for _ in base[t]]
-        v = [rng.choice(var[t])[key] for t in tasks_ for _ in var[t]]
-        diffs.append(mean([float(x) for x in v]) - mean([float(x) for x in b]))
+        d = [mean([float(rng.choice(var[t])[key]) for _ in var[t]]) - mean([float(rng.choice(base[t])[key]) for _ in base[t]])
+             for t in tasks_]
+        diffs.append(mean(d))
     diffs.sort()
     return diffs[int(0.025 * n)], diffs[int(0.975 * n)]
 
@@ -385,7 +390,7 @@ def cmd_report(args):
             out.append(f"| {task} | {v} | {s['n']} | {s['pass']:.0%} | {s['turns']:.1f} ({s['turns_sd']:.1f}) | {s['uncached'] / 1000:.1f}k | "
                        f"{s['out'] / 1000:.1f}k | {s['tokens_sd'] / 1000:.1f}k | {s['cached']:.0%} | {s['cost']:.4f} | {s['wall']:.0f} | "
                        f"{s['calls']:.1f} | {s['errors']:.1f} | {s['dist']:.2f} | {s['outcomes']} |")
-    out += ["", "## Pooled (tasks every variant ran)", "",
+    out += ["", "## Pooled (tasks every variant ran; every task weighs the same)", "",
             "| variant | runs | pass | turns | uncached in | out | cached | cost $ | wall s | Δ turns vs base (95% CI) | Δ uncached (95% CI) | Δ out (95% CI) | Δ pass (95% CI) |",
             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     common = set.intersection(*[set(by[v]) for v in labels])
@@ -397,10 +402,14 @@ def cmd_report(args):
             if v == args.baseline:
                 cells.append("—")
                 continue
-            lo, hi = bootstrap({t: by[args.baseline][t] for t in common}, {t: by[v][t] for t in common}, key)
-            d = mean([float(r[key]) for r in rs]) - mean([float(r[key]) for t in common for r in by[args.baseline][t]])
+            base, var = {t: by[args.baseline][t] for t in common}, {t: by[v][t] for t in common}
+            lo, hi = bootstrap(base, var, key)
+            d = balanced(var, key) - balanced(base, key)
             unit = "k" if scale == 1000 else ("pp" if key == "pass" else "")
             cells.append(f"{d / scale:+.1f}{unit} [{lo / scale:+.1f}, {hi / scale:+.1f}]")
+        tb = {t: by[v][t] for t in common}
+        s.update({k: balanced(tb, k) for k in ("pass", "turns", "uncached", "out", "cost", "wall_s")})
+        s["wall"] = s.pop("wall_s")
         out.append(f"| {v} | {len(rs)} | {s['pass']:.0%} | {s['turns']:.2f} | {s['uncached'] / 1000:.1f}k | {s['out'] / 1000:.1f}k | "
                    f"{s['cached']:.0%} | {s['cost']:.4f} | {s['wall']:.0f} | " + " | ".join(cells) + " |")
     text = "\n".join(out) + "\n"

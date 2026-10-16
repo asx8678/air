@@ -196,3 +196,36 @@ Consequences:
     (1.59k → 1.55k), and neither did the final answer's size (1,119 → 1,171 chars). A wording change to the final message has no obvious way to
     cut reasoning, so this may be drift too; report ran last in the batch.
 - **Decision:** kept provisionally. The closing interleaved run (final vs tune1-late) decides it.
+
+## Correction · the pooled estimator was not task-balanced (fixed in bench.py)
+
+`bench.py report` used to pool by run, not by task. The bootstrap had the same flaw: it drew each side's runs in that side's own task mix.
+- After the extra targeted runs, `main` held 125 runs: 25 review, 10 of each Python task, 5 of each other task. The cheap tasks pulled main's mean down, so any balanced variant compared with it looked more expensive.
+- The report now uses the mean of per-task differences, with a bootstrap that resamples within each task.
+
+Recomputed against all of main's runs:
+
+| variant | Δturns (95% CI), before → after | other changes |
+|---|---|---|
+| E1 prompt-done | +0.9 [+0.5, +1.3] → **+0.47 [+0.04, +0.89]** | uncached +1.0k → +0.2k [−0.5, +0.9]; output +0.6k → +0.2k [−0.2, +0.6] |
+| E5 effort-high | +0.7 [+0.4, +1.0] → **+0.0 [−0.4, +0.4]** | uncached −0.1k, output −0.1k |
+| E6 thinking off | +20.3 → +19.6 [+10.7, +28.8] | pass −17.6pp |
+| tune1 vs main | +1.0 [+0.6, +1.3] → **+0.3 [−0.1, +0.6]** | output +0.4k [+0.0, +0.7] |
+| E4 stray (5 tasks) | +0.3 → **−0.2 [−0.8, +0.5]** | pass +3.2pp [+0.8, +6.4], still wholly above 0 |
+| E3 reload, E7–E9 | balanced N on both sides | unchanged |
+
+**What this changes:**
+- E5 is cost-neutral rather than costly. It is still rejected: it adds a setting with no win, and its pass gain is main's review stray-file misses, which E4 fixes.
+- E1 sits on the edge (vs main-late: +0.32 [−0.13, +0.76]).
+- **The "drift" story above is mostly withdrawn.** The same build gave pooled turns of 5.80 at 10:20 and 5.91 at 12:35 (+0.11). The per-task moves of ±0.4–1.4 turns are noise at N=5, not a trend.
+- **The entropy check is noise at N=5:** the same build's mean per-task turns sd was 1.11 at 10:20 and 1.36 at 12:35. That is as large as the increases used to reject E7 (1.12 → 1.37) and E8 (1.12 → 1.40). Those two rejections are therefore not supported, and they are re-tested below.
+
+## E10 · Head-to-head at N=10, interleaved: the tip vs the two removals (rule written before running)
+
+- **Variants:** `final-h2h` (9e275a9 = main + E3 + E4 + E9), `rituals2-b` (tip + E7) and `noexample-b` (tip + E8), all run at the same time with 2 jobs each, N=10 per task.
+- **Entropy noise floor:** the difference in mean per-task turns sd between final-h2h's runs 1–5 and runs 6–10.
+- **Keep a removal when all three hold:**
+  - pass is not lower (Δpass CI not wholly below 0);
+  - the Δturns CI upper bound is below +0.3;
+  - its per-task turns sd rises by no more than twice the noise floor.
+- **Otherwise reject.**
