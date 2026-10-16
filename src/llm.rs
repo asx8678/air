@@ -13,8 +13,6 @@ const TOTAL: Duration = Duration::from_secs(3600);
 const LINE_MAX: usize = 16 << 20;
 const BODY_MAX: usize = 2000;
 const FIELDS: [&str; 2] = ["reasoning_content", "reasoning"];
-const OPEN: &str = "<think>";
-const CLOSE: &str = "</think>";
 const OVERFLOW: &[&str] = &[
     "context_length",
     "context length",
@@ -291,7 +289,7 @@ impl Llm {
         let mut lines = 0;
         let (mut markdown, mut began) = (crate::render::Markdown::default(), None::<Instant>);
         let (mut held, mut answering, mut narrated) = (String::new(), false, false);
-        let (mut broken, mut inline, mut via) = (None, Inline::default(), None);
+        let (mut broken, mut via) = (None, None);
         let (mut scan, mut eof, mut events, mut got, mut stalled, mut rejected) = (0, false, 0, 0, false, false);
         let cap = tokio::time::Instant::from_std(sent) + TOTAL;
         let mut idle = tokio::time::Instant::now() + IDLE;
@@ -355,11 +353,11 @@ impl Llm {
                 if why.is_some() || field.is_some() || tools.is_some() || !content.is_empty() {
                     idle = tokio::time::Instant::now() + IDLE;
                 }
-                let (inner, t) = inline.split(&content);
-                let reasoning = field.and_then(|f| delta[f].as_str()).unwrap_or_default().to_string() + &inner;
+                let t = content;
+                let reasoning = field.and_then(|f| delta[f].as_str()).unwrap_or_default();
                 if !reasoning.is_empty() {
                     via = via.or(field);
-                    thinking += &reasoning;
+                    thinking += reasoning;
                     let began = *began.get_or_insert_with(Instant::now);
                     first.get_or_insert(began);
                     if text.is_empty() {
@@ -433,32 +431,6 @@ impl Llm {
             }
         }
         (served["bytes"], served["events"]) = (got.into(), events.into());
-        let open = inline.inside == Some(true) && via.is_none();
-        let (inner, rest) = inline.finish();
-        thinking += &inner;
-        text += &rest;
-        if answering {
-            markdown.push(&rest);
-        } else {
-            held += &rest;
-        }
-        let close = text.find(CLOSE).filter(|&end| {
-            via.is_none() && thinking.is_empty() && !text[..end].contains("<think") && !text[..end].contains('`')
-        });
-        if let Some(end) = close {
-            let after = text[end + CLOSE.len()..].trim_start_matches([' ', '\t']);
-            if after.is_empty() || after.starts_with(['\n', '\r']) {
-                (thinking, text) = (text[..end].trim_end().to_string(), after.trim_start().to_string());
-                if !answering && !narrated {
-                    held = text.clone();
-                }
-            }
-        }
-        if open && broken.is_none() && reason != "length" {
-            let inner = std::mem::take(&mut thinking);
-            text += &inner;
-            held += &inner;
-        }
         let failed: Option<anyhow::Error> = match broken.as_deref() {
             Some(problem) if overflow(problem) => Some(ContextOverflow::new(problem.into()).into()),
             Some(problem) if rejected => Some(anyhow!("{problem}")),
@@ -515,12 +487,9 @@ impl Llm {
         if !thinking.is_empty() {
             message["reasoning_content"] = thinking.into();
         }
-        // Which way the reasoning came: a stream field, or <think> tags in the text.
         if let Some(field) = via {
             self.field.set(field);
             message["meta"]["reasoning_field"] = field.into();
-        } else if message["reasoning_content"].is_string() {
-            message["meta"]["reasoning_field"] = "inline".into();
         }
         if !calls.is_empty() {
             message["tool_calls"] = calls
@@ -619,46 +588,6 @@ fn refused(error: &Value) -> bool {
 
 fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     headers.get("retry-after")?.to_str().ok()?.trim().parse().ok()
-}
-
-#[derive(Default)]
-struct Inline {
-    inside: Option<bool>,
-    held: String,
-}
-
-impl Inline {
-    fn split(&mut self, t: &str) -> (String, String) {
-        if self.inside == Some(false) {
-            return (String::new(), t.into());
-        }
-        self.held += t;
-        if self.inside.is_none() {
-            let lead = self.held.trim_start();
-            if OPEN.starts_with(lead) {
-                return Default::default();
-            }
-            let Some(rest) = lead.strip_prefix(OPEN).map(String::from) else {
-                self.inside = Some(false);
-                return (String::new(), std::mem::take(&mut self.held));
-            };
-            (self.held, self.inside) = (rest, Some(true));
-        }
-        if let Some(end) = self.held.find(CLOSE) {
-            self.inside = Some(false);
-            let after = self.held[end + CLOSE.len()..].trim_start().to_string();
-            self.held.truncate(end);
-            return (std::mem::take(&mut self.held), after);
-        }
-        let keep = (1..CLOSE.len()).rev().find(|&k| self.held.ends_with(&CLOSE[..k])).unwrap_or(0);
-        let tail = self.held.split_off(self.held.len() - keep);
-        (std::mem::replace(&mut self.held, tail), String::new())
-    }
-
-    fn finish(&mut self) -> (String, String) {
-        let held = std::mem::take(&mut self.held);
-        if self.inside == Some(true) { (held, String::new()) } else { (String::new(), held) }
-    }
 }
 
 #[cfg(test)]
