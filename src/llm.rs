@@ -1,6 +1,4 @@
 use anyhow::{Context, Result, anyhow, bail};
-use eventsource_stream::{EventStreamError, Eventsource};
-use futures_util::{Stream, StreamExt};
 use serde_json::{Value, json};
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -271,29 +269,29 @@ impl Llm {
     }
 
     async fn stream(&self, request: &reqwest::RequestBuilder) -> Result<Value> {
-        let (response, sent) = self.send(request).await?;
+        let (mut response, sent) = self.send(request).await?;
         let mut served = json!({"status": response.status().as_u16(), "headers": headers(response.headers())});
         let kind = response.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or_default();
         let kind = kind.to_lowercase();
         if kind.contains("html") || kind.contains("json") {
             bail!("the provider did not send an event stream: {kind}: {}", head(response).await);
         }
-        let got = Cell::new(0);
-        let mut events = std::pin::pin!(body(response, &got).eventsource());
-        let mut reply = Reply::default();
-        let (mut broken, mut stalled, mut rejected) = (None, false, false);
+        let (mut lines, mut reply) = (Lines::default(), Reply::default());
+        let (mut broken, mut eof, mut got, mut stalled, mut rejected) = (None, false, 0, false, false);
         let cap = tokio::time::Instant::from_std(sent) + TOTAL;
         let mut idle = tokio::time::Instant::now() + IDLE;
-        'read: loop {
-            let event = match tokio::time::timeout_at(idle.min(cap), events.next()).await {
-                Ok(Some(Ok(event))) => event,
-                Ok(None) => break,
-                Ok(Some(Err(EventStreamError::Transport(Broken(why, permanent))))) => {
-                    (broken, rejected) = (Some(why), permanent);
-                    break;
+        'read: while !eof {
+            match tokio::time::timeout_at(idle.min(cap), response.chunk()).await {
+                Ok(Ok(Some(chunk))) => {
+                    got += chunk.len();
+                    lines.push(&chunk);
                 }
-                Ok(Some(Err(e))) => {
-                    (broken, rejected) = (Some(format!("an unreadable event stream: {e}")), true);
+                Ok(Ok(None)) => {
+                    eof = true;
+                    lines.push(b"\n");
+                }
+                Ok(Err(e)) => {
+                    broken = Some(chain(e));
                     break;
                 }
                 Err(_) => {
@@ -305,8 +303,9 @@ impl Llm {
                     });
                     break;
                 }
-            };
-            for data in payloads(&event.data) {
+            }
+            while let Some(line) = lines.next() {
+                let Some(data) = line.trim().strip_prefix("data:") else { continue };
                 let data = data.trim();
                 reply.finished |= data == "[DONE]";
                 let Ok(event) = serde_json::from_str::<Value>(data) else { continue };
@@ -326,13 +325,18 @@ impl Llm {
                 }
                 std::io::stdout().flush()?;
             }
+            if lines.partial() > LINE_MAX {
+                rejected = true;
+                broken = Some(format!("a stream line passed {} MB", LINE_MAX >> 20));
+                break;
+            }
         }
-        (served["bytes"], served["events"]) = (got.get().into(), reply.events.into());
+        (served["bytes"], served["events"]) = (got.into(), reply.events.into());
         let failed: Option<anyhow::Error> = match broken.as_deref() {
             Some(problem) if overflow(problem) => Some(ContextOverflow::new(problem.into()).into()),
             Some(problem) if rejected => Some(anyhow!("{problem}")),
             None if reply.events == 0 && !reply.finished => {
-                Some(anyhow!("the provider did not send an event stream: {} bytes without a single event", got.get()))
+                Some(anyhow!("the provider did not send an event stream: {got} bytes without a single event"))
             }
             _ => None,
         };
@@ -452,51 +456,37 @@ fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     headers.get("retry-after")?.to_str().ok()?.trim().parse().ok()
 }
 
-/// Why the response body stopped short, and whether retrying would only get the same again.
-#[derive(Debug)]
-struct Broken(String, bool);
+/// The response body as lines, each handed over once it ends; every data line is one event. A line still arriving
+/// waits, and is not scanned again.
+#[derive(Default)]
+struct Lines {
+    buf: Vec<u8>,
+    start: usize,
+    scan: usize,
+}
 
-impl std::fmt::Display for Broken {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.write_str(&self.0)
+impl Lines {
+    fn push(&mut self, chunk: &[u8]) {
+        self.buf.drain(..self.start);
+        self.scan -= self.start;
+        self.start = 0;
+        self.buf.extend_from_slice(chunk);
     }
-}
 
-/// The response body as text for the event-stream parser, which on its own would hold everything after an invalid
-/// byte waiting for it to become valid: bad bytes become U+FFFD, a line longer than LINE_MAX ends the stream, and a
-/// last event the server left unterminated still arrives.
-fn body(response: reqwest::Response, got: &Cell<usize>) -> impl Stream<Item = Result<String, Broken>> + '_ {
-    let (mut held, mut line) = (Vec::new(), 0);
-    let text = response.bytes_stream().map(move |chunk| {
-        let chunk = chunk.map_err(|e| Broken(chain(e), false))?;
-        got.set(got.get() + chunk.len());
-        line = match chunk.iter().rposition(|&b| b == b'\n' || b == b'\r') {
-            Some(end) => chunk.len() - end - 1,
-            None => line + chunk.len(),
+    fn next(&mut self) -> Option<String> {
+        let Some(end) = self.buf[self.scan..].iter().position(|&b| b == b'\n' || b == b'\r') else {
+            self.scan = self.buf.len();
+            return None;
         };
-        if line > LINE_MAX {
-            return Err(Broken(format!("a stream line passed {} MB", LINE_MAX >> 20), true));
-        }
-        held.extend_from_slice(&chunk);
-        // A character split across chunks waits for the rest of it.
-        let partial = held.utf8_chunks().last().map_or(0, |chunk| {
-            let tail = chunk.invalid();
-            if std::str::from_utf8(tail).is_err_and(|e| e.error_len().is_none()) { tail.len() } else { 0 }
-        });
-        let text = String::from_utf8_lossy(&held[..held.len() - partial]).into_owned();
-        held.drain(..held.len() - partial);
-        Ok(text)
-    });
-    text.chain(futures_util::stream::once(std::future::ready(Ok("\n\n".to_string()))))
-}
+        let end = self.scan + end;
+        let line = String::from_utf8_lossy(&self.buf[self.start..end]).into_owned();
+        (self.start, self.scan) = (end + 1, end + 1);
+        Some(line)
+    }
 
-/// The JSON payloads in one event's data: a value spread over several data lines, or one per line from a server
-/// that ends each event with a single newline.
-fn payloads(data: &str) -> Vec<&str> {
-    if data.contains('\n') && serde_json::from_str::<Value>(data).is_err() {
-        data.lines().collect()
-    } else {
-        vec![data]
+    /// The bytes of the line still arriving.
+    fn partial(&self) -> usize {
+        self.buf.len() - self.start
     }
 }
 
