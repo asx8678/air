@@ -10,6 +10,7 @@ Runs live in scratch repos under $AIR_BENCH_RUNS (default $TMPDIR/air-bench/runs
 import argparse
 import concurrent.futures
 import difflib
+import fcntl
 import hashlib
 import json
 import os
@@ -57,8 +58,18 @@ def build(variant):
         return None, "opencode"
     sha = sh(["git", "rev-parse", "--short=10", variant + "^{commit}"], cwd=AIR).strip()
     out = os.path.join(CACHE, "bin", sha, "air")
-    if os.path.exists(out):
-        return out, sha
+    os.makedirs(CACHE, exist_ok=True)
+    with open(os.path.join(CACHE, "build.lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)  # one build at a time in the shared worktree
+        if not os.path.exists(out):
+            _build(sha, out)
+    version = sh([out, "--version"])
+    if sha[:7] not in version:
+        raise RuntimeError(f"{out} reports {version.strip()!r}, not {sha}")
+    return out, sha
+
+
+def _build(sha, out):
     wt = os.path.join(CACHE, "wt")
     if not os.path.isdir(wt):
         sh(["git", "worktree", "add", "-q", "--detach", wt, sha], cwd=AIR)
@@ -68,7 +79,6 @@ def build(variant):
     sh(["cargo", "build", "--release", "-q"], cwd=wt, timeout=1800)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     shutil.copy2(os.path.join(wt, "target", "release", "air"), out)
-    return out, sha
 
 
 def prepare(names):
