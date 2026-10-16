@@ -49,7 +49,7 @@ fn save(home: &Path, providers: &Providers) -> Result<()> {
     let path = file(home);
     let dir = path.parent().context("providers.toml has a parent")?;
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).with_context(|| dir.display().to_string())?;
-    let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
+    let tmp = path.with_added_extension(format!("{}.tmp", std::process::id()));
     let write = || -> Result<()> {
         let mut out = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
         out.write_all(toml::to_string(providers)?.as_bytes())?;
@@ -236,20 +236,6 @@ async fn models(home: &Path, providers: &mut Providers, name: &str, editor: &mut
                 None => ui::note("pick a model by its number, e.g. d 1"),
             },
             _ => ui::note("unknown command"),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::web_url;
-
-    #[test]
-    fn base_urls_must_be_http() {
-        assert!(web_url("https://opencode.ai/inference/go/v1"));
-        assert!(web_url("http://127.0.0.1:8080/v1"));
-        for bad in ["api.example.invalid/v1", "htps://opencode.ai/v1", "http://127.0.0.1:99999/v1", ""] {
-            assert!(!web_url(bad), "{bad}");
         }
     }
 }

@@ -4,6 +4,7 @@ ROOT = os.getcwd()
 sys.path.append(ROOT)
 CHECK = os.environ.pop("LOW_CHECK", "")
 FMT = os.environ.pop("LOW_FMT", "")
+PROTECTED = [os.path.realpath(d) for d in json.loads(os.environ.pop("LOW_PROTECTED", "[]"))]
 HALF = 16000
 LIMIT = 8 << 20
 RUN_CAP = 570
@@ -87,18 +88,6 @@ def _read(f):
 
 def _rel(path):
     return os.path.relpath(os.path.join(ROOT, path), ROOT)
-
-
-def _protected():
-    hooks = subprocess.run(["git", "config", "core.hooksPath"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
-    dirs = [os.path.join(ROOT, ".git")]
-    if hooks:
-        hooks = os.path.realpath(os.path.join(ROOT, os.path.expanduser(hooks)))
-        dirs.append(os.path.dirname(hooks) if os.path.basename(hooks) == "_" else hooks)
-    return [os.path.realpath(d) for d in dirs]
-
-
-PROTECTED = _protected()
 
 
 def _change(tool, path, make):

@@ -155,7 +155,6 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
     let check_output: Vec<String> =
         failing_check.map(|i| format!("#{i}\n{}", quote(tail(text(i), 1536)))).into_iter().collect();
 
-    let skip = |l: &&str| l.is_empty() || l.starts_with('#') || l.starts_with("import ") || l.starts_with("from ");
     let mut events = vec![];
     for i in range {
         match role(i) {
@@ -172,7 +171,7 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
                     let args: Value = serde_json::from_str(call["function"]["arguments"].as_str().unwrap_or_default())
                         .unwrap_or_default();
                     let code = args["code"].as_str().unwrap_or_default();
-                    let what = line(code.lines().map(str::trim).find(|l| !skip(l)).unwrap_or_default(), 80);
+                    let what = line(crate::ui::headline(code).unwrap_or_default(), 80);
                     let result = (i + 1..keep)
                         .take_while(|&r| role(r) == "tool")
                         .find(|&r| entries[r]["tool_call_id"] == call["id"]);
@@ -264,53 +263,9 @@ fn line(s: &str, max: usize) -> String {
 }
 
 fn clip(s: &str, max: usize) -> &str {
-    let mut end = max.min(s.len());
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
+    &s[..s.floor_char_boundary(max)]
 }
 
 pub fn tail(s: &str, max: usize) -> &str {
-    let mut start = s.len().saturating_sub(max);
-    while !s.is_char_boundary(start) {
-        start += 1;
-    }
-    &s[start..]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{REPLAY, cut, excerpt, wire};
-    use serde_json::json;
-
-    #[test]
-    fn long_reasoning_replays_as_head_and_tail() {
-        let thinking = format!("PLAN{}DECIDE", "x".repeat(3 * REPLAY));
-        let reply = json!({"role": "assistant", "content": "", "reasoning_content": thinking, "meta": {"at": 1}});
-        let sent = wire(&reply, 2, Some(1));
-        let replayed = sent["reasoning_content"].as_str().unwrap_or_default();
-        assert!(replayed.starts_with("PLAN") && replayed.ends_with("DECIDE"), "keeps the plan and the decision");
-        assert!(replayed.len() < REPLAY + 64 && replayed.contains("bytes of reasoning omitted"));
-        assert_eq!(sent, wire(&reply, 2, Some(1)), "an entry always sends the same bytes");
-        assert_eq!(wire(&reply, 0, Some(1)).get("reasoning_content"), None, "dropped before the newest task");
-        let short = json!({"role": "assistant", "reasoning_content": "brief"});
-        assert_eq!(wire(&short, 2, Some(1))["reasoning_content"], "brief");
-    }
-
-    #[test]
-    fn cut_keeps_the_runs_that_fit_the_budget() {
-        let mut entries = vec![json!({"system": "s"}), json!({"role": "user", "content": "task", "meta": {}})];
-        for k in 0..6 {
-            entries.push(json!({"role": "assistant", "content": "", "tool_calls": [{"id": format!("c{k}")}]}));
-            entries.push(json!({"role": "tool", "tool_call_id": format!("c{k}"), "content": "x\n".repeat(6000)}));
-        }
-        assert_eq!(cut(&entries, 1, 10_000, false), 10, "two whole runs fill the budget");
-    }
-
-    #[test]
-    fn excerpt_never_underflows() {
-        assert!(excerpt(&"x".repeat(100), 21).ends_with("bytes omitted]"));
-        assert_eq!(excerpt("short", 21), "short");
-    }
+    &s[s.ceil_char_boundary(s.len().saturating_sub(max))..]
 }

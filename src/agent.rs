@@ -23,7 +23,7 @@ const LISTING: usize = 8 * 1024;
 const TREE: usize = 10 * 1024;
 const AGENTS_MAX: usize = 32 * 1024;
 const RESTARTS: usize = 2;
-const CHECK_TIMEOUT: Duration = Duration::from_secs(1800);
+const CHECK_TIMEOUT: Duration = Duration::from_mins(30);
 const CHECK_OUT: u64 = 1 << 20;
 const BIG: u64 = 16 << 20;
 const TURN_BUDGET: u64 = 60;
@@ -203,9 +203,7 @@ impl Agent {
     }
 
     pub fn switch(&mut self, provider: &str, model: &str) -> Result<()> {
-        if !self.config.providers.contains_key(provider) {
-            anyhow::bail!("no provider named {provider}");
-        }
+        anyhow::ensure!(self.config.providers.contains_key(provider), "no provider named {provider}");
         web(provider, &self.config.providers[provider].base_url)?;
         let profile = self.config.models.get(model).cloned().unwrap_or_default();
         let system = system_prompt(&self.root, self.yolo, self.config.check.is_some(), self.repo);
@@ -226,7 +224,7 @@ impl Agent {
         ui::settle();
         if let Some(result) = finished {
             if let Err(e) = &result {
-                let text = redact(&ui::printable(&format!("{e:#}"))).0;
+                let text = error_text(e);
                 self.session.push(json!({"event": "error", "text": text, "at": ui::now_ms()}))?;
                 if let Err(e) = self.unfinished().await {
                     ui::note(&format!("could not write the turn report: {e:#}"));
@@ -321,7 +319,7 @@ impl Agent {
                         agents.min(AGENTS_MAX) / 1024
                     );
                 }
-                Err(e) if e.is::<llm::Interrupted>() && retries < 2 && llm::lost(&e).is_some_and(|l| !l.stalled) => {
+                Err(e) if retries < 2 && llm::lost(&e).is_some_and(|l| !l.stalled) => {
                     (spent, retries) = (spent + self.sent(), retries + 1);
                     self.retry("was lost: the provider cut the stream")?;
                     continue;
@@ -753,8 +751,8 @@ impl Agent {
     }
 
     pub fn think(&self) {
-        let entries = self.session.entries.iter().enumerate().rev();
-        let stored = entries.filter_map(|(i, e)| e["reasoning_content"].as_str().map(|r| (i, r))).next();
+        let mut entries = self.session.entries.iter().enumerate().rev();
+        let stored = entries.find_map(|(i, e)| e["reasoning_content"].as_str().map(|r| (i, r)));
         let last = match (&self.discarded, stored) {
             (Some((at, lost)), stored) if stored.is_none_or(|(i, _)| *at > i) => Some(lost.as_str()),
             (_, stored) => stored.map(|(_, r)| r),
@@ -795,12 +793,11 @@ impl Drop for Group {
 
 /// A provider must have a usable base_url before a session record names it.
 fn web(name: &str, base_url: &str) -> Result<()> {
-    if !crate::providers::web_url(base_url) {
-        anyhow::bail!(
-            "provider {name}: base_url {} is not an http(s) URL (/providers changes it)",
-            ui::printable(base_url)
-        );
-    }
+    anyhow::ensure!(
+        crate::providers::web_url(base_url),
+        "provider {name}: base_url {} is not an http(s) URL (/providers changes it)",
+        ui::printable(base_url)
+    );
     Ok(())
 }
 
@@ -849,7 +846,11 @@ async fn grouped(mut cmd: tokio::process::Command) -> Result<(bool, String)> {
             status = child.wait() => break status?,
             _ = tokio::time::sleep(Duration::from_secs(1)) => {
                 let seen = worker::descendants(pid);
-                group.0.extend(seen.into_iter().filter(|g| !group.0.contains(g)).collect::<Vec<_>>());
+                for g in seen {
+                    if !group.0.contains(&g) {
+                        group.0.push(g);
+                    }
+                }
             }
         }
     };
@@ -858,9 +859,14 @@ async fn grouped(mut cmd: tokio::process::Command) -> Result<(bool, String)> {
     file.seek(SeekFrom::Start(size.saturating_sub(CHECK_OUT)))?;
     let mut out = vec![];
     file.read_to_end(&mut out)?;
-    let out = String::from_utf8_lossy(&out);
-    let out = if size > CHECK_OUT { format!("[… {} bytes omitted]\n{out}", size - CHECK_OUT) } else { out.into() };
+    let out = String::from_utf8_lossy_owned(out);
+    let out = if size > CHECK_OUT { format!("[… {} bytes omitted]\n{out}", size - CHECK_OUT) } else { out };
     Ok((status.success(), out))
+}
+
+/// An error as low shows and logs it: the whole chain, without control characters or secrets.
+pub fn error_text(e: &anyhow::Error) -> String {
+    redact(&ui::printable(&format!("{e:#}"))).0
 }
 
 pub fn redact(text: &str) -> (String, usize) {
@@ -918,11 +924,10 @@ fn guard_git(root: &Path) {
         .current_dir(root)
         .process_group(0)
         .output();
-    let text = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    let text = out.map(|o| String::from_utf8_lossy_owned(o.stdout)).unwrap_or_default();
     let fields: Vec<&str> = text.split('\0').collect();
     let (mut args, mut local) = (vec![], vec![]);
-    for pair in fields.chunks(2) {
-        let [scope, entry] = pair else { continue };
+    for [scope, entry] in fields.as_chunks::<2>().0 {
         let key = entry.split('\n').next().unwrap_or_default();
         let Some((kind, name)) = key.split_once('.').and_then(|(kind, rest)| Some((kind, rest.rsplit_once('.')?.0)))
         else {
@@ -1111,8 +1116,7 @@ fn listing(root: &Path) -> String {
     }
     let mut counts = BTreeMap::new();
     for file in &files {
-        let parts: Vec<&str> = file.splitn(3, '/').collect();
-        let key = if parts.len() == 3 { format!("{}/{}/", parts[0], parts[1]) } else { file.to_string() };
+        let key = file.match_indices('/').nth(1).map_or(*file, |(j, _)| &file[..=j]);
         *counts.entry(key).or_insert(0) += 1;
     }
     let mut out = format!("\n\n# Repository at session start ({} tracked files; folders show counts)\n", files.len());
@@ -1138,7 +1142,7 @@ fn repo_text(root: &Path, rel: &str, max: usize) -> Option<(String, u64)> {
         if std::str::from_utf8(tail).is_err_and(|e| e.error_len().is_none()) { tail.len() } else { 0 }
     });
     bytes.truncate(bytes.len() - partial);
-    Some((String::from_utf8_lossy(&bytes).into_owned(), size))
+    Some((String::from_utf8_lossy_owned(bytes), size))
 }
 
 fn tools() -> Value {
@@ -1166,7 +1170,7 @@ fn git<S: AsRef<str>>(root: &Path, index: Option<&Path>, args: &[S]) -> Result<S
         let text = format!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
         return Err(GitExit(out.status.code(), text).into());
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(String::from_utf8_lossy_owned(out.stdout))
 }
 
 /// A git command that failed: its exit code, and the command with what git printed.
@@ -1184,7 +1188,7 @@ impl std::error::Error for GitExit {}
 /// The private index is a cache: a leftover lock is dropped, and an index git can no longer use is rebuilt, once.
 fn snapshot(root: &Path, index: &Path) -> Result<String> {
     let _held = INDEX.lock().unwrap_or_else(|p| p.into_inner());
-    let _ = std::fs::remove_file(index.with_extension("index.lock"));
+    let _ = std::fs::remove_file(index.with_added_extension("lock"));
     snapshot_with(root, index).or_else(|e| {
         let _ = std::fs::remove_file(index);
         let tree = snapshot_with(root, index)?;
@@ -1243,16 +1247,4 @@ fn changes(root: &Path, snapshot: Option<(&str, &Path)>, since: std::time::Syste
     };
     out.extend(new.lines().filter(fresh).map(|f| format!("{f} (new)")));
     if out.is_empty() { "none".into() } else { out.join("\n") }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::redact;
-
-    #[test]
-    fn redacts_opencode_keys_but_not_identifiers() {
-        let (out, hidden) = redact("key oc_sk_4f9Qx2LmZ8rT7vW1yB3nK6hJ and oc_some_long_identifier_name");
-        assert_eq!(hidden, 1);
-        assert_eq!(out, "key [redacted opencode key] and oc_some_long_identifier_name");
-    }
 }

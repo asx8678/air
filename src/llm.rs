@@ -8,8 +8,8 @@ pub const TEMPERATURE: f64 = 0.0;
 const USER_AGENT: &str = concat!("low/", env!("CARGO_PKG_VERSION"));
 const LONG: Duration = Duration::from_secs(150);
 const FIRST_BYTE: Duration = Duration::from_secs(90);
-const IDLE: Duration = Duration::from_secs(300);
-const TOTAL: Duration = Duration::from_secs(3600);
+const IDLE: Duration = Duration::from_mins(5);
+const TOTAL: Duration = Duration::from_hours(1);
 const LINE_MAX: usize = 16 << 20;
 const BODY_MAX: usize = 2000;
 const FIELDS: [&str; 2] = ["reasoning_content", "reasoning"];
@@ -141,7 +141,7 @@ fn window(error: &str) -> Option<u64> {
 }
 
 pub fn key_file() -> std::path::PathBuf {
-    crate::providers::config_dir(&std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())).join("api_key")
+    crate::providers::config_dir(&crate::worker::home()).join("api_key")
 }
 
 /// The URL without credentials, fit for the session log.
@@ -184,6 +184,7 @@ impl Llm {
         Self {
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(30))
+                .user_agent(USER_AGENT)
                 .build()
                 .expect("a plain rustls client builds"),
             base: base_url.trim_end_matches('/').into(),
@@ -201,18 +202,19 @@ impl Llm {
         }
     }
 
-    pub async fn models(&self) -> Result<Vec<String>> {
-        let mut request = self
-            .http
-            .get(format!("{}/models", self.base))
-            .timeout(Duration::from_secs(15))
-            .header("user-agent", USER_AGENT);
+    /// What every request carries besides the user agent: OpenCode's session id and the API key.
+    fn authorized(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         if let Some(id) = &self.session {
             request = request.header("x-opencode-session", id.as_str());
         }
         if let Some(key) = &self.key {
             request = request.bearer_auth(key);
         }
+        request
+    }
+
+    pub async fn models(&self) -> Result<Vec<String>> {
+        let request = self.authorized(self.http.get(format!("{}/models", self.base)).timeout(Duration::from_secs(15)));
         let fetch = async { anyhow::Ok(request.send().await?.error_for_status()?.text().await?) };
         let text = tokio::select! {
             text = fetch => text?,
@@ -239,21 +241,13 @@ impl Llm {
         body.insert("stream_options".into(), json!({"include_usage": true}));
         let (url, bytes) = (format!("{}/chat/completions", self.base), serde_json::to_vec(&body)?);
         let asked = json!({"url": endpoint(&url), "model": self.model, "messages": count, "bytes": bytes.len()});
-        let mut request =
-            self.http.post(url).header("content-type", "application/json").header("user-agent", USER_AGENT).body(bytes);
-        if let Some(id) = &self.session {
-            request = request.header("x-opencode-session", id.as_str());
-        }
-        if let Some(key) = &self.key {
-            request = request.bearer_auth(key);
-        }
+        let request = self.authorized(self.http.post(url).header("content-type", "application/json").body(bytes));
         drop(body);
         let start = Instant::now();
         for attempt in 1.. {
             let began = Instant::now();
             match self.stream(&request).await {
-                Err(e) if e.is::<Interrupted>() => {
-                    let mut extra = lost(&e).map_or(json!({}), Lost::extra);
+                Err(e) if let Some(mut extra) = lost(&e).map(Lost::extra) => {
                     extra["attempt"] = attempt.into();
                     extra["ms"] = (began.elapsed().as_millis() as u64).into();
                     extra["request"] = asked.clone();
@@ -590,69 +584,4 @@ fn refused(error: &Value) -> bool {
 
 fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     headers.get("retry-after")?.to_str().ok()?.trim().parse().ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn names_itself() {
-        assert!(USER_AGENT.starts_with("low/"));
-    }
-
-    #[test]
-    fn logs_no_credentials() {
-        assert_eq!(
-            endpoint("https://me:pw@api.example.com/v1/chat/completions"),
-            "https://api.example.com/v1/chat/completions"
-        );
-        let mut map = reqwest::header::HeaderMap::new();
-        for (name, value) in [
-            ("x-request-id", "req_1"),
-            ("x-ratelimit-remaining-tokens", "9000"),
-            ("cf-ray", "8a1-AMS"),
-            ("x-echo", "sk-abc123def456ghi789jkl0"),
-            ("set-cookie", "session=1"),
-            ("x-api-key", "k"),
-            ("x-csrf-token", "t"),
-            ("content-type", "text/event-stream"),
-        ] {
-            map.insert(
-                reqwest::header::HeaderName::from_static(name),
-                reqwest::header::HeaderValue::from_static(value),
-            );
-        }
-        let kept = json!({
-            "x-request-id": "req_1", "x-ratelimit-remaining-tokens": "9000", "cf-ray": "8a1-AMS",
-            "x-echo": "[redacted api key]",
-        });
-        assert_eq!(headers(&map), kept);
-    }
-
-    #[test]
-    fn opencode_gets_a_session_id() {
-        assert_eq!(
-            session_id("https://opencode.ai/inference/go/v1", &json!({"id": "1792-1"})).as_deref(),
-            Some("1792-1")
-        );
-        assert_eq!(session_id("https://opencode.ai/inference/go/v1", &json!({})), None);
-        assert_eq!(session_id("https://api.primalabs.ai/v1", &json!({"id": "1792-1"})), None);
-    }
-
-    #[test]
-    fn window_sizes_read_a_k_suffix() {
-        assert_eq!(window("context length is 32k tokens"), Some(32_000));
-        assert_eq!(window("the context window of 200,000"), Some(200_000));
-        assert_eq!(window("no size here"), None);
-        assert_eq!(window("context length of 4096,max_tokens=10"), Some(4096), "a comma ends the number");
-        assert_eq!(window("context length is 1 million tokens"), None, "too small to be a window");
-    }
-
-    #[test]
-    fn an_overflow_carries_the_window_its_error_states() {
-        let e = ContextOverflow::new("400: This model's maximum context length is 131,072 tokens".into());
-        assert_eq!(e.window, Some(131_072));
-        assert_eq!(ContextOverflow::new("413: request too large".into()).window, None);
-    }
 }

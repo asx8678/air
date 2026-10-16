@@ -198,6 +198,12 @@ fn flat(text: &str, max: usize) -> String {
     if flat.chars().count() <= max { flat } else { flat.chars().take(max).collect::<String>() + "…" }
 }
 
+/// The first line of code that says what it does: not blank, a comment or an import.
+pub fn headline(code: &str) -> Option<&str> {
+    let skip = |l: &&str| l.is_empty() || l.starts_with('#') || l.starts_with("import ") || l.starts_with("from ");
+    code.lines().map(str::trim).find(|l| !skip(l))
+}
+
 struct Live {
     drawn: usize,
     at: Option<Instant>,
@@ -216,7 +222,9 @@ const INSPECT: &str = "cat|head|tail|sed|nl|wc|ls|tree|find|grep|rg|file|stat|cd
                        git rev-parse";
 
 fn inspects(cmd: &str) -> bool {
-    let read = |part: &str| INSPECT.split('|').any(|i| part == i || part.starts_with(&format!("{i} ")));
+    let read = |part: &str| {
+        INSPECT.split('|').any(|i| part.strip_prefix(i).is_some_and(|rest| rest.is_empty() || rest.starts_with(' ')))
+    };
     cmd.replace("&&", ";").split([';', '|', '\n']).map(str::trim).filter(|p| !p.is_empty()).all(read)
 }
 
@@ -284,18 +292,7 @@ pub fn thinking(text: &str, secs: u64) {
     let text = printable(text);
     let width = cols.saturating_sub(6).max(20);
     let start = text.char_indices().rev().nth(width * (LIVE_LINES + 2)).map_or(0, |(i, _)| i);
-    let mut lines: Vec<String> = vec![String::new()];
-    for word in text[start..].split_whitespace() {
-        let line = lines.last_mut().expect("never empty");
-        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
-            lines.push(String::new());
-        }
-        let line = lines.last_mut().expect("never empty");
-        if !line.is_empty() {
-            line.push(' ');
-        }
-        line.push_str(word);
-    }
+    let lines = wrap(&text[start..].split_whitespace().collect::<Vec<_>>().join(" "), width);
     let tail = &lines[lines.len().saturating_sub(LIVE_LINES)..];
     let chars = text.chars().count();
     let size = if chars >= 1000 { format!("{:.1}k chars", chars as f64 / 1000.0) } else { format!("{chars} chars") };
@@ -348,8 +345,7 @@ fn sentences(text: &str) -> Vec<&str> {
 pub fn run(code: &str) {
     let step = STEP.fetch_add(1, Ordering::Relaxed) + 1;
     let code = printable(code);
-    let skip = |l: &&str| l.is_empty() || l.starts_with('#') || l.starts_with("import ") || l.starts_with("from ");
-    let first = code.lines().map(str::trim).find(|l| !skip(l)).unwrap_or("(no code)");
+    let first = headline(&code).unwrap_or("(no code)");
     activity(&format!("step {step} running"));
     let mut live = LIVE.lock().unwrap();
     let label = flat(&live.intent.take().unwrap_or_else(|| first.to_string()), 300);
@@ -372,7 +368,7 @@ pub fn ran(meta: &Value, out: &str) {
             cmds.push((text, &cmd[1]));
         }
     }
-    let actions = meta["actions"].as_array().cloned().unwrap_or_default();
+    let actions = meta["actions"].as_array().map_or(&[][..], Vec::as_slice);
     let mut live = LIVE.lock().unwrap();
     live.rows.clear();
     let (started, label) = live.running.take().unzip();
@@ -388,7 +384,7 @@ pub fn ran(meta: &Value, out: &str) {
         return;
     }
     if quiet {
-        let (runs, files) = live.group.get_or_insert_with(Default::default);
+        let (runs, files) = live.group.get_or_insert_default();
         *runs += 1;
         for read in reads {
             if !files.contains(&read) {
@@ -407,7 +403,7 @@ pub fn ran(meta: &Value, out: &str) {
         rows.push(format!("{} {}", paint("35", "◆ criteria"), flat(criteria, room.saturating_sub(11))));
     }
     let mut failed = false;
-    for act in &actions {
+    for act in actions {
         let (tool, ok) = (flat(act["tool"].as_str().unwrap_or_default(), 20), act["ok"] == true);
         let mark = if ok { paint("32", "✓") } else { paint("31", "✗") };
         match act["path"].as_str().map(|p| flat(p, 120)) {
@@ -517,8 +513,8 @@ pub fn event(kind: &str, text: &str, extra: Value) {
 /// Logs an event to the session without showing it.
 pub fn record(kind: &str, text: &str, extra: Value) {
     let mut entry = serde_json::json!({"event": kind, "text": text});
-    if let (Some(entry), Some(extra)) = (entry.as_object_mut(), extra.as_object()) {
-        entry.extend(extra.clone());
+    if let (Some(entry), Value::Object(extra)) = (entry.as_object_mut(), extra) {
+        entry.extend(extra);
     }
     log(entry);
 }
@@ -535,7 +531,7 @@ pub fn events() -> Vec<Value> {
 
 pub fn report(rows: &[(&str, String)], verdict: &str, good: bool) {
     settle();
-    let head = format!("── {verdict} ").to_string() + &"─".repeat(36);
+    let head = format!("── {verdict} ") + &"─".repeat(36);
     println!("\n{}", paint(if good { "1;32" } else { "1;31" }, &head));
     let room = width().saturating_sub(12).max(30);
     for (label, value) in rows.iter().filter(|(_, value)| !matches!(value.as_str(), "-" | "none")) {

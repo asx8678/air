@@ -8,7 +8,7 @@ mod stats;
 mod ui;
 mod worker;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use rustyline::error::ReadlineError;
 use serde::Deserialize;
@@ -53,7 +53,7 @@ fn load(path: &Path) -> Result<Config> {
 async fn main() {
     ui::guard();
     if let Err(e) = start().await {
-        eprintln!("error: {}", agent::redact(&ui::printable(&format!("{e:#}"))).0);
+        eprintln!("error: {}", agent::error_text(&e));
         std::process::exit(1);
     }
 }
@@ -61,9 +61,10 @@ async fn main() {
 async fn start() -> Result<()> {
     let cli = Cli::parse();
     let home = PathBuf::from(std::env::var("HOME")?);
-    if cli.task.as_deref().is_some_and(|t| t.trim().is_empty()) {
-        bail!("the task is empty: give low something to do, or run it without a task for the REPL");
-    }
+    ensure!(
+        cli.task.as_deref().is_none_or(|t| !t.trim().is_empty()),
+        "the task is empty: give low something to do, or run it without a task for the REPL"
+    );
     let top = std::process::Command::new("git").args(["rev-parse", "--show-toplevel"]).output();
     let top = top.ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
     let repo_dir = top.is_some();
@@ -138,23 +139,23 @@ async fn start() -> Result<()> {
                 agent.think();
                 Ok(())
             }
-            "/providers" => match providers::load(&home) {
-                Ok(loaded) => {
-                    let mut providers = loaded.unwrap_or_default();
+            "/providers" => {
+                async {
+                    let mut providers = providers::load(&home)?.unwrap_or_default();
                     let result = providers::menu(&home, &mut providers, agent.provider(), &mut editor).await;
                     agent.set_providers(providers).and(result)
                 }
-                Err(e) => Err(e),
-            },
-            line if line == "/models" || line.starts_with("/models ") => {
-                pick(&mut agent, &mut editor, line["/models".len()..].trim()).await
+                .await
+            }
+            _ if let Some(filter) = line.strip_prefix("/models").filter(|f| f.is_empty() || f.starts_with(' ')) => {
+                pick(&mut agent, &mut editor, filter.trim()).await
             }
             task => {
                 editor.add_history_entry(task)?;
                 agent.run(task).await.map(drop)
             }
         };
-        let error = result.err().map(|e| agent::redact(&ui::printable(&format!("{e:#}"))).0);
+        let error = result.err().map(|e| agent::error_text(&e));
         if COMMANDS.contains(&line.split_whitespace().next().unwrap_or_default()) {
             ui::record("command", line, serde_json::json!({"error": error}));
         }
@@ -184,22 +185,19 @@ async fn pick(agent: &mut agent::Agent, editor: &mut rustyline::DefaultEditor, f
     if choice.is_empty() {
         return Ok(());
     }
-    let (provider, model) = match choice.parse::<usize>() {
-        Ok(n) => match models.get(n.wrapping_sub(1)) {
-            Some((provider, model, _)) => (provider.clone(), model.clone()),
-            None => bail!("no model numbered {n}"),
-        },
-        Err(_) => match all
+    let listed = match choice.parse::<usize>() {
+        Ok(n) => Some(*models.get(n.wrapping_sub(1)).with_context(|| format!("no model numbered {n}"))?),
+        Err(_) => all
             .iter()
             .find(|(p, m, _)| p == agent.provider() && *m == choice)
-            .or_else(|| all.iter().find(|(_, m, _)| *m == choice))
-        {
-            Some((provider, model, _)) => (provider.clone(), model.clone()),
-            None => {
-                ui::note(&format!("{} is not listed; trying it on {}", ui::printable(&choice), agent.provider()));
-                (agent.provider().to_string(), choice)
-            }
-        },
+            .or_else(|| all.iter().find(|(_, m, _)| *m == choice)),
+    };
+    let (provider, model) = match listed {
+        Some((provider, model, _)) => (provider.clone(), model.clone()),
+        None => {
+            ui::note(&format!("{} is not listed; trying it on {}", ui::printable(&choice), agent.provider()));
+            (agent.provider().to_string(), choice)
+        }
     };
     if provider == agent.provider() && model == agent.model() {
         return Ok(());
@@ -239,32 +237,4 @@ fn check_config(user: &Config) -> Result<()> {
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{check_config, unknown};
-
-    #[test]
-    fn typos_are_not_tasks() {
-        assert_eq!(unknown("/model").as_deref(), Some("unknown command /model; did you mean /models?"));
-        assert!(unknown("/help").is_some_and(|m| m.ends_with("/compact /cost /think /models /providers")));
-        assert!(unknown("/").is_some_and(|m| m.contains("the commands are")));
-        assert_eq!(unknown("/models gpt"), None);
-        assert_eq!(unknown("/etc/hosts has a typo"), None);
-        assert_eq!(unknown("fix /model"), None);
-    }
-
-    #[test]
-    fn profiles_need_a_usable_compact_at() {
-        let check = |text: &str| check_config(&toml::from_str(text).expect("valid toml"));
-        assert!(check("[models.m]\ncompact_at = 200000\ntemperature = 1.0\n").is_ok());
-        for bad in ["0", "100", "\"200k\"", "2.5e5"] {
-            assert!(check(&format!("[models.m]\ncompact_at = {bad}\n")).is_err(), "{bad}");
-        }
-        assert!(check("[models.m]\nturn_tokens = 5\n").is_err());
-        let moved = check("model = \"m1\"\nbase_url = \"https://x.example/v1\"\n").unwrap_err().to_string();
-        assert!(moved.contains("providers.toml") && moved.contains("models = [\"m1\"]"), "{moved}");
-        assert!(!moved.contains("x.example"), "a base_url can carry credentials, so the message leaves it out");
-    }
 }

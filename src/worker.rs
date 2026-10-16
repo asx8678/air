@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
-const RUN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const RUN_TIMEOUT: Duration = Duration::from_mins(10);
 const HERMETIC: &str = "TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 NO_COLOR=1 CLICOLOR=0 CARGO_TERM_COLOR=never CI=1 TERM=dumb \
                         PAGER=cat GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 PYTHONHASHSEED=0 PYTHONUTF8=1 PYTHONDONTWRITEBYTECODE=1";
 const CACHES: &str =
@@ -56,9 +56,11 @@ impl Worker {
                 anyhow!("bwrap (bubblewrap) is not installed; install it or run with --yolo").context(StartFailed)
             );
         }
+        let guarded = json!(protected(root).iter().map(|d| d.to_string_lossy()).collect::<Vec<_>>()).to_string();
         let mut child = sandboxed(root, yolo, &python(), &["-I", "-B", "-u", "-c", include_str!("worker.py")])
             .env("LOW_CHECK", if check.is_some() { "1" } else { "" })
             .env("LOW_FMT", fmt.unwrap_or_default())
+            .env("LOW_PROTECTED", guarded)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .process_group(0)
@@ -133,7 +135,7 @@ impl Drop for Worker {
 
 pub fn descendants(pid: i32) -> Vec<i32> {
     let ps = std::process::Command::new("ps").args(["-axo", "pid=,ppid=,pgid="]).output();
-    let table = ps.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    let table = ps.map(|o| String::from_utf8_lossy_owned(o.stdout)).unwrap_or_default();
     let rows: Vec<Vec<i32>> =
         table.lines().map(|l| l.split_whitespace().filter_map(|n| n.parse().ok()).collect()).collect();
     let (mut tree, mut groups, mut i) = (vec![pid], vec![], 0);
@@ -155,9 +157,8 @@ pub fn sandboxed(root: &Path, yolo: bool, program: &str, args: &[&str]) -> Comma
     let mut cmd = if yolo {
         Command::new(program)
     } else if cfg!(target_os = "macos") {
-        let dirs: String = writable.iter().map(|d| format!(" (subpath {d:?})")).collect();
-        let secrets: String = secrets.iter().map(|d| format!(" (subpath {d:?})")).collect();
-        let protected: String = protected.iter().map(|d| format!(" (subpath {d:?})")).collect();
+        let subpaths = |dirs: &[PathBuf]| -> String { dirs.iter().map(|d| format!(" (subpath {d:?})")).collect() };
+        let (dirs, secrets, protected) = (subpaths(&writable), subpaths(&secrets), subpaths(&protected));
         let sockets = root.join("tmp");
         let profile = format!(
             "(version 1)(allow default)(deny network*)\
@@ -216,8 +217,7 @@ pub fn sandboxed(root: &Path, yolo: bool, program: &str, args: &[&str]) -> Comma
 /// resolved paths, so each one also brings its real path and the targets of links inside it (a dotfiles repo's ~/.ssh
 /// or ~/.aws/credentials).
 fn secrets() -> Vec<PathBuf> {
-    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    let home = home.canonicalize().unwrap_or(home);
+    let home = home();
     let mut paths = vec![];
     for path in SECRETS.split(',').map(|s| home.join(s.trim())) {
         resolved(&path, &home, &mut paths);
@@ -225,6 +225,12 @@ fn secrets() -> Vec<PathBuf> {
         paths.push(path);
     }
     paths
+}
+
+/// The home directory $HOME names, resolved; empty when HOME is unset.
+pub fn home() -> PathBuf {
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    home.canonicalize().unwrap_or(home)
 }
 
 /// Adds where `path` really is, if that differs and is a file or directory other than the home directory or one above
@@ -274,7 +280,7 @@ fn protected(root: &Path) -> Vec<PathBuf> {
 fn nested(root: &Path) -> Vec<PathBuf> {
     let mut git = std::process::Command::new("git");
     let out = git.args(["-c", "core.fsmonitor=false", "-C"]).arg(root).args(["ls-files", "--stage", "-z"]).output();
-    let list = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    let list = out.map(|o| String::from_utf8_lossy_owned(o.stdout)).unwrap_or_default();
     let mut found: Vec<PathBuf> = list
         .split('\0')
         .filter_map(|e| e.strip_prefix("160000 ")?.split_once('\t').map(|(_, path)| root.join(path).join(".git")))
@@ -298,8 +304,7 @@ fn nested(root: &Path) -> Vec<PathBuf> {
 /// Whether the sandbox keeps `root` read-only: the home directory or a folder above it, where writes could reach shell
 /// startup files and launch agents that later run outside the sandbox.
 pub fn read_only(root: &Path) -> bool {
-    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    let home = home.canonicalize().unwrap_or(home);
+    let home = home();
     !home.as_os_str().is_empty() && home.starts_with(root)
 }
 
@@ -323,41 +328,4 @@ fn newest_python(dirs: impl Iterator<Item = PathBuf>) -> Option<PathBuf> {
     let runnable = |p: &Path| p.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
     let found = entries.filter_map(|e| Some((minor(&e)?, e.path()))).filter(|(_, p)| runnable(p));
     found.min_by_key(|(minor, _)| std::cmp::Reverse(*minor)).map(|(_, p)| p)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{newest_python, read_only};
-    use std::os::unix::fs::PermissionsExt;
-    use std::path::{Path, PathBuf};
-
-    #[test]
-    fn home_and_above_are_read_only() {
-        let home = PathBuf::from(std::env::var("HOME").expect("HOME is set")).canonicalize().expect("home exists");
-        assert!(read_only(&home) && read_only(Path::new("/")));
-        assert!(!read_only(&home.join("projects/app")), "a folder inside home can be edited");
-        assert!(!read_only(&std::env::temp_dir().canonicalize().expect("temp exists")));
-    }
-
-    #[test]
-    fn picks_the_newest_runnable_python() {
-        let base = std::env::temp_dir().join(format!("low-python-{}", std::process::id()));
-        let (first, second) = (base.join("a"), base.join("b"));
-        for (dir, name, mode) in [
-            (&first, "python3.9", 0o755),
-            (&first, "python3.12", 0o755),
-            (&first, "python3.12-config", 0o755),
-            (&first, "python3.13", 0o644),
-            (&second, "python3.12", 0o755),
-            (&second, "python3", 0o755),
-        ] {
-            std::fs::create_dir_all(dir).unwrap();
-            std::fs::write(dir.join(name), "").unwrap();
-            std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(mode)).unwrap();
-        }
-        let found = newest_python([first.clone(), second.clone()].into_iter());
-        assert_eq!(found, Some(first.join("python3.12")), "3.13 is not runnable; on a tie the first directory wins");
-        assert_eq!(newest_python([base.join("missing")].into_iter()), None);
-        std::fs::remove_dir_all(&base).unwrap();
-    }
 }

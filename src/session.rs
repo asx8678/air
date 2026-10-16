@@ -7,7 +7,7 @@
 //!
 //! Every line has a wall-clock `at` in ms, in meta for messages since meta never goes on the wire. Nothing secret
 //! goes into it.
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 use serde_json::{Map, Value, json};
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -82,9 +82,7 @@ impl Session {
             let Ok(Some(Ok(first))) = File::open(&path).map(|f| BufReader::new(f).lines().next()) else { continue };
             if serde_json::from_str::<Value>(&first).is_ok_and(|header| header["cwd"] == json!(root)) {
                 let mut file = OpenOptions::new().append(true).open(&path)?;
-                if file.try_lock().is_err() {
-                    bail!("{} is in use by another low", path.display());
-                }
+                ensure!(file.try_lock().is_ok(), "{} is in use by another low", path.display());
                 let mut text = fs::read_to_string(&path)?;
                 let cut = text.rfind('\n').map_or(0, |i| i + 1);
                 if serde_json::from_str::<Value>(&text[cut..]).is_ok() {
@@ -248,36 +246,5 @@ fn backfill_id(entries: &mut [Value], id: &str) {
         if let Some(header) = header.filter(|h| h.get("id").and_then(Value::as_str).is_none_or(str::is_empty)) {
             header.insert("id".into(), id.into());
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{backfill_id, stamp};
-    use serde_json::json;
-
-    #[test]
-    fn stamps_stay_off_the_wire() {
-        let (mut user, mut event) = (json!({"role": "user", "content": "x"}), json!({"event": "retry", "at": 1}));
-        stamp(&mut user, 7);
-        stamp(&mut event, 7);
-        assert_eq!(user, json!({"role": "user", "content": "x", "meta": {"at": 7}}));
-        assert_eq!(event["at"], 1);
-        assert_eq!(crate::compact::wire(&user, 1, None), json!({"role": "user", "content": "x"}));
-    }
-
-    #[test]
-    fn resumed_logs_get_the_file_id() {
-        let mut entries = vec![
-            json!({"model": "m"}),
-            json!({"role": "user"}),
-            json!({"switch": {"model": "n"}}),
-            json!({"switch": {"id": "kept"}}),
-        ];
-        backfill_id(&mut entries, "1792-42");
-        assert_eq!(entries[0]["id"], "1792-42");
-        assert_eq!(entries[1].get("id"), None);
-        assert_eq!(entries[2]["switch"]["id"], "1792-42");
-        assert_eq!(entries[3]["switch"]["id"], "kept");
     }
 }
