@@ -968,7 +968,6 @@ fn system_prompt(root: &Path, yolo: bool, check: bool) -> String {
         prompt += if cfg!(target_os = "macos") { MACOS } else { LINUX };
         prompt += PERMANENT;
     }
-    let mut refused = vec![];
     if let Some((agents, size)) = repo_text(root, "AGENTS.md", AGENTS_MAX) {
         prompt += "\n\n# Project instructions (AGENTS.md)\n\n";
         prompt += &agents;
@@ -978,32 +977,8 @@ fn system_prompt(root: &Path, yolo: bool, check: bool) -> String {
                 &format!("\n\n[AGENTS.md clipped to its first {kept} KB of {all} KB; read the file for the rest]");
         }
     } else if std::fs::symlink_metadata(root.join("AGENTS.md")).is_ok() {
-        refused.push("AGENTS.md".to_string());
-    }
-    let mut skills: Vec<String> = std::fs::read_dir(root.join(".agents/skills"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|dir| {
-            let rel = format!(".agents/skills/{}/SKILL.md", dir.file_name().to_string_lossy());
-            let Some((text, _)) = repo_text(root, &rel, AGENTS_MAX) else {
-                if std::fs::symlink_metadata(root.join(&rel)).is_ok() {
-                    refused.push(rel);
-                }
-                return None;
-            };
-            let about = text.lines().find_map(|l| l.strip_prefix("description:"))?.trim().to_string();
-            Some(format!("- {rel}: {about}"))
-        })
-        .collect();
-    skills.sort();
-    if !refused.is_empty() {
         let why = "outside the repo, sandbox-protected, unreadable, or not a regular file";
-        ui::note(&format!("left out of the prompt ({why}): {}", refused.join(", ")));
-    }
-    if !skills.is_empty() {
-        prompt += "\n\n# Skills (open() one when the task needs it)\n";
-        prompt += &skills.join("\n");
+        ui::note(&format!("left out of the prompt ({why}): AGENTS.md"));
     }
     prompt += &listing(root);
     prompt
