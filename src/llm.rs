@@ -1,4 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
+use eventsource_stream::{EventStreamError, Eventsource};
+use futures_util::{Stream, StreamExt};
 use serde_json::{Value, json};
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -269,37 +271,29 @@ impl Llm {
     }
 
     async fn stream(&self, request: &reqwest::RequestBuilder) -> Result<Value> {
-        let (mut response, sent) = self.send(request).await?;
+        let (response, sent) = self.send(request).await?;
         let mut served = json!({"status": response.status().as_u16(), "headers": headers(response.headers())});
         let kind = response.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or_default();
         let kind = kind.to_lowercase();
         if kind.contains("html") || kind.contains("json") {
             bail!("the provider did not send an event stream: {kind}: {}", head(response).await);
         }
-        let (mut first, mut spoke) = (None, None);
-        let (mut finished, mut reason) = (false, Value::Null);
-        let (mut buf, mut text, mut thinking, mut usage) = (Vec::new(), String::new(), String::new(), Value::Null);
-        let mut calls: Vec<[String; 3]> = vec![];
-        let mut slots = HashMap::new();
-        let mut lines = 0;
-        let (mut markdown, mut began) = (crate::render::Markdown::default(), None::<Instant>);
-        let (mut held, mut answering, mut narrated) = (String::new(), false, false);
-        let (mut broken, mut via) = (None, None);
-        let (mut scan, mut eof, mut events, mut got, mut stalled, mut rejected) = (0, false, 0, 0, false, false);
+        let got = Cell::new(0);
+        let mut events = std::pin::pin!(body(response, &got).eventsource());
+        let mut reply = Reply::default();
+        let (mut broken, mut stalled, mut rejected) = (None, false, false);
         let cap = tokio::time::Instant::from_std(sent) + TOTAL;
         let mut idle = tokio::time::Instant::now() + IDLE;
-        'read: while !eof {
-            match tokio::time::timeout_at(idle.min(cap), response.chunk()).await {
-                Ok(Ok(Some(chunk))) => {
-                    got += chunk.len();
-                    buf.extend_from_slice(&chunk);
+        'read: loop {
+            let event = match tokio::time::timeout_at(idle.min(cap), events.next()).await {
+                Ok(Some(Ok(event))) => event,
+                Ok(None) => break,
+                Ok(Some(Err(EventStreamError::Transport(Broken(why, permanent))))) => {
+                    (broken, rejected) = (Some(why), permanent);
+                    break;
                 }
-                Ok(Ok(None)) => {
-                    eof = true;
-                    buf.push(b'\n');
-                }
-                Ok(Err(e)) => {
-                    broken = Some(chain(e));
+                Ok(Some(Err(e))) => {
+                    (broken, rejected) = (Some(format!("an unreadable event stream: {e}")), true);
                     break;
                 }
                 Err(_) => {
@@ -311,16 +305,12 @@ impl Llm {
                     });
                     break;
                 }
-            }
-            let mut start = 0;
-            while let Some(end) = buf[scan..].iter().position(|&b| b == b'\n' || b == b'\r') {
-                let line = String::from_utf8_lossy(&buf[start..scan + end]);
-                (start, scan) = (scan + end + 1, scan + end + 1);
-                let Some(data) = line.trim().strip_prefix("data:") else { continue };
+            };
+            for data in payloads(&event.data) {
                 let data = data.trim();
-                finished |= data == "[DONE]";
+                reply.finished |= data == "[DONE]";
                 let Ok(event) = serde_json::from_str::<Value>(data) else { continue };
-                events += 1;
+                reply.events += 1;
                 if let Some(error) = event.get("error").filter(|e| !e.is_null()) {
                     rejected = refused(error);
                     broken = Some(format!("provider error: {}", clip(&crate::redact::redact(&error.to_string()).0)));
@@ -331,172 +321,50 @@ impl Llm {
                         served[key.as_str()] = value.clone();
                     }
                 }
-                if event["usage"].is_object() {
-                    usage = event["usage"].clone();
-                }
-                let why = event["choices"][0]["finish_reason"].as_str().filter(|w| !w.is_empty());
-                if let Some(why) = why {
-                    (finished, reason) = (true, why.into());
-                }
-                let delta = &event["choices"][0]["delta"];
-                let content = match &delta["content"] {
-                    Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect(),
-                    content => content.as_str().unwrap_or_default().to_string(),
-                };
-                let field = FIELDS.into_iter().find(|f| delta[*f].as_str().is_some_and(|t| !t.is_empty()));
-                let tools = delta["tool_calls"].as_array().filter(|c| !c.is_empty());
-                if why.is_some() || field.is_some() || tools.is_some() || !content.is_empty() {
+                if reply.take(&event) {
                     idle = tokio::time::Instant::now() + IDLE;
-                }
-                let reasoning = field.and_then(|f| delta[f].as_str()).unwrap_or_default();
-                if !reasoning.is_empty() {
-                    via = via.or(field);
-                    thinking += reasoning;
-                    let began = *began.get_or_insert_with(Instant::now);
-                    first.get_or_insert(began);
-                    if text.is_empty() {
-                        crate::ui::thinking(&thinking, began.elapsed().as_secs());
-                    }
-                }
-                if delta["tool_calls"].is_array() || !content.is_empty() {
-                    spoke.get_or_insert_with(Instant::now);
-                    first.get_or_insert_with(Instant::now);
-                }
-                if !content.is_empty() {
-                    text += &content;
-                    if answering {
-                        markdown.push(&content);
-                    } else if !narrated {
-                        held += &content;
-                        crate::ui::activity("writing");
-                        if held.len() > 400 || held.contains("\n\n") || held.trim_start().starts_with(['#', '-', '|']) {
-                            crate::ui::prose();
-                            markdown.push(&std::mem::take(&mut held));
-                            answering = true;
-                        }
-                    }
-                }
-                if !answering && !narrated && delta["tool_calls"].is_array() {
-                    narrated = true;
-                    crate::ui::intent(&held, &thinking);
-                }
-                for call in tools.into_iter().flatten() {
-                    let (key, function) = (call["index"].as_u64(), &call["function"]);
-                    let fresh = slots.get(&key).is_none_or(|&i: &usize| {
-                        let [id, name, args] = &calls[i];
-                        let new_id = call["id"].as_str().is_some_and(|i| !i.is_empty() && !id.is_empty() && i != id);
-                        (key.is_none() || new_id)
-                            && function["name"].is_string()
-                            && !name.is_empty()
-                            && serde_json::from_str::<Value>(args).is_ok()
-                    });
-                    if fresh {
-                        calls.push(Default::default());
-                        slots.insert(key, calls.len() - 1);
-                    }
-                    let [id, name, args] = &mut calls[slots[&key]];
-                    if let Some(given) = call["id"].as_str().filter(|_| id.is_empty()) {
-                        *id = given.into();
-                    }
-                    if let Some(part) = function["name"].as_str() {
-                        if part.starts_with(name.as_str()) {
-                            *name = part.into();
-                        } else {
-                            *name += part;
-                        }
-                    }
-                    let part = match &function["arguments"] {
-                        Value::String(part) => part.clone(),
-                        Value::Null => continue,
-                        part => part.to_string(),
-                    };
-                    *args += &part;
-                    lines += part.matches("\\n").count();
-                    crate::ui::writing(lines + calls.len());
                 }
                 std::io::stdout().flush()?;
             }
-            buf.drain(..start);
-            scan = buf.len();
-            if scan > LINE_MAX {
-                rejected = true;
-                broken = Some(format!("a stream line passed {} MB", LINE_MAX >> 20));
-                break;
-            }
         }
-        (served["bytes"], served["events"]) = (got.into(), events.into());
+        (served["bytes"], served["events"]) = (got.get().into(), reply.events.into());
         let failed: Option<anyhow::Error> = match broken.as_deref() {
             Some(problem) if overflow(problem) => Some(ContextOverflow::new(problem.into()).into()),
             Some(problem) if rejected => Some(anyhow!("{problem}")),
-            None if events == 0 && !finished => {
-                Some(anyhow!("the provider did not send an event stream: {got} bytes without a single event"))
+            None if reply.events == 0 && !reply.finished => {
+                Some(anyhow!("the provider did not send an event stream: {} bytes without a single event", got.get()))
             }
             _ => None,
         };
         if let Some(e) = failed {
-            if answering {
-                markdown.finish();
-            }
+            reply.shown.cut();
             return Err(e);
         }
-        if finished {
+        if reply.finished {
             self.marked.set(true);
         }
-        let accepted = !finished
+        let accepted = !reply.finished
             && broken.is_none()
             && !self.marked.get()
-            && !(text.is_empty() && calls.is_empty())
-            && calls.iter().all(|c| serde_json::from_str::<Value>(&c[2]).is_ok());
+            && !(reply.text.is_empty() && reply.calls.is_empty())
+            && reply.calls.complete();
         if accepted {
-            reason = "eof".into();
+            reply.reason = "eof".into();
         }
-        if !finished && !accepted {
-            if answering {
-                markdown.finish();
-            }
+        if !reply.finished && !accepted {
+            reply.shown.cut();
             let why = broken.unwrap_or_else(|| "the stream ended before the model finished".into());
-            let mut lost = Lost::new(&thinking, began);
-            lost.text = text.chars().count() + calls.iter().map(|c| c[2].len()).sum::<usize>();
+            let mut lost = Lost::new(&reply.thinking, reply.began);
+            lost.text = reply.text.chars().count() + reply.calls.size();
             lost.stalled = stalled;
             lost.response = served;
             return Err(Interrupted(why, lost).into());
         }
-        if answering {
-            markdown.finish();
-        } else if !narrated && !held.trim().is_empty() {
-            crate::ui::prose();
-            markdown.push(&held);
-            markdown.finish();
-        }
-        let end = Instant::now();
-        let ms = |a: Instant, b: Option<Instant>| b.map(|b| b.duration_since(a).as_millis() as u64);
-        // Output tokens (reasoning included) per second, from the first token to the end of the stream.
-        let speed = |(first, out): (Instant, u64)| (out as f64 / (end - first).as_secs_f64() * 10.0).round() / 10.0;
-        let timing = json!({
-            "ttft_ms": ms(sent, first), "think_ms": began.and_then(|b| ms(b, spoke.or(Some(end)))),
-            "stream_ms": ms(sent, Some(end)), "tps": first.zip(usage["completion_tokens"].as_u64()).map(speed),
-        });
-        let meta = json!({"usage": usage, "timing": timing, "finish": reason, "response": served});
-        let mut message = json!({"role": "assistant", "content": text, "meta": meta});
-        if !thinking.is_empty() {
-            message["reasoning_content"] = thinking.into();
-        }
-        if let Some(field) = via {
+        reply.shown.done();
+        if let Some(field) = reply.via {
             self.field.set(field);
-            message["meta"]["reasoning_field"] = field.into();
         }
-        if !calls.is_empty() {
-            message["tool_calls"] = calls
-                .into_iter()
-                .enumerate()
-                .map(|(i, [id, name, args])| {
-                    let args = if serde_json::from_str::<Value>(&args).is_ok() { args } else { "{}".into() };
-                    let id = if id.is_empty() { format!("call_{i}") } else { id };
-                    json!({"id": id, "type": "function", "function": {"name": name, "arguments": args}})
-                })
-                .collect();
-        }
-        Ok(message)
+        Ok(reply.message(sent, served))
     }
 
     async fn send(&self, request: &reqwest::RequestBuilder) -> Result<(reqwest::Response, Instant)> {
@@ -582,4 +450,268 @@ fn refused(error: &Value) -> bool {
 
 fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     headers.get("retry-after")?.to_str().ok()?.trim().parse().ok()
+}
+
+/// Why the response body stopped short, and whether retrying would only get the same again.
+#[derive(Debug)]
+struct Broken(String, bool);
+
+impl std::fmt::Display for Broken {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The response body as text for the event-stream parser, which on its own would hold everything after an invalid
+/// byte waiting for it to become valid: bad bytes become U+FFFD, a line longer than LINE_MAX ends the stream, and a
+/// last event the server left unterminated still arrives.
+fn body(response: reqwest::Response, got: &Cell<usize>) -> impl Stream<Item = Result<String, Broken>> + '_ {
+    let (mut held, mut line) = (Vec::new(), 0);
+    let text = response.bytes_stream().map(move |chunk| {
+        let chunk = chunk.map_err(|e| Broken(chain(e), false))?;
+        got.set(got.get() + chunk.len());
+        line = match chunk.iter().rposition(|&b| b == b'\n' || b == b'\r') {
+            Some(end) => chunk.len() - end - 1,
+            None => line + chunk.len(),
+        };
+        if line > LINE_MAX {
+            return Err(Broken(format!("a stream line passed {} MB", LINE_MAX >> 20), true));
+        }
+        held.extend_from_slice(&chunk);
+        // A character split across chunks waits for the rest of it.
+        let partial = held.utf8_chunks().last().map_or(0, |chunk| {
+            let tail = chunk.invalid();
+            if std::str::from_utf8(tail).is_err_and(|e| e.error_len().is_none()) { tail.len() } else { 0 }
+        });
+        let text = String::from_utf8_lossy(&held[..held.len() - partial]).into_owned();
+        held.drain(..held.len() - partial);
+        Ok(text)
+    });
+    text.chain(futures_util::stream::once(std::future::ready(Ok("\n\n".to_string()))))
+}
+
+/// The JSON payloads in one event's data: a value spread over several data lines, or one per line from a server
+/// that ends each event with a single newline.
+fn payloads(data: &str) -> Vec<&str> {
+    if data.contains('\n') && serde_json::from_str::<Value>(data).is_err() {
+        data.lines().collect()
+    } else {
+        vec![data]
+    }
+}
+
+/// A reply as it streams in: what it has said so far, when, and how much of it the terminal shows.
+#[derive(Default)]
+struct Reply {
+    text: String,
+    thinking: String,
+    /// The field this provider sends reasoning in, once it has sent some.
+    via: Option<&'static str>,
+    calls: Calls,
+    usage: Value,
+    finished: bool,
+    reason: Value,
+    events: usize,
+    /// The first token of any kind, of reasoning, and of text or a tool call.
+    first: Option<Instant>,
+    began: Option<Instant>,
+    spoke: Option<Instant>,
+    shown: Shown,
+}
+
+impl Reply {
+    /// Takes in one event and shows what it adds; true when it carried anything, so the stream is not idle.
+    fn take(&mut self, event: &Value) -> bool {
+        if event["usage"].is_object() {
+            self.usage = event["usage"].clone();
+        }
+        let why = event["choices"][0]["finish_reason"].as_str().filter(|w| !w.is_empty());
+        if let Some(why) = why {
+            (self.finished, self.reason) = (true, why.into());
+        }
+        let delta = &event["choices"][0]["delta"];
+        let content = match &delta["content"] {
+            Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect(),
+            content => content.as_str().unwrap_or_default().to_string(),
+        };
+        let field = FIELDS.into_iter().find(|f| delta[*f].as_str().is_some_and(|t| !t.is_empty()));
+        let tools = delta["tool_calls"].as_array().filter(|c| !c.is_empty());
+        let reasoning = field.and_then(|f| delta[f].as_str()).unwrap_or_default();
+        if !reasoning.is_empty() {
+            self.via = self.via.or(field);
+            self.thinking += reasoning;
+            let began = *self.began.get_or_insert_with(Instant::now);
+            self.first.get_or_insert(began);
+            if self.text.is_empty() {
+                crate::ui::thinking(&self.thinking, began.elapsed().as_secs());
+            }
+        }
+        if delta["tool_calls"].is_array() || !content.is_empty() {
+            self.spoke.get_or_insert_with(Instant::now);
+            self.first.get_or_insert_with(Instant::now);
+        }
+        if !content.is_empty() {
+            self.text += &content;
+            self.shown.text(&content);
+        }
+        if delta["tool_calls"].is_array() {
+            self.shown.calls(&self.thinking);
+        }
+        for call in tools.into_iter().flatten() {
+            if self.calls.add(call) {
+                crate::ui::writing(self.calls.lines + self.calls.list.len());
+            }
+        }
+        why.is_some() || field.is_some() || tools.is_some() || !content.is_empty()
+    }
+
+    /// The finished reply as the session logs it, with its usage, timing and how it was served in meta.
+    fn message(self, sent: Instant, served: Value) -> Value {
+        let end = Instant::now();
+        let ms = |a: Instant, b: Option<Instant>| b.map(|b| b.duration_since(a).as_millis() as u64);
+        // Output tokens (reasoning included) per second, from the first token to the end of the stream.
+        let speed = |(first, out): (Instant, u64)| (out as f64 / (end - first).as_secs_f64() * 10.0).round() / 10.0;
+        let timing = json!({
+            "ttft_ms": ms(sent, self.first), "think_ms": self.began.and_then(|b| ms(b, self.spoke.or(Some(end)))),
+            "stream_ms": ms(sent, Some(end)), "tps": self.first.zip(self.usage["completion_tokens"].as_u64()).map(speed),
+        });
+        let meta = json!({"usage": self.usage, "timing": timing, "finish": self.reason, "response": served});
+        let mut message = json!({"role": "assistant", "content": self.text, "meta": meta});
+        if !self.thinking.is_empty() {
+            message["reasoning_content"] = self.thinking.into();
+        }
+        if let Some(field) = self.via {
+            message["meta"]["reasoning_field"] = field.into();
+        }
+        if !self.calls.is_empty() {
+            message["tool_calls"] = self.calls.into_json();
+        }
+        message
+    }
+}
+
+/// How a reply's text reaches the terminal. Text before any tool call is held: a short preface becomes the call's
+/// intent line, while a long one, or one that opens like markdown, is the answer and streams as it arrives.
+#[derive(Default)]
+struct Shown {
+    markdown: crate::render::Markdown,
+    held: String,
+    answering: bool,
+    narrated: bool,
+}
+
+impl Shown {
+    fn text(&mut self, content: &str) {
+        if self.answering {
+            self.markdown.push(content);
+        } else if !self.narrated {
+            self.held += content;
+            crate::ui::activity("writing");
+            let opens = self.held.trim_start().starts_with(['#', '-', '|']);
+            if self.held.len() > 400 || self.held.contains("\n\n") || opens {
+                crate::ui::prose();
+                self.markdown.push(&std::mem::take(&mut self.held));
+                self.answering = true;
+            }
+        }
+    }
+
+    /// Tool calls began: held text is their intent.
+    fn calls(&mut self, thinking: &str) {
+        if !self.answering && !self.narrated {
+            self.narrated = true;
+            crate::ui::intent(&self.held, thinking);
+        }
+    }
+
+    /// The reply failed: an answer that was streaming ends where it stopped.
+    fn cut(&mut self) {
+        if self.answering {
+            self.markdown.finish();
+        }
+    }
+
+    /// The reply is complete: the answer ends, or held text that never became one is shown as the answer.
+    fn done(&mut self) {
+        if self.answering {
+            self.markdown.finish();
+        } else if !self.narrated && !self.held.trim().is_empty() {
+            crate::ui::prose();
+            self.markdown.push(&self.held);
+            self.markdown.finish();
+        }
+    }
+}
+
+/// Tool calls assembled from their streamed pieces: id, name and arguments, keyed by the index the provider gives.
+#[derive(Default)]
+struct Calls {
+    list: Vec<[String; 3]>,
+    slots: HashMap<Option<u64>, usize>,
+    /// Lines of code written so far, for the live row.
+    lines: usize,
+}
+
+impl Calls {
+    /// Adds one streamed piece; true when it carried arguments.
+    fn add(&mut self, call: &Value) -> bool {
+        let (key, function) = (call["index"].as_u64(), &call["function"]);
+        // A piece with a new id, or with no index, after a complete call starts the next one.
+        let fresh = self.slots.get(&key).is_none_or(|&i| {
+            let [id, name, args] = &self.list[i];
+            let new_id = call["id"].as_str().is_some_and(|i| !i.is_empty() && !id.is_empty() && i != id);
+            (key.is_none() || new_id)
+                && function["name"].is_string()
+                && !name.is_empty()
+                && serde_json::from_str::<Value>(args).is_ok()
+        });
+        if fresh {
+            self.list.push(Default::default());
+            self.slots.insert(key, self.list.len() - 1);
+        }
+        let [id, name, args] = &mut self.list[self.slots[&key]];
+        if let Some(given) = call["id"].as_str().filter(|_| id.is_empty()) {
+            *id = given.into();
+        }
+        if let Some(part) = function["name"].as_str() {
+            if part.starts_with(name.as_str()) {
+                *name = part.into();
+            } else {
+                *name += part;
+            }
+        }
+        let part = match &function["arguments"] {
+            Value::String(part) => part.clone(),
+            Value::Null => return false,
+            part => part.to_string(),
+        };
+        *args += &part;
+        self.lines += part.matches("\\n").count();
+        true
+    }
+
+    fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    /// Whether every call's arguments are whole JSON.
+    fn complete(&self) -> bool {
+        self.list.iter().all(|c| serde_json::from_str::<Value>(&c[2]).is_ok())
+    }
+
+    /// The bytes of arguments received.
+    fn size(&self) -> usize {
+        self.list.iter().map(|c| c[2].len()).sum()
+    }
+
+    /// The calls as the message carries them: arguments that are not whole JSON become {}, and a call without an id
+    /// gets one.
+    fn into_json(self) -> Value {
+        let calls = self.list.into_iter().enumerate().map(|(i, [id, name, args])| {
+            let args = if serde_json::from_str::<Value>(&args).is_ok() { args } else { "{}".into() };
+            let id = if id.is_empty() { format!("call_{i}") } else { id };
+            json!({"id": id, "type": "function", "function": {"name": name, "arguments": args}})
+        });
+        calls.collect()
+    }
 }
