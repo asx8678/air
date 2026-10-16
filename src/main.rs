@@ -1,7 +1,9 @@
 mod agent;
 mod compact;
+mod git;
 mod llm;
 mod providers;
+mod redact;
 mod render;
 mod session;
 mod stats;

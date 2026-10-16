@@ -149,7 +149,7 @@ pub fn endpoint(url: &str) -> String {
         let _ = url.set_username("");
         let _ = url.set_password(None);
     }
-    crate::agent::redact(&parsed.map_or_else(|| url.to_string(), String::from)).0
+    crate::redact::redact(&parsed.map_or_else(|| url.to_string(), String::from)).0
 }
 
 /// The response headers worth keeping: request ids, rate limits, timing and routing; never cookies or credentials.
@@ -162,7 +162,7 @@ fn headers(map: &reqwest::header::HeaderMap) -> Value {
         wanted && !secret
     });
     let value =
-        |v: &reqwest::header::HeaderValue| clip(&crate::agent::redact(&String::from_utf8_lossy(v.as_bytes())).0);
+        |v: &reqwest::header::HeaderValue| clip(&crate::redact::redact(&String::from_utf8_lossy(v.as_bytes())).0);
     kept.map(|(name, v)| (name.as_str().to_string(), Value::from(value(v)))).collect()
 }
 
@@ -323,7 +323,7 @@ impl Llm {
                 events += 1;
                 if let Some(error) = event.get("error").filter(|e| !e.is_null()) {
                     rejected = refused(error);
-                    broken = Some(format!("provider error: {}", clip(&crate::agent::redact(&error.to_string()).0)));
+                    broken = Some(format!("provider error: {}", clip(&crate::redact::redact(&error.to_string()).0)));
                     break 'read;
                 }
                 for (key, value) in event.as_object().into_iter().flatten() {
@@ -571,7 +571,7 @@ async fn head(mut response: reqwest::Response) -> String {
         }
     };
     let _ = tokio::time::timeout(Duration::from_secs(10), read).await;
-    clip(&crate::agent::redact(&String::from_utf8_lossy(&body)).0)
+    clip(&crate::redact::redact(&String::from_utf8_lossy(&body)).0)
 }
 
 fn refused(error: &Value) -> bool {
