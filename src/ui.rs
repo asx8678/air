@@ -1,8 +1,8 @@
 use serde_json::Value;
 use std::io::{IsTerminal, Write};
 use std::os::fd::AsRawFd;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 struct Bar {
@@ -15,9 +15,9 @@ struct Bar {
 }
 
 static BAR: Mutex<Option<Bar>> = Mutex::new(None);
-static STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static STEP: AtomicUsize = AtomicUsize::new(0);
 static EVENTS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
-static TERMIOS: std::sync::OnceLock<libc::termios> = std::sync::OnceLock::new();
+static TERMIOS: OnceLock<libc::termios> = OnceLock::new();
 static BARRED: AtomicBool = AtomicBool::new(false);
 pub static CHECK: AtomicI32 = AtomicI32::new(0);
 
@@ -39,7 +39,7 @@ pub fn printable(text: &str) -> String {
 /// The terminal's rows and columns, asked of the tty itself: the ticker calls this every second.
 fn size() -> Option<(u16, u16)> {
     let tty = std::fs::File::open("/dev/tty").ok()?;
-    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    let mut ws = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
     let asked = unsafe { libc::ioctl(tty.as_raw_fd(), libc::TIOCGWINSZ, &raw mut ws) } == 0;
     Some((ws.ws_row, ws.ws_col)).filter(|&(rows, cols)| asked && rows >= 5 && cols >= 20)
 }
@@ -134,7 +134,7 @@ fn draw() {
     let (prompt, cached) = bar.tokens;
     let cache = (cached * 100).checked_div(prompt).map(|p| format!(" · {p}% cached")).unwrap_or_default();
     let lead = if bar.plan.is_empty() { bar.activity.clone() } else { format!("{} · {}", bar.plan, bar.activity) };
-    let line = format!(" ▸ {lead} │ {}{cache} │ {}:{:02} ", tokens(prompt), secs / 60, secs % 60);
+    let line = format!(" ▸ {lead} │ {}{cache} │ {} ", tokens(prompt), minutes(secs));
     let line: String = line.chars().take(bar.cols.saturating_sub(1) as usize).collect();
     print!("\x1b7\x1b[{};1H\x1b[2K\x1b[7m{line}\x1b[0m\x1b8", bar.rows);
     let _ = std::io::stdout().flush();
@@ -145,6 +145,11 @@ fn update(change: impl FnOnce(&mut Bar)) {
         change(bar);
     }
     draw();
+}
+
+/// Seconds as m:ss.
+pub fn minutes(secs: u64) -> String {
+    format!("{}:{:02}", secs / 60, secs % 60)
 }
 
 pub fn tokens(n: u64) -> String {
@@ -502,6 +507,11 @@ pub fn note(text: &str) {
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// The milliseconds since `start`, as the session log records durations.
+pub fn ms(start: Instant) -> u64 {
+    start.elapsed().as_millis() as u64
 }
 
 pub fn event(kind: &str, text: &str, extra: Value) {

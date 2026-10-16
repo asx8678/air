@@ -63,7 +63,7 @@ impl Markdown {
         if let Some(quote) = text.strip_prefix('>') {
             return format!("{}{}", paint("2", "│ "), inline(quote.trim_start()));
         }
-        if let Some(item) = text.strip_prefix("- ").or(text.strip_prefix("* ")).or(text.strip_prefix("+ ")) {
+        if let Some(item) = text.strip_prefix(['-', '*', '+']).and_then(|t| t.strip_prefix(' ')) {
             return format!("{indent}{} {}", paint("36", "•"), inline(item));
         }
         format!("{indent}{}", inline(text))

@@ -211,7 +211,7 @@ impl Drop for Session {
         let _ = self.flush();
         let (from, clock) = self.opened;
         let mut totals = crate::stats::totals(&self.entries[from..]);
-        totals["ms"] = (clock.elapsed().as_millis() as u64).into();
+        totals["ms"] = crate::ui::ms(clock).into();
         let _ = self.push(json!({"end": totals}));
         // One per session would pile up in ~/.low/sessions; a resumed session builds a fresh one.
         let _ = std::fs::remove_file(self.index());

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
@@ -80,7 +80,7 @@ impl Worker {
             };
             self.ready = true;
             let python = serde_json::from_str::<Value>(&line).unwrap_or_default()["python"].take();
-            let ms = self.started.elapsed().as_millis() as u64;
+            let ms = crate::ui::ms(self.started);
             let text = format!("python {} worker ready in {ms} ms", python.as_str().unwrap_or("?"));
             crate::ui::record("worker", &text, json!({"pid": self.child.id(), "python": python, "ms": ms}));
         }
@@ -126,10 +126,15 @@ impl Worker {
 impl Drop for Worker {
     fn drop(&mut self) {
         let Some(pid) = self.child.id().map(u32::cast_signed) else { return };
-        let own = unsafe { libc::getpgrp() };
-        for group in descendants(pid).into_iter().chain([pid]).filter(|&g| g > 1 && g != own) {
-            unsafe { libc::kill(-group, libc::SIGKILL) };
-        }
+        kill_groups(descendants(pid).into_iter().chain([pid]));
+    }
+}
+
+/// SIGKILLs these process groups, never low's own or groups 0 and 1.
+pub fn kill_groups(groups: impl IntoIterator<Item = i32>) {
+    let own = unsafe { libc::getpgrp() };
+    for group in groups.into_iter().filter(|&g| g > 1 && g != own) {
+        unsafe { libc::kill(-group, libc::SIGKILL) };
     }
 }
 
@@ -197,9 +202,8 @@ pub fn sandboxed(root: &Path, yolo: bool, program: &str, args: &[&str]) -> Comma
         cmd.args(["--unshare-all", "--die-with-parent", "--new-session", "--chdir"]).arg(root).arg(program);
         cmd
     };
-    let mut hasher = std::hash::DefaultHasher::new();
-    root.hash(&mut hasher);
-    let cache = std::env::temp_dir().join(format!("low-cache/{:016x}", hasher.finish()));
+    let hash = BuildHasherDefault::<DefaultHasher>::new().hash_one(root);
+    let cache = std::env::temp_dir().join(format!("low-cache/{hash:016x}"));
     let _ = std::fs::create_dir_all(&cache);
     let extra = EXTRA_ENV.get().into_iter().flatten().map(String::as_str);
     let allowed: Vec<&str> = ENV.split_whitespace().chain(extra).collect();

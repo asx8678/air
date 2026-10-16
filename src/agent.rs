@@ -5,7 +5,7 @@ use crate::worker::{self, Worker};
 use crate::{Config, compact, ui};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt;
@@ -191,7 +191,7 @@ impl Agent {
                 Err(e) => ui::note(&format!("could not list {}'s models: {e:#}", self.provider)),
             }
         }
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         known.retain(|pair| seen.insert(pair.clone()));
         known
             .into_iter()
@@ -280,7 +280,7 @@ impl Agent {
         let clock = Instant::now();
         let why = "low's change detection (a private git index, not your staging area) could not snapshot the tree";
         let start = self.tree().await.context(why)?;
-        let snapshot_ms = clock.elapsed().as_millis() as u64;
+        let snapshot_ms = ui::ms(clock);
         self.session
             .push(json!({"role": "user", "content": task, "meta": {"snapshot": start, "snapshot_ms": snapshot_ms}}))?;
         // The push first writes what the snapshot logged, so the turn begins at the task itself.
@@ -524,7 +524,7 @@ impl Agent {
                 if stale(&meta) {
                     self.passed = None;
                 }
-                meta["ms"] = (clock.elapsed().as_millis() as u64).into();
+                meta["ms"] = ui::ms(clock).into();
                 ui::ran(&meta, &out);
                 (out, meta)
             }
@@ -536,17 +536,17 @@ impl Agent {
                 }
                 let out = format!("error: {e:#}; the worker was restarted and its variables are gone");
                 ui::event("worker_restart", &out, Value::Null);
-                (out, json!({"tool": "run", "error": true, "ms": clock.elapsed().as_millis() as u64}))
+                (out, json!({"tool": "run", "error": true, "ms": ui::ms(clock)}))
             }
         }
     }
 
     fn worker(&mut self) -> Result<&mut Worker> {
-        if self.worker.is_none() {
-            let (check, fmt) = (self.config.check.as_deref(), self.config.fmt.as_deref());
-            self.worker = Some(Worker::start(&self.root, self.yolo, check, fmt)?);
-        }
-        Ok(self.worker.as_mut().expect("just started"))
+        let worker = match self.worker.take() {
+            Some(worker) => worker,
+            None => Worker::start(&self.root, self.yolo, self.config.check.as_deref(), self.config.fmt.as_deref())?,
+        };
+        Ok(self.worker.insert(worker))
     }
 
     async fn verify(&mut self, check: &str, gate: bool) -> (bool, String) {
@@ -557,9 +557,7 @@ impl Agent {
             && tree == passed
         {
             let out = format!("{out}\n[reused: the tree is unchanged since this check passed]");
-            ui::log(
-                json!({"check": {"ok": true, "gate": gate, "reused": true, "ms": clock.elapsed().as_millis() as u64}}),
-            );
+            ui::log(json!({"check": {"ok": true, "gate": gate, "reused": true, "ms": ui::ms(clock)}}));
             return (true, out);
         }
         if gate {
@@ -589,7 +587,7 @@ impl Agent {
             ui::ran(&json!({"actions": [{"tool": "check", "ok": false}]}), &out);
         }
         self.passed = after.ok().filter(|_| ok).map(|tree| (tree, out.clone()));
-        let ms = clock.elapsed().as_millis() as u64;
+        let ms = ui::ms(clock);
         ui::log(json!({"check": {"ok": ok, "gate": gate, "ms": ms, "out": compact::tail(&out, 1500)}}));
         (ok, out)
     }
@@ -707,14 +705,12 @@ impl Agent {
         let n = |v: &Value| v.as_u64().unwrap_or(0);
         let (requests, runs, tokens) = (n(&totals["requests"]), n(&totals["runs"]), &totals["tokens"]);
         let (prompt, cached, out) = (n(&tokens["prompt"]), n(&tokens["cached"]), n(&tokens["out"]));
-        let ms = clock.elapsed().as_millis() as u64;
-        let secs = ms / 1000;
+        let ms = ui::ms(clock);
         let cost = format!(
-            "{requests} requests · {runs} runs · {} in · {} out · {}:{:02}",
+            "{requests} requests · {runs} runs · {} in · {} out · {}",
             ui::tokens(prompt),
             ui::tokens(out),
-            secs / 60,
-            secs % 60
+            ui::minutes(ms / 1000)
         );
         rows.push(("cost", cost));
         let good = (!changed || checked || self.config.check.is_none()) && !stopped;
@@ -784,10 +780,7 @@ struct Group(Vec<i32>);
 impl Drop for Group {
     fn drop(&mut self) {
         ui::CHECK.store(0, Ordering::Relaxed);
-        let own = unsafe { libc::getpgrp() };
-        for &group in self.0.iter().filter(|&&g| g > 1 && g != own) {
-            unsafe { libc::kill(-group, libc::SIGKILL) };
-        }
+        worker::kill_groups(self.0.iter().copied());
     }
 }
 
@@ -895,9 +888,7 @@ pub fn redact(text: &str) -> (String, usize) {
 
 fn secret(s: &str) -> Option<(usize, &'static str)> {
     if s.starts_with("-----BEGIN ") && s.lines().next().is_some_and(|l| l.contains("PRIVATE KEY-----")) {
-        let end = s
-            .find("-----END ")
-            .map_or(s.len(), |e| e + 9 + s[e + 9..].find("-----").map_or(s.len() - e - 9, |k| k + 5));
+        let end = s.find("-----END ").and_then(|e| Some(e + 9 + s[e + 9..].find("-----")? + 5)).unwrap_or(s.len());
         return Some((end, "private key"));
     }
     SECRETS.iter().find_map(|&(prefix, kind, min, extra)| {
@@ -1203,7 +1194,8 @@ fn snapshot_with(root: &Path, index: &Path) -> Result<String> {
         let _ = std::fs::copy(root.join(current.trim()), index);
     }
     let others = git(root, Some(index), &["ls-files", "-z", "-o", "--exclude-standard"])?;
-    let mut args = vec!["add".to_string(), "-A".into(), "--ignore-errors".into(), "--".into(), ".".into()];
+    let mut args = ["add", "-A", "--ignore-errors", "--", "."].map(String::from).to_vec();
+    let base = args.len();
     let mut hasher = std::hash::DefaultHasher::new();
     for path in others.split('\0').filter(|p| !p.is_empty()) {
         let Ok(meta) = std::fs::symlink_metadata(root.join(path)) else { continue };
@@ -1221,7 +1213,7 @@ fn snapshot_with(root: &Path, index: &Path) -> Result<String> {
         SKIPPED.call_once(|| ui::note(&format!("change detection skips what git cannot add: {e:#}")));
     }
     let tree = git(root, Some(index), &["write-tree"])?.trim().to_string();
-    Ok(if args.len() > 5 { format!("{tree} {:016x}", hasher.finish()) } else { tree })
+    Ok(if args.len() > base { format!("{tree} {:016x}", hasher.finish()) } else { tree })
 }
 
 fn changes(root: &Path, snapshot: Option<(&str, &Path)>, since: std::time::SystemTime) -> String {

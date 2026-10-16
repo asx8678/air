@@ -1,5 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
@@ -69,11 +71,7 @@ pub struct Lost {
 
 impl Lost {
     fn new(thinking: &str, began: Option<Instant>) -> Self {
-        Self {
-            thinking: thinking.into(),
-            ms: began.map_or(0, |b| b.elapsed().as_millis() as u64),
-            ..Default::default()
-        }
+        Self { thinking: thinking.into(), ms: began.map_or(0, crate::ui::ms), ..Default::default() }
     }
 
     pub fn extra(&self) -> Value {
@@ -175,8 +173,8 @@ pub struct Llm {
     model: String,
     params: Value,
     session: Option<String>,
-    field: std::cell::Cell<&'static str>,
-    marked: std::cell::Cell<bool>,
+    field: Cell<&'static str>,
+    marked: Cell<bool>,
 }
 
 impl Llm {
@@ -197,7 +195,7 @@ impl Llm {
             model: header["model"].as_str().unwrap_or_default().into(),
             params: params(header),
             session: session_id(base_url, header),
-            field: std::cell::Cell::new(FIELDS[0]),
+            field: Cell::new(FIELDS[0]),
             marked: Default::default(),
         }
     }
@@ -249,7 +247,7 @@ impl Llm {
             match self.stream(&request).await {
                 Err(e) if let Some(mut extra) = lost(&e).map(Lost::extra) => {
                     extra["attempt"] = attempt.into();
-                    extra["ms"] = (began.elapsed().as_millis() as u64).into();
+                    extra["ms"] = crate::ui::ms(began).into();
                     extra["request"] = asked.clone();
                     if attempt == 4 || began.elapsed() > LONG {
                         crate::ui::event("interrupted", &e.to_string(), extra);
@@ -259,7 +257,7 @@ impl Llm {
                     tokio::time::sleep(Duration::from_secs(2 << attempt)).await;
                 }
                 Ok(mut message) => {
-                    message["meta"]["timing"]["ms"] = (start.elapsed().as_millis() as u64).into();
+                    message["meta"]["timing"]["ms"] = crate::ui::ms(start).into();
                     message["meta"]["timing"]["attempts"] = attempt.into();
                     message["meta"]["request"] = asked;
                     return Ok(message);
@@ -282,7 +280,7 @@ impl Llm {
         let (mut finished, mut reason) = (false, Value::Null);
         let (mut buf, mut text, mut thinking, mut usage) = (Vec::new(), String::new(), String::new(), Value::Null);
         let mut calls: Vec<[String; 3]> = vec![];
-        let mut slots = std::collections::HashMap::new();
+        let mut slots = HashMap::new();
         let mut lines = 0;
         let (mut markdown, mut began) = (crate::render::Markdown::default(), None::<Instant>);
         let (mut held, mut answering, mut narrated) = (String::new(), false, false);
@@ -456,7 +454,7 @@ impl Llm {
             if answering {
                 markdown.finish();
             }
-            let why = broken.unwrap_or("the stream ended before the model finished".into());
+            let why = broken.unwrap_or_else(|| "the stream ended before the model finished".into());
             let mut lost = Lost::new(&thinking, began);
             lost.text = text.chars().count() + calls.iter().map(|c| c[2].len()).sum::<usize>();
             lost.stalled = stalled;

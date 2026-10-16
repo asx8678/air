@@ -113,7 +113,7 @@ async fn start() -> Result<()> {
     if let Some(task) = cli.task {
         let verified = agent.run(&task).await?;
         drop(agent);
-        std::process::exit(if verified { 0 } else { 1 });
+        std::process::exit(i32::from(!verified));
     }
     let mut editor = rustyline::DefaultEditor::new()?;
     loop {
