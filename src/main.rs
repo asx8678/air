@@ -94,6 +94,8 @@ fn load(path: &Path) -> Result<Config> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     ui::guard();
+    // reqwest brings no crypto of its own: every client, the agent's and /providers', uses ring.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     if let Err(e) = start().await {
         eprintln!("error: {}", agent::error_text(&e));
         std::process::exit(1);
