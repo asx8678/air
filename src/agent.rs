@@ -77,10 +77,12 @@ pub struct Agent {
     restarts: usize,
     broken: Option<String>,
     passed: Option<(String, String)>,
+    /// Whether the root is a git repository; outside one there are no snapshots and no undo.
+    repo: bool,
 }
 
 impl Agent {
-    pub fn new(root: &Path, home: &Path, config: Config, resume: bool, yolo: bool) -> Result<Self> {
+    pub fn new(root: &Path, home: &Path, config: Config, resume: bool, yolo: bool, repo: bool) -> Result<Self> {
         guard_git(root);
         let context = context(root, &config, yolo);
         let session = if resume {
@@ -107,7 +109,7 @@ impl Agent {
             };
             web(provider, &config.providers[provider].base_url)?;
             let profile = config.models.get(&model).cloned().unwrap_or_default();
-            let system = system_prompt(root, yolo, config.check.is_some());
+            let system = system_prompt(root, yolo, config.check.is_some(), repo);
             Session::create(home, root, provider, &model, &system, profile, context)?
         };
         let (provider, llm) = connect(&config.providers, session.header())?;
@@ -129,6 +131,7 @@ impl Agent {
             restarts: 0,
             broken: None,
             passed: None,
+            repo,
         };
         agent.record()?;
         Ok(agent)
@@ -205,7 +208,7 @@ impl Agent {
         }
         web(provider, &self.config.providers[provider].base_url)?;
         let profile = self.config.models.get(model).cloned().unwrap_or_default();
-        let system = system_prompt(&self.root, self.yolo, self.config.check.is_some());
+        let system = system_prompt(&self.root, self.yolo, self.config.check.is_some(), self.repo);
         self.session.switch(provider, model, &system, profile)?;
         (self.provider, self.llm) = connect(&self.config.providers, self.session.header())?;
         self.compact_at = self.session.header()["compact_at"].as_u64().unwrap_or(COMPACT_AT);
@@ -551,7 +554,8 @@ impl Agent {
     async fn verify(&mut self, check: &str, gate: bool) -> (bool, String) {
         let clock = Instant::now();
         let before = self.tree().await;
-        if let (Ok(tree), Some((passed, out))) = (&before, &self.passed)
+        if self.repo
+            && let (Ok(tree), Some((passed, out))) = (&before, &self.passed)
             && tree == passed
         {
             let out = format!("{out}\n[reused: the tree is unchanged since this check passed]");
@@ -595,6 +599,10 @@ impl Agent {
     /// The working tree as a git tree id. Git runs on the blocking pool, so Ctrl-C and the status bar stay live
     /// while a large repo is snapshotted.
     async fn tree(&self) -> Result<String> {
+        // Outside a git repository there is no snapshot: only edit() and write() show what changed.
+        if !self.repo {
+            return Ok(String::new());
+        }
         let _busy = ui::busy("indexing the working tree");
         let (root, index) = (self.root.clone(), self.session.index());
         tokio::task::spawn_blocking(move || snapshot(&root, &index)).await?
@@ -620,7 +628,11 @@ impl Agent {
         clock: Instant,
     ) -> Result<bool> {
         self.session.flush()?;
-        let changes = self.diff(began, std::time::SystemTime::now() - clock.elapsed()).await?;
+        let changes = if self.repo {
+            self.diff(began, std::time::SystemTime::now() - clock.elapsed()).await?
+        } else {
+            own_changes(&self.session.entries[began..])
+        };
         let first = &self.session.entries[began];
         let snapshot = first["meta"]["snapshot"].as_str().and_then(|s| s.split(' ').next());
         let changed = changed.unwrap_or(changes != "none");
@@ -667,7 +679,10 @@ impl Agent {
             let text = format!("not through low's edit()/write(), maybe outside low: {}", outside.join(", "));
             rows.push(("outside", text));
         }
-        if let Some(tree) = snapshot.filter(|_| changed) {
+        if changed && !self.repo {
+            rows.push(("undo", "none: not a git repository, so these changes can't be undone".into()));
+        }
+        if let Some(tree) = snapshot.filter(|_| changed && self.repo) {
             let short = tree.get(..12).unwrap_or(tree);
             let mine: Vec<String> = mine.into_iter().filter_map(path).collect();
             let known = if mine.is_empty() {
@@ -953,6 +968,29 @@ fn context(root: &Path, config: &Config, yolo: bool) -> serde_json::Map<String, 
     context.as_object().cloned().unwrap_or_default()
 }
 
+/// What edit() and write() changed in a turn, listed as changes() lists it: outside a git repository that is all low
+/// can see.
+fn own_changes(turn: &[Value]) -> String {
+    let mut files: BTreeMap<&str, (u64, u64, bool)> = BTreeMap::new();
+    for action in turn.iter().flat_map(|e| e["meta"]["actions"].as_array().into_iter().flatten()) {
+        if let Some(path) = action["path"].as_str().filter(|_| action["ok"] == true) {
+            let file = files.entry(path).or_default();
+            file.0 += action["added"].as_u64().unwrap_or(0);
+            file.1 += action["removed"].as_u64().unwrap_or(0);
+            file.2 |= action["tool"] == "write";
+        }
+    }
+    let lines: Vec<String> = files
+        .iter()
+        .map(
+            |(path, (added, removed, new))| {
+                if *new { format!("{path} (new)") } else { format!("{path} +{added} −{removed}") }
+            },
+        )
+        .collect();
+    if lines.is_empty() { "none".into() } else { lines.join("\n") }
+}
+
 /// The path in one of changes()'s lines.
 fn changed_path(line: &str) -> Option<String> {
     line.strip_suffix(" (new)").or_else(|| line.rsplit_once(" +").map(|(path, _)| path)).map(String::from)
@@ -984,10 +1022,18 @@ fn finish(mut meta: Value) -> (String, Value) {
     (out, meta)
 }
 
-fn system_prompt(root: &Path, yolo: bool, check: bool) -> String {
+fn system_prompt(root: &Path, yolo: bool, check: bool, repo: bool) -> String {
     let mut prompt = include_str!("prompt.md").to_string();
     if !check {
         prompt += "\nNo check command is configured, so check() runs nothing.";
+    }
+    let read_only = !yolo && worker::read_only(root);
+    if read_only {
+        prompt += "\n\nThis folder is the user's home directory or above it: you can read files here but not change them. \
+                   Put scratch files in a temp dir.";
+    } else if !repo {
+        prompt += "\n\nThis folder is not a git repository, so nothing you change can be undone: change only what the task \
+                   needs. Git commands don't work here; list files with pathlib.";
     }
     if !yolo {
         prompt += SANDBOX;

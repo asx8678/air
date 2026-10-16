@@ -295,9 +295,18 @@ fn nested(root: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// Whether the sandbox keeps `root` read-only: the home directory or a folder above it, where writes could reach shell
+/// startup files and launch agents that later run outside the sandbox.
+pub fn read_only(root: &Path) -> bool {
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let home = home.canonicalize().unwrap_or(home);
+    !home.as_os_str().is_empty() && home.starts_with(root)
+}
+
 fn writable(root: &Path) -> Vec<PathBuf> {
-    let dirs = [root.into(), std::env::temp_dir(), "/tmp".into()];
-    dirs.into_iter().filter_map(|d| d.canonicalize().ok()).collect()
+    let root = Some(root.to_path_buf()).filter(|r| !read_only(r));
+    let dirs = root.into_iter().chain([std::env::temp_dir(), "/tmp".into()]);
+    dirs.filter_map(|d| d.canonicalize().ok()).collect()
 }
 
 /// The worker's interpreter: the newest python3.N on PATH, else python3, which on macOS is the system's 3.9.
@@ -318,8 +327,17 @@ fn newest_python(dirs: impl Iterator<Item = PathBuf>) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::newest_python;
+    use super::{newest_python, read_only};
     use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn home_and_above_are_read_only() {
+        let home = PathBuf::from(std::env::var("HOME").expect("HOME is set")).canonicalize().expect("home exists");
+        assert!(read_only(&home) && read_only(Path::new("/")));
+        assert!(!read_only(&home.join("projects/app")), "a folder inside home can be edited");
+        assert!(!read_only(&std::env::temp_dir().canonicalize().expect("temp exists")));
+    }
 
     #[test]
     fn picks_the_newest_runnable_python() {

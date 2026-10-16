@@ -64,11 +64,10 @@ async fn start() -> Result<()> {
     if cli.task.as_deref().is_some_and(|t| t.trim().is_empty()) {
         bail!("the task is empty: give low something to do, or run it without a task for the REPL");
     }
-    let top = std::process::Command::new("git").args(["rev-parse", "--show-toplevel"]).output()?;
-    if !top.status.success() {
-        bail!("low works inside a git repository (git is the undo)");
-    }
-    let root = PathBuf::from(String::from_utf8(top.stdout)?.trim()).canonicalize()?;
+    let top = std::process::Command::new("git").args(["rev-parse", "--show-toplevel"]).output();
+    let top = top.ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    let repo_dir = top.is_some();
+    let root = top.map_or_else(std::env::current_dir, |t| Ok(PathBuf::from(t)))?.canonicalize()?;
     let user = load(&providers::config_dir(&home).join("config.toml"))?;
     check_config(&user)?;
     let repo = load(&root.join("low.toml"))?;
@@ -76,6 +75,12 @@ async fn start() -> Result<()> {
         eprintln!("{text}");
         ui::record("note", text, serde_json::Value::Null);
     };
+    if !repo_dir {
+        warn("not a git repository: low runs without undo here, so whatever it changes stays changed (git init adds undo)");
+    }
+    if !cli.yolo && worker::read_only(&root) {
+        warn("this is your home directory or above it: low can read files here but not change them; cd into a folder to let it edit");
+    }
     if repo.model.is_some() || repo.base_url.is_some() || !repo.models.is_empty() {
         warn(
             "low.toml: model, base_url and models are ignored; models go in ~/.config/low/config.toml, providers in \
@@ -97,7 +102,7 @@ async fn start() -> Result<()> {
         providers,
     };
     worker::allow_env(config.env.clone());
-    let mut agent = agent::Agent::new(&root, &home, config, cli.resume, cli.yolo)?;
+    let mut agent = agent::Agent::new(&root, &home, config, cli.resume, cli.yolo, repo_dir)?;
     if let Some(model) = picked {
         agent.resume_with(&model)?;
     }

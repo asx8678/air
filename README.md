@@ -8,7 +8,7 @@
 ![platforms: macOS | Linux](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-informational)
 ![rust 1.99+](https://img.shields.io/badge/rust-1.99%2B-orange)
 
-low gives the model one tool, `run(code)`. Each step is a short Python script that runs in a persistent, sandboxed worker at the root of your git repository. Reading files, editing them and running tests all happen inside that script, so a step that takes many tool calls in other agents is usually one round trip here.
+low gives the model one tool, `run(code)`. Each step is a short Python script that runs in a persistent, sandboxed worker at the root of your project. Reading files, editing them and running tests all happen inside that script, so a step that takes many tool calls in other agents is usually one round trip here.
 
 ```text
 $ low "add() returns the wrong result; fix it"
@@ -36,7 +36,7 @@ cost      3 requests · 2 runs · 4.9k tok in · 266 tok out · 0:10
 - **Code mode.** The model writes a program instead of making many small tool calls: fewer round trips, fewer tokens.
 - **Sandboxed by default.** No network, writes only inside the repo and temp dirs, and your SSH keys, cloud credentials and shell history are out of reach.
 - **Verified.** low runs your project's check on the final tree, and every turn ends with a verdict.
-- **Reversible.** low never commits. Git is the undo, and every turn report prints the exact restore command.
+- **Reversible.** Inside a git repository, low never commits: git is the undo, and every turn report prints the exact restore command.
 - **Low entropy.** A short system prompt, deterministic harness decisions, rule-based context compaction, and no hidden LLM calls.
 - **Any OpenAI-compatible model.** Point it at any `/chat/completions` endpoint.
 
@@ -51,7 +51,7 @@ cargo install low
 | you need | why |
 |---|---|
 | macOS or Linux | the sandbox is `sandbox-exec` on macOS and [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) on Linux |
-| `git` | low works inside a git repository, and git is the undo |
+| `git` | inside a repository, low tracks what it changes and prints an undo; elsewhere it runs without undo |
 | Python 3 | the worker runs on the newest `python3.N` on your `PATH` |
 
 ## Quick start
@@ -147,6 +147,8 @@ Every turn ends with one of four verdicts:
 - **Reads:** credentials and private data in your home directory are hidden, including `~/.ssh`, cloud and Kubernetes configs, keychains, shell histories, browser data and low's own config.
 - **Environment:** only an allowlist of variables is passed in, plus your `env = [...]`.
 - **Redaction:** secrets that appear in output, such as API keys, tokens and private keys, are redacted before the model or the session log sees them.
+
+**Outside a git repository** low still runs, but it can't undo: the turn report lists what `edit` and `write` changed and says so. In your home directory, or above it, low can read files but not change them, because writes there could reach shell startup files and launch agents outside the sandbox.
 
 **Sessions** are JSONL files in `~/.low/sessions`. When the context reaches `compact_at`, low compacts it without an LLM call: it keeps the task, the latest messages and a summary rebuilt from the log.
 
