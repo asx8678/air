@@ -1,0 +1,5 @@
+{
+  "kind": "feature",
+  "timeout": 1800,
+  "prompt": "The worker starts `python3`, which on macOS is the system's 3.9 even when a newer Python is installed. Start it on the newest runnable python3.N on PATH instead, falling back to python3. Put the search in src/worker.rs as `fn newest_python(dirs: impl Iterator<Item = PathBuf>) -> Option<PathBuf>`: the executable regular file named exactly python3.N (N a number) with the highest N in those directories; on a tie the earliest directory wins, as PATH would pick, and names such as python3.12-config don't count. Add a test."
+}

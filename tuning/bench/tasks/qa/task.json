@@ -1,0 +1,5 @@
+{
+  "kind": "question",
+  "timeout": 900,
+  "prompt": "Answer these questions about this code, each in one or two sentences with file:line evidence. Don't change any files.\n1. What format string does basicConfig() use when no format is given?\n2. When does RotatingFileHandler roll over? Name the method and the exact condition.\n3. What does getLogger() return when called with no name?\n4. What is lastResort, and what level does it use?"
+}

@@ -1,0 +1,5 @@
+{
+  "kind": "feature",
+  "timeout": 1800,
+  "prompt": "A compact_at in a config.toml model profile is only sanity-checked at runtime, where 0 means unset. Check it when the config loads instead: in src/main.rs, move the retired-key check (think_limit, turn_tokens, guidance) into `fn check_profiles(user: &Config) -> Result<()>` and have it also reject a compact_at that is not a whole number of at least 1024 tokens (0, 100, \"200k\" and 2.5e5 are all errors), with an error that names the model and the value. Then drop the runtime rule in src/agent.rs that a compact_at of 0 means unset. Add a test."
+}

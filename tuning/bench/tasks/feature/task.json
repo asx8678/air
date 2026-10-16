@@ -1,0 +1,5 @@
+{
+  "kind": "feature",
+  "timeout": 900,
+  "prompt": "Add priorities to the todo CLI. `add` takes `--priority low|normal|high` (default `normal`). `list` shows the priority in parentheses after the title, e.g. `1. [ ] buy milk (high)`. `list --sort priority` lists high, then normal, then low, keeping the original order within a priority; each item keeps its original number so `done N` still refers to the same item. Items saved before this change have no priority and count as normal. Update and add tests."
+}

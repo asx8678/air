@@ -1,0 +1,5 @@
+{
+  "kind": "question",
+  "timeout": 900,
+  "prompt": "Answer these questions about air, each in one or two sentences with file:line evidence. Don't change any files.\n1. What compact_at does air use when the model's profile sets none and no overflow has been seen?\n2. At most how many characters of one run's output reach the model, and which part of a longer output is dropped?\n3. Which environment variable tells the worker whether a check command is configured?\n4. How many model requests can one turn make before air stops it?"
+}

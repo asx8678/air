@@ -1,0 +1,5 @@
+{
+  "kind": "question",
+  "timeout": 900,
+  "prompt": "Review this code for bugs. List each bug with file:line, most severe first. Don't change any files."
+}

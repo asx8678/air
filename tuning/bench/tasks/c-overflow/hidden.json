@@ -1,0 +1,9 @@
+{
+  "commit": "d4ccc7e",
+  "parent": "d4ccc7e^",
+  "file": "src/llm.rs",
+  "tests": 1,
+  "absent": {
+    "src/agent.rs": "fn window("
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "kind": "bugfix",
+  "timeout": 900,
+  "prompt": "`cargo test` fails. Fix the code so the tests pass; don't change the tests."
+}

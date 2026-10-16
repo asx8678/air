@@ -1,0 +1,5 @@
+{
+  "kind": "ops",
+  "timeout": 900,
+  "prompt": "`sh scripts/report.sh` must write reports/errors.csv: a header line `endpoint,count`, then one `endpoint,count` line per endpoint (the request path without its query string) with its number of 5xx responses across every log in logs/, sorted by count descending, then endpoint ascending. The script gets this wrong. Fix it, and run it so reports/errors.csv is up to date."
+}

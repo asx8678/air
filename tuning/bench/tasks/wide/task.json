@@ -1,0 +1,5 @@
+{
+  "kind": "wide",
+  "timeout": 900,
+  "prompt": "Write docs/CONFIG.md: a markdown table with the columns `key | plugin | default` and one row for every config key that a plugin in app/plugins/ reads from its `config` mapping. `plugin` is the plugin's NAME; `default` is the default exactly as written in the source, `None` for `config.get(key)` without a default, and `required` for `config[key]`. Reads through app/util.py's `setting(config, key, default)` count too. Sort the rows by key, then plugin. Don't change any other file."
+}

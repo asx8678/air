@@ -1,0 +1,5 @@
+{
+  "kind": "recovery",
+  "timeout": 900,
+  "prompt": "`evaluate()` in calc.py rejects negative operands such as `2 - -3`; it should accept a unary minus anywhere an operand can appear, including before parentheses. Fix it. `python3 -m unittest` must pass; don't change the tests."
+}

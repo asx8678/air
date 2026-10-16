@@ -1,0 +1,5 @@
+{
+  "kind": "bugfix",
+  "timeout": 900,
+  "prompt": "median() is wrong for even-length lists (it must average the two middle values) and it must not modify the caller's list. Fix it."
+}
