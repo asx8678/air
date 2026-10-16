@@ -70,11 +70,7 @@ async fn start() -> Result<()> {
     }
     let root = PathBuf::from(String::from_utf8(top.stdout)?.trim()).canonicalize()?;
     let user = load(&home.join(".config/air/config.toml"))?;
-    for (model, profile) in &user.models {
-        if let Some(key) = ["think_limit", "turn_tokens", "guidance"].into_iter().find(|k| profile.contains_key(*k)) {
-            bail!("~/.config/air/config.toml: [models.\"{model}\"] sets {key}, which air no longer supports; remove it");
-        }
-    }
+    check_profiles(&user)?;
     let repo = load(&root.join("air.toml"))?;
     let warn = |text: &str| {
         eprintln!("{text}");
@@ -234,9 +230,23 @@ fn unknown(line: &str) -> Option<String> {
     })
 }
 
+/// Stops on a profile key air no longer reads, or on a compact_at it cannot use.
+fn check_profiles(user: &Config) -> Result<()> {
+    for (model, profile) in &user.models {
+        let at = format!("~/.config/air/config.toml: [models.\"{model}\"]");
+        if let Some(key) = ["think_limit", "turn_tokens", "guidance"].into_iter().find(|k| profile.contains_key(*k)) {
+            bail!("{at} sets {key}, which air no longer supports; remove it");
+        }
+        if let Some(value) = profile.get("compact_at").filter(|v| v.as_u64().is_none_or(|n| n < 1024)) {
+            bail!("{at} sets compact_at = {value}; it takes a whole number of tokens, at least 1024");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::unknown;
+    use super::{check_profiles, unknown};
 
     #[test]
     fn typos_are_not_tasks() {
@@ -246,5 +256,15 @@ mod tests {
         assert_eq!(unknown("/models gpt"), None);
         assert_eq!(unknown("/etc/hosts has a typo"), None);
         assert_eq!(unknown("fix /model"), None);
+    }
+
+    #[test]
+    fn profiles_need_a_usable_compact_at() {
+        let check = |text: &str| check_profiles(&toml::from_str(text).expect("valid toml"));
+        assert!(check("[models.m]\ncompact_at = 200000\ntemperature = 1.0\n").is_ok());
+        for bad in ["0", "100", "\"200k\"", "2.5e5"] {
+            assert!(check(&format!("[models.m]\ncompact_at = {bad}\n")).is_err(), "{bad}");
+        }
+        assert!(check("[models.m]\nturn_tokens = 5\n").is_err());
     }
 }

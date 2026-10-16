@@ -106,7 +106,7 @@ impl Agent {
         let (provider, llm) = connect(&config.providers, session.header())?;
         let mut since = session.entries.iter().rev().take_while(|e| e["switch"].is_null());
         let learned = since.find_map(|e| e["compact"]["at"].as_u64());
-        let compact_at = learned.or(session.header()["compact_at"].as_u64()).filter(|&at| at > 0).unwrap_or(COMPACT_AT);
+        let compact_at = learned.or(session.header()["compact_at"].as_u64()).unwrap_or(COMPACT_AT);
         let mut agent = Self {
             root: root.into(),
             config,
@@ -202,7 +202,7 @@ impl Agent {
         let system = system_prompt(&self.root, self.yolo, self.config.check.is_some());
         self.session.switch(provider, model, &system, profile)?;
         (self.provider, self.llm) = connect(&self.config.providers, self.session.header())?;
-        self.compact_at = self.session.header()["compact_at"].as_u64().filter(|&at| at > 0).unwrap_or(COMPACT_AT);
+        self.compact_at = self.session.header()["compact_at"].as_u64().unwrap_or(COMPACT_AT);
         ui::note(&format!("now using {model} on {provider}"));
         Ok(())
     }
