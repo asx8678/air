@@ -58,11 +58,11 @@ Diffs vary a lot: pairwise normalized edit distance is 0.4–0.5 on fix, feature
 
   The extra turns land on c-compact-at (+2.0), c-overflow (+1.6), review (+1.4), feature and refactor (+1.0). Flash also called plan() on more small fixes.
 - **Reading:** for Flash, the example and the numbered steps are load-bearing. They are what make it put the edits and check() into one run. The cut saved 242 prompt tokens per request but cost ~1k more uncached input per run.
-- **Decision:** rejected by the rule (cost CIs wholly above 0). Untested on Opus, where the trade may well go the other way. Split into E4 (example only) and E5 (report wording only) to find which part carries the cost.
+- **Decision:** rejected by the rule (cost CIs wholly above 0). Untested on Opus, where the trade may well go the other way. Split into E8 (example only) and E9 (report wording only) to find which part carries the cost.
 
 ## E2 · rituals on top of E1: superseded
 
-`exp/rituals` was stacked on E1, so it can't be read against main. Its numbers isolate the ritual effect relative to E1 only. It is re-run on the main prompt as E6 (`exp/rituals2`).
+`exp/rituals` was stacked on E1, so it can't be read against main. Its numbers isolate the ritual effect relative to E1 only. It is re-run on the main prompt as E7 (`exp/rituals2`).
 
 ## E3 · An edit reloads the modules runs imported instead of deleting their names: KEPT (judgment call, see below)
 
@@ -84,3 +84,23 @@ Diffs vary a lot: pairwise normalized edit distance is 0.4–0.5 on fix, feature
   - it makes the harness tolerate the model's natural habit, which the standing design rule prefers to prompt text.
 
   **Flagged for the user** as an override of the strict rule. Commit c7f3879 on tune-opus.
+
+## E4 · Ask once about files a turn changed without edit()/write(): KEPT (win on success)
+
+- **Hypothesis:** a review or question turn that runs the code under test leaves demo output in the repo. Examples from the logs: `tmp_demo5.json`, `pwned.txt`, `exports/out.csv`. That fails the "change no files" ask and makes the diff non-minimal. air already knows when this happened: the tree moved, but no edit() or write() did it.
+- **Change:** `exp/stray`, applied as 9a4e8fb (+30 lines in agent.rs). At the end of a turn with no edit()/write() whose tree changed, air sends one host message listing the files: "This turn changed files without edit() or write(): …. Delete the ones that are scratch output from running code, keep any that are part of your answer, then finish again."
+- **Result:**
+
+  | | main | stray |
+  |---|---|---|
+  | review pass | 21/25 (84%) | **20/20 (100%)** |
+  | review runs leaving files | 7/25 | 0/20 |
+  | gate fired | — | 3/20 review runs, 0 on qa, airqa, wide, ops |
+  | pooled pass, 5 tasks | 92% | 100%: **+8.0pp [+2.0, +16.0]** |
+  | turns | 4.92 | 5.20: +0.3 [−0.2, +0.8] |
+  | uncached input | 4.7k | 4.7k: +0.0k [−0.6, +0.6] |
+
+  - The gate costs about 2 turns when it fires (clean up, then finish).
+  - The review runs without a nudge were also +0.5 turns over main. Gateway upstream doesn't explain it (both upstreams show it), and all 20 runs fell in one 2-minute window, so I read it as noise. Unproven.
+  - Entropy on review: distinct outcomes fell 9 → 2 and diff distance 0.47 → 0.00.
+- **Decision:** kept. Pass rose with a CI wholly above 0, and task success outranks turns.
