@@ -654,14 +654,14 @@ impl Agent {
         if let Some(tree) = snapshot.filter(|_| changed) {
             let short = tree.get(..12).unwrap_or(tree);
             let mine: Vec<String> = mine.into_iter().filter_map(path).collect();
-            let mut args = vec!["--literal-pathspecs", "ls-tree", "-z", "--name-only", tree, "--"];
-            args.extend(mine.iter().map(String::as_str));
             let known = if mine.is_empty() {
                 String::new()
             } else {
-                let (root, args) = (self.root.clone(), args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
-                let run = move || git(&root, None, &args.iter().map(String::as_str).collect::<Vec<_>>());
-                tokio::task::spawn_blocking(run).await?.unwrap_or_default()
+                let mut args =
+                    ["--literal-pathspecs", "ls-tree", "-z", "--name-only", tree, "--"].map(String::from).to_vec();
+                args.extend(mine);
+                let root = self.root.clone();
+                tokio::task::spawn_blocking(move || git(&root, None, &args)).await?.unwrap_or_default()
             };
             let modified: Vec<&str> = known.split('\0').filter(|p| !p.is_empty()).collect();
             let undo = match (outside.is_empty(), modified.is_empty()) {
@@ -1100,13 +1100,13 @@ fn tools() -> Value {
         "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]}}}])
 }
 
-fn git(root: &Path, index: Option<&Path>, args: &[&str]) -> Result<String> {
+fn git<S: AsRef<str>>(root: &Path, index: Option<&Path>, args: &[S]) -> Result<String> {
     let mut cmd = std::process::Command::new("git");
     let guard = GIT_GUARD.get();
     cmd.args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.attributesFile=/dev/null"])
         .args(["-c", "core.quotePath=false", "-c", "core.safecrlf=false"])
         .args(guard.into_iter().flat_map(|g| &g.1))
-        .args(args)
+        .args(args.iter().map(AsRef::as_ref))
         .env("GIT_ATTR_SOURCE", guard.map_or(EMPTY_TREE, |g| g.0.as_str()))
         .current_dir(root)
         .process_group(0);
@@ -1115,6 +1115,7 @@ fn git(root: &Path, index: Option<&Path>, args: &[&str]) -> Result<String> {
     }
     let out = cmd.output().context("running git")?;
     if !out.status.success() {
+        let args: Vec<&str> = args.iter().map(AsRef::as_ref).collect();
         let text = format!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
         return Err(GitExit(out.status.code(), text).into());
     }
@@ -1160,7 +1161,7 @@ fn snapshot_with(root: &Path, index: &Path) -> Result<String> {
             args.push(format!(":(exclude,literal){path}"));
         }
     }
-    if let Err(e) = git(root, Some(index), &args.iter().map(String::as_str).collect::<Vec<_>>()) {
+    if let Err(e) = git(root, Some(index), &args) {
         // Unlike a file git cannot add (exit 1), a fatal error (128) writes nothing: write-tree would give a stale tree.
         if e.downcast_ref::<GitExit>().is_some_and(|g| g.0 == Some(128)) {
             return Err(e);
