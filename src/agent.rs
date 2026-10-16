@@ -25,14 +25,6 @@ const LISTING: usize = 8 * 1024;
 const TREE: usize = 10 * 1024;
 const AGENTS_MAX: usize = 32 * 1024;
 const RESTARTS: usize = 2;
-const WINDOW: &[&str] = &[
-    "context length is",
-    "context length of",
-    "context window is",
-    "context window of",
-    "\"n_ctx\":",
-    "tokens allowed (",
-];
 const CHECK_TIMEOUT: Duration = Duration::from_secs(1800);
 const CHECK_OUT: u64 = 1 << 20;
 const BIG: u64 = 16 << 20;
@@ -316,7 +308,7 @@ impl Agent {
             let mut message = match result {
                 Err(e) if e.is::<llm::ContextOverflow>() && !overflowed => {
                     overflowed = true;
-                    self.overflow(&e.to_string())?;
+                    self.overflow(e.downcast_ref::<llm::ContextOverflow>().and_then(|o| o.window))?;
                     continue;
                 }
                 Err(e) if e.is::<llm::ContextOverflow>() => {
@@ -421,7 +413,7 @@ impl Agent {
         serde_json::to_string(&self.session.messages()).map_or(0, |m| m.len() as u64) / 4
     }
 
-    fn overflow(&mut self, error: &str) -> Result<()> {
+    fn overflow(&mut self, window: Option<u64>) -> Result<()> {
         let seen = self.session.last_prompt_tokens();
         let entries = &self.session.entries;
         let compacted = entries.iter().rposition(|e| e["compact"].is_object()).map_or(0, |i| i + 1);
@@ -435,7 +427,6 @@ impl Agent {
             }
             None => self.sent(),
         };
-        let window = window(error);
         // Compaction waits for compact_at, and one request can add two full runs and a reply: keep a fifth free.
         self.compact_at = self.compact_at.min(window.unwrap_or(estimate) * 4 / 5);
         self.compact_to(self.compact_at as usize / 5, true)?;
@@ -1133,20 +1124,6 @@ fn tools() -> Value {
         "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]}}}])
 }
 
-fn window(error: &str) -> Option<u64> {
-    let lower = error.to_lowercase();
-    WINDOW.iter().find_map(|marker| {
-        let rest = lower[lower.find(marker)? + marker.len()..].trim_start();
-        let run: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == ',').collect();
-        let n: u64 = run.chars().filter(char::is_ascii_digit).collect::<String>().parse().ok()?;
-        Some(match rest[run.len()..].chars().next() {
-            Some('k') => n * 1_000,
-            Some('m') => n * 1_000_000,
-            _ => n,
-        })
-    })
-}
-
 fn git(root: &Path, index: Option<&Path>, args: &[&str]) -> Result<String> {
     let mut cmd = std::process::Command::new("git");
     let guard = GIT_GUARD.get();
@@ -1246,19 +1223,12 @@ fn changes(root: &Path, snapshot: Option<(&str, &Path)>, since: std::time::Syste
 
 #[cfg(test)]
 mod tests {
-    use super::{redact, window};
+    use super::redact;
 
     #[test]
     fn redacts_opencode_keys_but_not_identifiers() {
         let (out, hidden) = redact("key oc_sk_4f9Qx2LmZ8rT7vW1yB3nK6hJ and oc_some_long_identifier_name");
         assert_eq!(hidden, 1);
         assert_eq!(out, "key [redacted opencode key] and oc_some_long_identifier_name");
-    }
-
-    #[test]
-    fn window_sizes_read_a_k_suffix() {
-        assert_eq!(window("context length is 32k tokens"), Some(32_000));
-        assert_eq!(window("the context window of 200,000"), Some(200_000));
-        assert_eq!(window("no size here"), None);
     }
 }

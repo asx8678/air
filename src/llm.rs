@@ -25,18 +25,36 @@ const OVERFLOW: &[&str] = &[
     "too many tokens",
     "exceeds the maximum number of tokens",
 ];
+const WINDOW: &[&str] = &[
+    "context length is",
+    "context length of",
+    "context window is",
+    "context window of",
+    "\"n_ctx\":",
+    "tokens allowed (",
+];
 const QUOTA: &str = "insufficient_quota";
 const REJECTED: &[&str] = &["invalid", "authentication", "permission", "not_found", "insufficient_quota"];
 /// Stream chunk fields air reads itself or that carry nothing; the rest (id, model, provider, …) go in the log.
 const CHUNK: &[&str] = &["choices", "object", "created", "usage", "error", "obfuscation"];
 const HEADERS: &[&str] = &["request-id", "cf-ray", "server", "via", "retry-after", "server-timing"];
 
+/// The provider refused the request as too long; `window` is the context size its error states, if any.
 #[derive(Debug)]
-pub struct ContextOverflow(String);
+pub struct ContextOverflow {
+    text: String,
+    pub window: Option<u64>,
+}
+
+impl ContextOverflow {
+    fn new(text: String) -> Self {
+        Self { window: window(&text), text }
+    }
+}
 
 impl std::fmt::Display for ContextOverflow {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "context window exceeded: {}", self.0)
+        write!(f, "context window exceeded: {}", self.text)
     }
 }
 
@@ -105,6 +123,20 @@ fn session_id(base_url: &str, header: &Value) -> Option<String> {
 fn overflow(text: &str) -> bool {
     let lower = text.to_lowercase();
     OVERFLOW.iter().any(|m| lower.contains(m))
+}
+
+fn window(error: &str) -> Option<u64> {
+    let lower = error.to_lowercase();
+    WINDOW.iter().find_map(|marker| {
+        let rest = lower[lower.find(marker)? + marker.len()..].trim_start();
+        let run: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == ',').collect();
+        let n: u64 = run.chars().filter(char::is_ascii_digit).collect::<String>().parse().ok()?;
+        Some(match rest[run.len()..].chars().next() {
+            Some('k') => n * 1_000,
+            Some('m') => n * 1_000_000,
+            _ => n,
+        })
+    })
 }
 
 pub fn key_file() -> std::path::PathBuf {
@@ -428,7 +460,7 @@ impl Llm {
             held += &inner;
         }
         let failed: Option<anyhow::Error> = match broken.as_deref() {
-            Some(problem) if overflow(problem) => Some(ContextOverflow(problem.into()).into()),
+            Some(problem) if overflow(problem) => Some(ContextOverflow::new(problem.into()).into()),
             Some(problem) if rejected => Some(anyhow!("{problem}")),
             None if events == 0 && !finished => {
                 Some(anyhow!("the provider did not send an event stream: {got} bytes without a single event"))
@@ -520,7 +552,7 @@ impl Llm {
                     let text = head(r).await;
                     let retryable = status == 429 || status.is_server_error();
                     if status == 413 || !retryable && overflow(&text) {
-                        return Err(ContextOverflow(format!("{status}: {text}")).into());
+                        return Err(ContextOverflow::new(format!("{status}: {text}")).into());
                     }
                     if !retryable || text.to_lowercase().contains(QUOTA) {
                         bail!("{status}: {text}")
@@ -675,5 +707,19 @@ mod tests {
         );
         assert_eq!(session_id("https://opencode.ai/inference/go/v1", &json!({})), None);
         assert_eq!(session_id("https://api.primalabs.ai/v1", &json!({"id": "1792-1"})), None);
+    }
+
+    #[test]
+    fn window_sizes_read_a_k_suffix() {
+        assert_eq!(window("context length is 32k tokens"), Some(32_000));
+        assert_eq!(window("the context window of 200,000"), Some(200_000));
+        assert_eq!(window("no size here"), None);
+    }
+
+    #[test]
+    fn an_overflow_carries_the_window_its_error_states() {
+        let e = ContextOverflow::new("400: This model's maximum context length is 131,072 tokens".into());
+        assert_eq!(e.window, Some(131_072));
+        assert_eq!(ContextOverflow::new("413: request too large".into()).window, None);
     }
 }
