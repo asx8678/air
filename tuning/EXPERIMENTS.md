@@ -252,3 +252,38 @@ Final before/after, the primary comparison:
 - **Housekeeping:**
   - The 32 rows of the broken OpenCode attempts (`opencode`, `opencode-seq`, `opencode-fg`; startup failures) were removed from results.jsonl.
   - The 4 run dirs without a row are the 3 smoke tests (rows dropped on purpose) and one debugging run whose row went to a scratch file. No row was lost.
+
+## A2 · End the turn right after the stray-file cleanup run (analysis, not built)
+
+E4 fired 14 times in ~1,600 sessions, so ending the turn after the cleanup run saves at most 14 requests. It would add a stop condition to `turn()`. **Rejected:** a neutral addition.
+
+## E11 / E12 · Harness tolerance for three error classes (rules written before running)
+
+**Ceiling.** On the tip's prompt (912 sessions, 4,455 runs, 156 tool errors), three error classes are the harness refusing what the model naturally does:
+
+| class | errors |
+|---|---|
+| write() on an existing file ("exists; use edit") | 21 |
+| accept() gate ("call accept(criteria) before changing files") | 9 |
+| edit() argument shape (failing call located by its traceback line) | 7: flat `[old1, new1, old2, new2…]` 4, several `[old, new]` pairs as extra arguments 2, one with a computed element |
+
+That is 37 of 156 tool errors (24%), about one round trip each. The expected pooled effect is **~0.04 turns per task, below what N=10 resolves**, so neutral cost CIs are the expected outcome, not a failure.
+
+**Variants:**
+- **E11 `exp/tolerance` (280353e), prompt unchanged:**
+  - edit() also takes a flat even-length string list (≥4) as pairs, and several `[old, new]` pairs as extra arguments; a 3-string list still raises, and edits stay all-or-none;
+  - the accept() gate is removed while the prompt still asks for accept() ("the harness tolerates, the prompt steers", as with E3).
+- **E12 `exp/tolerance-write` (e6cd074):** E11, plus write() replaces an existing regular file (symlinks and non-files still raise; real +/− counts). The prompt's write line changes from "raises if it exists" (now false) to "for existing files use edit".
+- **Standalone check:** the real worker.py, driven over its stdin/stdout protocol, confirmed every accepted shape, both rejections, all-or-none on a bad second pair, writes without accept(), and write() over a file, a symlink and a new path.
+
+**Run:** tip (9e275a9), E11 and E12, interleaved, N=10 per task.
+
+**Keep a variant when all of these hold:**
+- the classes it targets are **0 in its own logs** (direct evidence, as with E3's NameError count);
+- pass is not lower (Δpass CI not wholly below 0);
+- the Δturns CI upper bound is below +0.3.
+
+**E12 also needs a diff-size guard.** Reject E12 if any of these holds:
+- the pooled Δdiff_bytes CI lies wholly above 0;
+- refactor or ops (the tasks where "exists; use edit" occurred) have a mean diff_bytes above 1.5× the tip's;
+- the share of turns with no accept() criteria rises noticeably. That is reported as a UX cost, because the turn report's criteria row then shows "-".
