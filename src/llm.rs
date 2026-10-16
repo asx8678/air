@@ -356,7 +356,6 @@ impl Llm {
                 if why.is_some() || field.is_some() || tools.is_some() || !content.is_empty() {
                     idle = tokio::time::Instant::now() + IDLE;
                 }
-                let t = content;
                 let reasoning = field.and_then(|f| delta[f].as_str()).unwrap_or_default();
                 if !reasoning.is_empty() {
                     via = via.or(field);
@@ -367,16 +366,16 @@ impl Llm {
                         crate::ui::thinking(&thinking, began.elapsed().as_secs());
                     }
                 }
-                if delta["tool_calls"].is_array() || !t.is_empty() {
+                if delta["tool_calls"].is_array() || !content.is_empty() {
                     spoke.get_or_insert_with(Instant::now);
                     first.get_or_insert_with(Instant::now);
                 }
-                if !t.is_empty() {
-                    text += &t;
+                if !content.is_empty() {
+                    text += &content;
                     if answering {
-                        markdown.push(&t);
+                        markdown.push(&content);
                     } else if !narrated {
-                        held += &t;
+                        held += &content;
                         crate::ui::activity("writing");
                         if held.len() > 400 || held.contains("\n\n") || held.trim_start().starts_with(['#', '-', '|']) {
                             crate::ui::prose();
