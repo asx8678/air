@@ -149,4 +149,4 @@ Diffs vary a lot: pairwise normalized edit distance is 0.4–0.5 on fix, feature
 | output | 3.3k | 2.8k |
 | wall | 41 s | 25 s |
 
-OpenCode's tools are one call per file: wide took 20 calls, 18 of them parallel reads, in 4 turns. Its system prompt and tool schemas start each session near 10k tokens. air's code mode gets the same work done in fewer turns and about a quarter of the prompt tokens.
+OpenCode's tools are one call per file: wide took 20 calls, 18 of them parallel reads, in 4 turns. Its system prompt and tool schemas make a first request of 5.5k tokens (median 5,480; air: 1.7k). air's code mode gets the same work done in fewer turns and about a quarter of the prompt tokens.
