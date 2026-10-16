@@ -66,7 +66,7 @@ Diffs vary a lot: pairwise normalized edit distance is 0.4–0.5 on fix, feature
 
 ## E3 · An edit reloads the modules runs imported instead of deleting their names: KEPT (judgment call, see below)
 
-- **Hypothesis:** after `from stats import median`, `edit("stats.py", …)` deletes `median` from the worker's globals (`_forget()`). The model's own check on the next line then raises NameError and costs a round trip. In 4 of 75 baseline runs this happened with an edit just applied. The prompt's "import them again after a change" doesn't stop it.
+- **Hypothesis:** after `from stats import median`, `edit("stats.py", …)` deletes `median` from the worker's globals (`_forget()`). The model's own check on the next line then raises NameError and costs a round trip. In 3 of the 75 baseline runs this happened with an edit just applied. The prompt's "import them again after a change" doesn't stop it.
 - **Change:** `exp/reload` (0e5eb07, +28 lines in worker.py). Names bound to a reloaded repo module, or to a function or class from one, are rebound to the new code. Instances are dropped as before, and so is a name whose module no longer imports. The prompt sentence shrinks to "an edit or write reloads the ones you imported".
 - **Result (7 Python tasks, N=10 each):**
 
@@ -131,3 +131,22 @@ Diffs vary a lot: pairwise normalized edit distance is 0.4–0.5 on fix, feature
 - **Where it broke:** easy tasks got slightly cheaper (fix 3.0 turns, feature 4.0, qa 4.2). Hard ones looped: c-python 135 turns at 20% pass, ops 84 turns at 60%, c-compact-at 63 turns at 60%. Wide dropped one row in 3 of 5 runs.
 - **Decision:** rejected. Reasoning is what carries success on multi-step work.
 - The 200-request guard only binds in this broken configuration, never with thinking on (max 20 requests per turn in 461 runs, no limit events), so it stays.
+
+## External baseline · OpenCode 2.0.29, same model, N=1
+
+- **Setup:** `opencode run --standalone -m opencode-go/deepseek-v4.1-flash --format json --auto`, under the bench's sandbox profile, with temperature 0 set in the project's opencode.json.
+- **Two bench bugs found on the way, both fixed before these numbers:**
+  - Without `--standalone`, the shared background service ran tools unsandboxed in its own cwd.
+  - OpenCode takes its project directory from `$PWD`. The inherited PWD made it work on the air repo itself, and it edited one bench template in the first smoke test; restored and checked against the original. The broken attempts are the `opencode`, `opencode-seq` and `opencode-fg` labels in results.jsonl; they failed at startup and are excluded.
+
+| per task (15 tasks) | OpenCode | air main (all 125 runs) |
+|---|---|---|
+| pass | 15/15 | 121/125 |
+| turns | 7.5 | 5.1 |
+| tool calls | 12.5 | 4.3 |
+| uncached input | 13.4k | 4.9k |
+| total prompt | 114k | 28k |
+| output | 3.3k | 2.8k |
+| wall | 41 s | 25 s |
+
+OpenCode's tools are one call per file: wide took 20 calls, 18 of them parallel reads, in 4 turns. Its system prompt and tool schemas start each session near 10k tokens. air's code mode gets the same work done in fewer turns and about a quarter of the prompt tokens.
