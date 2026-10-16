@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """air's benchmark: run each task N times per variant, grade it, and append one row per run to results.jsonl.
 
-  bench.py run --variant REF --model MODEL --n N [--tasks a,b] [--jobs 4] [--label NAME]
+  bench.py run --variant REF [REF ...] --model MODEL --n N [--tasks a,b] [--jobs 4] [--label NAME ...]
   bench.py report --baseline LABEL --variant LABEL [--model MODEL] [--results FILE]
 
-A variant is a git ref of air (built once per commit), or `opencode` for OpenCode itself on the same model.
+A variant is a git ref of air (built once per commit), or `opencode` for OpenCode itself on the same model. Several
+variants in one run are interleaved, so they share the same time window: compare variants only within a window.
 Runs live in scratch repos under $AIR_BENCH_RUNS (default $TMPDIR/air-bench/runs); air runs in its own sandbox.
 """
 import argparse
@@ -301,11 +302,15 @@ def cmd_run(args):
     unknown = [n for n in names if n not in every]
     if unknown:
         sys.exit(f"unknown tasks: {', '.join(unknown)} (known: {', '.join(every)})")
-    binary, sha = build(args.variant)
+    if args.label and len(args.label) != len(args.variant):
+        sys.exit(f"{len(args.variant)} variants but {len(args.label)} labels")
+    built = [build(v) for v in args.variant]
     prepare(names)
-    label = args.label or (args.variant if args.variant == "opencode" else sha)
-    # Interleave tasks so slow cargo tasks spread over the run instead of piling up at the end.
-    jobs = [(t, every[t], args.variant, binary, sha, args.model, k, label) for k in range(1, args.n + 1) for t in names]
+    labels = args.label or [v if v == "opencode" else sha for v, (_, sha) in zip(args.variant, built)]
+    # Interleave variants, then tasks: every variant runs in the same window (Flash drifts over hours), and slow cargo
+    # tasks spread over the run instead of piling up at the end.
+    jobs = [(t, every[t], v, binary, sha, args.model, k, label) for k in range(1, args.n + 1) for t in names
+            for v, (binary, sha), label in zip(args.variant, built, labels)]
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:
         rows = list(pool.map(run_one, jobs))
     print(f"done: {sum(r['pass'] for r in rows)}/{len(rows)} passed · results in {RESULTS}")
@@ -423,12 +428,12 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")
-    r.add_argument("--variant", default="HEAD")
+    r.add_argument("--variant", nargs="+", default=["HEAD"], help="one or more git refs (or opencode), run interleaved")
     r.add_argument("--model", default="deepseek-v4.1-flash")
     r.add_argument("--n", type=int, default=5)
     r.add_argument("--tasks", default="")
     r.add_argument("--jobs", type=int, default=4)
-    r.add_argument("--label", default="")
+    r.add_argument("--label", nargs="*", default=[], help="one label per variant (default: its commit id)")
     r.set_defaults(func=cmd_run)
     q = sub.add_parser("report")
     q.add_argument("--baseline", required=True)

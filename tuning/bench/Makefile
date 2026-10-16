@@ -1,9 +1,10 @@
-# make bench VARIANT=<git ref|opencode> MODEL=deepseek-v4.1-flash N=5 [TASKS=a,b] [JOBS=4] [LABEL=name]
+# make bench VARIANT="<ref> [<ref> ...]" MODEL=deepseek-v4.1-flash N=10 [TASKS=a,b] [JOBS=4] [LABEL="name ..."]
+# Several variants run interleaved in one window; compare variants only within a window.
 # make report BASE=<label> VARIANT=<label> [OUT=file.md]
 PYTHON ?= python3
 MODEL ?= deepseek-v4.1-flash
 VARIANT ?= HEAD
-N ?= 5
+N ?= 10
 JOBS ?= 4
 TASKS ?=
 LABEL ?=
