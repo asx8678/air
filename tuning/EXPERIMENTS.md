@@ -192,5 +192,7 @@ Consequences:
 - **Result vs tune1:**
   - **Δout −0.4k [−0.7, −0.2]**, Δturns −0.1 [−0.5, +0.3], Δuncached −0.5k [−1.3, +0.3], pass 75/75.
   - Pooled per-task turns sd 1.12 → 1.11; distinct outcomes up on 1 task (debug).
-  - The final answer's size barely moved (1,119 → 1,171 chars), so the saving is in output before the end: less narration.
-- **Decision:** kept. Rechecked in the closing interleaved run, since back-to-back batches are 30 minutes apart.
+  - Nearly all of the saving is reasoning: about 2.11k → 1.75k per run (57% → 53% of output). The rest of the output barely moved
+    (1.59k → 1.55k), and neither did the final answer's size (1,119 → 1,171 chars). A wording change to the final message has no obvious way to
+    cut reasoning, so this may be drift too; report ran last in the batch.
+- **Decision:** kept provisionally. The closing interleaved run (final vs tune1-late) decides it.
