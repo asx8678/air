@@ -9,7 +9,7 @@ repository = "https://github.com/asx8678/low"
 readme = "README.md"
 keywords = ["agent", "llm", "coding-agent", "cli", "sandbox"]
 categories = ["command-line-utilities", "development-tools"]
-include = ["src/**/*", "build.rs", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE"]
+include = ["/src/**/*", "/build.rs", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
 
 [dependencies]
 anyhow = "1.0.104"
