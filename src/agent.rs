@@ -431,7 +431,8 @@ impl Agent {
             None => self.sent(),
         };
         let window = window(error);
-        self.compact_at = self.compact_at.min(window.unwrap_or(estimate) * 9 / 10);
+        // Compaction waits for compact_at, and one request can add two full runs and a reply: keep a fifth free.
+        self.compact_at = self.compact_at.min(window.unwrap_or(estimate) * 4 / 5);
         self.compact_to(self.compact_at as usize / 5, true)?;
         self.compact_at = self.compact_at.max(self.sent());
         let extra = json!({"seen": seen, "estimate": estimate, "window": window, "compact_at": self.compact_at});
