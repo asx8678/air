@@ -130,4 +130,4 @@ Diffs vary a lot: pairwise normalized edit distance is 0.4–0.5 on fix, feature
   - 8 runs ran into the 200-request limit.
 - **Where it broke:** easy tasks got slightly cheaper (fix 3.0 turns, feature 4.0, qa 4.2). Hard ones looped: c-python 135 turns at 20% pass, ops 84 turns at 60%, c-compact-at 63 turns at 60%. Wide dropped one row in 3 of 5 runs.
 - **Decision:** rejected. Reasoning is what carries success on multi-step work.
-- The 200-request guard only binds in this broken configuration, never with thinking on (max 14 requests per turn in 395 runs), so it stays.
+- The 200-request guard only binds in this broken configuration, never with thinking on (max 20 requests per turn in 461 runs, no limit events), so it stays.
