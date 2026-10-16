@@ -104,3 +104,30 @@ Diffs vary a lot: pairwise normalized edit distance is 0.4–0.5 on fix, feature
   - The review runs without a nudge were also +0.5 turns over main. Gateway upstream doesn't explain it (both upstreams show it), and all 20 runs fell in one 2-minute window, so I read it as noise. Unproven.
   - Entropy on review: distinct outcomes fell 9 → 2 and diff distance 0.47 → 0.00.
 - **Decision:** kept. Pass rose with a CI wholly above 0, and task success outranks turns.
+
+## E5 · `reasoning_effort: "high"`: REJECTED
+
+- **Hypothesis:** more effort lowers variance and turns on the hard (real-commit) tasks.
+- **Change:** `exp/effort-high` (e9e830b, an experiment-only default in `settings()`; the real knob would be a config.toml profile key).
+- **Result (75 vs main's 125):**
+
+  | | main | effort-high | Δ (95% CI) |
+  |---|---|---|---|
+  | pass | 98% | 100% | +3.2pp [+0.8, +6.4] (all from review's stray-file misses, which E4 fixes on its own) |
+  | turns | — | 5.76 | **+0.7 [+0.4, +1.0]** |
+  | uncached input | — | — | **+1.3k [+0.7, +2.0]** |
+  | output | — | — | **+0.4k [+0.2, +0.7]** |
+  | reasoning share of output | 50% | 57% | |
+
+  Turns sd on the real-commit tasks fell (c-python 2.3 → 0.5, c-compact-at 3.4 → 1.8), but c-compact-at needed more turns (8.6 → 11.4).
+- **Decision:** rejected. It costs more per task, and the success gain belongs to E4. The gateway default (thinking on, no effort field) stays.
+
+## E6 · Thinking disabled (`thinking: {type: disabled}`): REJECTED
+
+- **Result:**
+  - pass 61/75 (81%), Δ **−15.5pp [−22.9, −8.3]**;
+  - turns **+20.3 [+11.6, +29.5]**;
+  - 8 runs ran into the 200-request limit.
+- **Where it broke:** easy tasks got slightly cheaper (fix 3.0 turns, feature 4.0, qa 4.2). Hard ones looped: c-python 135 turns at 20% pass, ops 84 turns at 60%, c-compact-at 63 turns at 60%. Wide dropped one row in 3 of 5 runs.
+- **Decision:** rejected. Reasoning is what carries success on multi-step work.
+- The 200-request guard only binds in this broken configuration, never with thinking on (max 14 requests per turn in 395 runs), so it stays.
