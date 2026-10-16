@@ -231,3 +231,24 @@ Recomputed against all of main's runs:
 - **Otherwise reject.**
 - **How to read a result under this rule (also written before running):** at N=10 per task the Δturns CI is about ±0.3 wide, so "upper bound below +0.3" works out to "point estimate ≤ ~0". A reject therefore means *a +0.3-turn cost could not be ruled out*, not that the removal was shown to cost turns.
 - `main-h2h` (6e5278f, N=10) was started ~10 minutes after the other three and overlaps most of their window. It is the "before" column of the final table.
+
+### E10 results (N=10 per task, all four interleaved 13:00–13:55)
+
+- **Noise floor:** final-h2h's runs 1–5 vs 6–10 give per-task turns sd 1.06 vs 1.30, so the floor is 0.24 and twice it is 0.48.
+
+| vs final-h2h | Δturns (95% CI) | Δuncached | Δout | Δpass | per-task turns sd | decision |
+|---|---|---|---|---|---|---|
+| rituals2-b (E7) | **+0.3 [−0.0, +0.6]** | −0.4k [−1.1, +0.4] | −0.1k [−0.4, +0.2] | +0.0pp | 1.22 → 1.51 (+0.29, within 0.48) | **REJECT**: the upper bound is above +0.3, so a +0.3-turn cost can't be ruled out |
+| noexample-b (E8) | **+0.8 [+0.5, +1.1]** | +0.2k [−0.6, +0.9] | +0.3k [−0.1, +0.6] | −2.0pp [−4.0, 0.0] | 1.22 → 1.49 | **REJECT**: the example costs turns when removed (2 qa misses, one wide run at 31/37 rows) |
+
+Final before/after, the primary comparison:
+
+| vs main-h2h | Δturns | Δuncached | Δout | Δpass | per-task turns sd |
+|---|---|---|---|---|---|
+| final-h2h (E3 + E4 + E9) | −0.1 [−0.4, +0.2] | +0.5k [−0.2, +1.2] | +0.1k [−0.2, +0.4] | **+2.0pp [0.0, +4.0]**: final 150/150, main 147/150 (2 review stray-file misses, 1 qa) | 1.26 → 1.22 |
+
+- Tool errors per run went 0.17 → 0.10, and runs rejected before acting 10 → 3.
+- The stray gate fired 3 times, all on review.
+- **Housekeeping:**
+  - The 32 rows of the broken OpenCode attempts (`opencode`, `opencode-seq`, `opencode-fg`; startup failures) were removed from results.jsonl.
+  - The 4 run dirs without a row are the 3 smoke tests (rows dropped on purpose) and one debugging run whose row went to a scratch file. No row was lost.
