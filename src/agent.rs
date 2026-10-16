@@ -281,9 +281,6 @@ impl Agent {
 
     async fn turn(&mut self, task: &str) -> Result<bool> {
         (self.pending, self.repeat, self.restarts, self.broken, self.passed) = (None, (0, 0), 0, None, None);
-        if self.session.last_prompt_tokens() >= self.compact_at / 2 {
-            self.compact_to(self.compact_at as usize / 10, false)?;
-        }
         self.session.flush()?;
         let clock = Instant::now();
         let why = "air's change detection (a private git index, not your staging area) could not snapshot the tree";
