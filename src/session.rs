@@ -1,4 +1,4 @@
-//! A session is one JSONL file in ~/.low/sessions (sessions from before the rename from air stay in ~/.air/sessions), named <unix secs>-<pid>. Line 0 is the header: settings, cwd,
+//! A session is one JSONL file in ~/.low/sessions, named <unix secs>-<pid>. Line 0 is the header: settings, cwd,
 //! build, git and sandbox. Each later line is one of
 //! - a message {role, content, tool_calls?, reasoning_content?, meta}: an assistant's meta holds the request's
 //!   usage, timing, request and response; a tool's meta holds the run's actions, commands, errors and ms
@@ -70,14 +70,14 @@ impl Session {
     }
 
     pub fn resume(home: &Path, root: &Path, context: Map<String, Value>) -> Result<Self> {
-        // Sessions from before the rename from air stay in ~/.air/sessions; the newest of both is resumed.
-        let mut paths: Vec<PathBuf> = [".low/sessions", ".air/sessions"]
-            .iter()
-            .flat_map(|dir| fs::read_dir(home.join(dir)).into_iter().flatten().flatten())
+        let mut paths: Vec<PathBuf> = fs::read_dir(home.join(".low/sessions"))
+            .into_iter()
+            .flatten()
+            .flatten()
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
             .collect();
-        paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+        paths.sort();
         for path in paths.into_iter().rev() {
             let Ok(Some(Ok(first))) = File::open(&path).map(|f| BufReader::new(f).lines().next()) else { continue };
             if serde_json::from_str::<Value>(&first).is_ok_and(|header| header["cwd"] == json!(root)) {

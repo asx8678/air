@@ -18,7 +18,7 @@ build.rs 7). Every candidate removal was grep-verified before being listed.
   `max_tokens` is sent. SSE + `[DONE]` parsing is current.
 - `x-opencode-session` verified mandatory by live probe (400 MissingSessionID without it), sent
   only to opencode.ai hosts; other providers get a plain request.
-- Verified against opencode's own client and docs (the gateway air actually calls) plus this
+- Verified against opencode's own client and docs (the gateway low actually calls) plus this
   session's live 200/400 probes; online docs were unreachable (no browser session).
 
 ## Findings, ranked

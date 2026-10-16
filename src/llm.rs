@@ -190,7 +190,6 @@ impl Llm {
             key: key
                 .map(String::from)
                 .or_else(|| std::env::var("LOW_API_KEY").ok())
-                .or_else(|| std::env::var("AIR_API_KEY").ok())
                 .or_else(|| std::fs::read_to_string(key_file()).ok())
                 .map(|k| k.trim().to_string())
                 .filter(|k| !k.is_empty()),

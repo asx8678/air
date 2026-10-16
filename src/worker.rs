@@ -13,7 +13,7 @@ const HERMETIC: &str = "TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 NO_COLOR=1 CLICOLOR=0
                         PAGER=cat GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 PYTHONHASHSEED=0 PYTHONUTF8=1 PYTHONDONTWRITEBYTECODE=1";
 const CACHES: &str =
     "XDG_CACHE_HOME GOCACHE UV_CACHE_DIR PIP_CACHE_DIR PRE_COMMIT_HOME npm_config_cache PYTHONPYCACHEPREFIX";
-const SECRETS: &str = ".low, .config/low, .air, .config/air, .ssh, .gnupg, .aws, .azure, .kube, .docker, .netrc, .pi, .config/gh, \
+const SECRETS: &str = ".low, .config/low, .ssh, .gnupg, .aws, .azure, .kube, .docker, .netrc, .pi, .config/gh, \
                        .config/gcloud, .config/op, .password-store, .git-credentials, .config/git/credentials, \
                        .npmrc, .pypirc, .cargo/credentials, .cargo/credentials.toml, .vault-token, .claude, \
                        .claude.json, .codex, .zsh_history, .zsh_sessions, .bash_history, .python_history, \

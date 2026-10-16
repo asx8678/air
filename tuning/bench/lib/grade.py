@@ -148,11 +148,11 @@ def recovery(repo):
          [src for (src, _), ok in zip(HIDDEN_CALC, hidden) if not ok])
 
 
-# ---------------------------------------------------------------- airqa
-AIRQA = {
+# ---------------------------------------------------------------- lowqa
+QA_KEY = {
     1: (r"100[,_ ]?000|100\s?k\b", [("src/agent.rs", r"^const COMPACT_AT")]),
     2: (r"32[,_ ]?000", [("src/worker.py", r"^HALF = "), ("src/worker.py", r"if len\(text\) > 2 \* HALF"), ("src/prompt.md", r"32,000")]),
-    3: (r"AIR_CHECK", [("src/worker.py", r'AIR_CHECK'), ("src/worker.rs", r'"AIR_CHECK"')]),
+    3: (r"LOW_CHECK", [("src/worker.py", r'LOW_CHECK'), ("src/worker.rs", r'"LOW_CHECK"')]),
     4: (r"(?<![\d,._])200(?![\d,._]*\d)", [("src/agent.rs", r"^const MAX_REQUESTS")]),
 }
 
@@ -169,13 +169,13 @@ def sections(answer):
     return {n: answer[starts[n - 1]:starts[n]] for n in range(1, 5)}
 
 
-def airqa(repo, answer_path):
+def lowqa(repo, answer_path):
     answer = answer_of(answer_path)
     parts, cites = sections(answer), {}
-    correct = {n: bool(re.search(pat, parts[n], re.I)) for n, (pat, _) in AIRQA.items()}
+    correct = {n: bool(re.search(pat, parts[n], re.I)) for n, (pat, _) in QA_KEY.items()}
     if correct[2]:
         correct[2] = bool(re.search(r"middle|first (and|\+) last|head and tail|keeps? the (first|start)|16[,_ ]?000", parts[2], re.I))
-    for n, (_, anchors) in AIRQA.items():
+    for n, (_, anchors) in QA_KEY.items():
         found = re.findall(r"([\w./-]+\.(?:rs|py|md)):(\d+)(?:[-–](\d+))?", parts[n])
         hit = False
         for rel, pat in anchors:

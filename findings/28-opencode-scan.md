@@ -1,19 +1,19 @@
 OpenCode v2.0.29 · model opencode/deepseek-v4.1-flash-free · plan agent (read-only) · 2026-10-15 · reviewed 9f9da1c plus the then-uncommitted changes now in fee5e65. Checked against the code in 29-triage.md.
 
-# Code review: air
+# Code review: low
 
 ## 1. Overview
 
-`air` is a minimal "code-mode" coding agent. The Rust binary drives a chat model and gives it exactly one tool, `run(code)`, which executes Python in a persistent worker subprocess.
+`low` is a minimal "code-mode" coding agent. The Rust binary drives a chat model and gives it exactly one tool, `run(code)`, which executes Python in a persistent worker subprocess.
 
-- **`main.rs`** — CLI + REPL (`/compact`, `/cost`, `/think`, `/models`, `/providers`); resolves config from `~/.config/air/config.toml` and the repo's `air.toml`; requires a git repo.
+- **`main.rs`** — CLI + REPL (`/compact`, `/cost`, `/think`, `/models`, `/providers`); resolves config from `~/.config/low/config.toml` and the repo's `low.toml`; requires a git repo.
 - **`agent.rs`** — the agent loop: streams a model reply, dispatches `run(code)` calls to the worker, detects tree changes with a private git index, runs the project `check` in a sandbox, nudges on stalls/empty replies, compacts on context overflow, and writes a per-turn report + verdict.
 - **`llm.rs`** — OpenAI-compatible streaming client (SSE), timeouts/retries, reasoning-field replay, overflow/refusal classification.
 - **`session.rs` / `compact.rs`** — append-only JSONL session log and the compaction/summary engine (`recall(n)` reads the log back).
 - **`worker.rs` / `worker.py`** — sandbox construction (macOS `sandbox-exec`, Linux `bwrap`) and the Python worker that implements `sh/show/edit/write/accept/check/plan/done/carry/recall`. `edit`/`write` are the only write paths.
 - **`providers.rs`, `render.rs`, `ui.rs`, `stats.rs`** — provider config/menu, markdown rendering, terminal UI, and `--stats`.
 
-The security model: the model's code runs in a sandbox; writes are confined to the repo + temp dirs; credentials/private data under `$HOME` are read-blocked; only an allowlist of env vars is passed; `git` runs with hooks/attributes/filters neutralized; `air` never commits (git is the undo).
+The security model: the model's code runs in a sandbox; writes are confined to the repo + temp dirs; credentials/private data under `$HOME` are read-blocked; only an allowlist of env vars is passed; `git` runs with hooks/attributes/filters neutralized; `low` never commits (git is the undo).
 
 **Assumptions:** primary platform is macOS (this is the dev host); line numbers are from the current working tree; the changes under `src/agent.rs`, `src/llm.rs`, `src/session.rs` are reviewed as-is.
 
@@ -21,21 +21,21 @@ The security model: the model's code runs in a sandbox; writes are confined to t
 
 ## 2. Findings (most severe first)
 
-### F1 — A repository's `air.toml` supplies `check`/`fmt`, which are executed as shell commands — **medium** (confidence: high)
+### F1 — A repository's `low.toml` supplies `check`/`fmt`, which are executed as shell commands — **medium** (confidence: high)
 
 `src/main.rs:91` `check: repo.check.or(user.check)…`, `src/main.rs:92` `fmt: repo.fmt.or(user.fmt)`. `check` is run as `/bin/sh -c <check>` (`src/agent.rs:571`) and `fmt` as `<fmt> <path>` via `shell=True` in the worker (`src/worker.py:133`).
 
 **What's wrong:** both values come from the *working tree of the repository being edited*, not only the user's config. They are shell strings.
 
-**Scenario:** clone an untrusted repo whose `air.toml` has `check = "…arbitrary shell…"` or `fmt = "…"`, then `air "fix the build"`. As soon as the model edits a file, the repo's command runs on the host. Mitigations exist (`check`/`fmt` run inside the sandbox; no network; secret reads blocked; writes limited to repo/tmp), but it is still arbitrary code execution as the user, able to read all non-secret files and persist changes inside the repo. The model can also write `air.toml` mid-session; the report's "check inputs changed" warning only *labels* the turn, it doesn't prevent the next run from executing it.
+**Scenario:** clone an untrusted repo whose `low.toml` has `check = "…arbitrary shell…"` or `fmt = "…"`, then `low "fix the build"`. As soon as the model edits a file, the repo's command runs on the host. Mitigations exist (`check`/`fmt` run inside the sandbox; no network; secret reads blocked; writes limited to repo/tmp), but it is still arbitrary code execution as the user, able to read all non-secret files and persist changes inside the repo. The model can also write `low.toml` mid-session; the report's "check inputs changed" warning only *labels* the turn, it doesn't prevent the next run from executing it.
 
-**Fix:** treat repo-provided `check`/`fmt` as untrusted — e.g. only honour them from the user config, or require an explicit one-time confirmation (store a hash in `~/.config/air`), or run them through the same sandbox but with an extra warning before first use.
+**Fix:** treat repo-provided `check`/`fmt` as untrusted — e.g. only honour them from the user config, or require an explicit one-time confirmation (store a hash in `~/.config/low`), or run them through the same sandbox but with an extra warning before first use.
 
 ### F2 — Provider error bodies are never redacted, so a gateway that echoes the request can leak the API key to the terminal and the session log — **medium** (confidence: high in the code path, medium that a key appears)
 
 `src/llm.rs:284` (`provider error: {clip(error)}`), `src/llm.rs:491,494` (`bail!("{status}: {text}")` where `text = head(response)`), and `src/agent.rs:225-226` which stores the error text verbatim as an `event: error` entry; `src/main.rs:58` prints it. Only *tool* output (`src/agent.rs:938`) and *check* output (`src/agent.rs:574`) go through `redact()`.
 
-**Scenario:** a misconfigured proxy/verbose gateway returns a 4xx body that includes the request (headers or the `Authorization` value). The key is printed to the terminal and written to `~/.air/sessions/*.jsonl`, where `recall()` will hand it back later.
+**Scenario:** a misconfigured proxy/verbose gateway returns a 4xx body that includes the request (headers or the `Authorization` value). The key is printed to the terminal and written to `~/.low/sessions/*.jsonl`, where `recall()` will hand it back later.
 
 **Fix:** run the provider error/detail text through `redact()` (and `clip`) before printing/storing, the same way tool and check output are handled.
 
@@ -81,7 +81,7 @@ Reads are denylisted (`SECRETS`, `src/worker.rs:16-22`), not allow-listed to the
 
 ### F8 — API keys are stored in plaintext in `providers.toml` — **low** (confidence: high)
 
-`src/providers.rs:35-47` writes `providers.toml` mode `0600` (good), but the `api_key` is serialized in cleartext. This is a common, accepted trade-off, but worth an explicit note next to F3; consider the OS keychain or `~/.config/air/api_key` (already supported) as the preferred path.
+`src/providers.rs:35-47` writes `providers.toml` mode `0600` (good), but the `api_key` is serialized in cleartext. This is a common, accepted trade-off, but worth an explicit note next to F3; consider the OS keychain or `~/.config/low/api_key` (already supported) as the preferred path.
 
 ### F9 — `opencode()` identity detection misses common URL shapes — **low** (confidence: high)
 
@@ -97,15 +97,15 @@ Reads are denylisted (`SECRETS`, `src/worker.rs:16-22`), not allow-listed to the
 
 ### F11 — Session logs grow without bound — **low** (confidence: high)
 
-`src/session.rs:31-35` creates one file per session under `~/.air/sessions`; nothing prunes old sessions. Over time this is an unbounded disk leak (relevant given the worker/agent writes relatively large entries).
+`src/session.rs:31-35` creates one file per session under `~/.low/sessions`; nothing prunes old sessions. Over time this is an unbounded disk leak (relevant given the worker/agent writes relatively large entries).
 
 **Fix:** add a retention/cleanup step (e.g. keep the N most recent per repo, or cap total size), or expose a command to prune.
 
 ### F12 — Linux secret masking then re-binding the session log may fail (order dependency) — **low** (confidence: low)
 
-`src/worker.rs:183-193`: directories in `SECRETS` (including `~/.air`) are replaced by a `--tmpfs`, and then `--ro-bind <log> <log>` re-exposes the current session log (so `recall()` works). If `bwrap` does not create the intermediate `~/.air/sessions/` directory inside that fresh tmpfs, the bind (and thus worker start) fails. I could not test this on the Linux path from a macOS host, so this is a flag to verify rather than a confirmed bug.
+`src/worker.rs:183-193`: directories in `SECRETS` (including `~/.low`) are replaced by a `--tmpfs`, and then `--ro-bind <log> <log>` re-exposes the current session log (so `recall()` works). If `bwrap` does not create the intermediate `~/.low/sessions/` directory inside that fresh tmpfs, the bind (and thus worker start) fails. I could not test this on the Linux path from a macOS host, so this is a flag to verify rather than a confirmed bug.
 
-**Fix:** bind the log *before* tmpfs-ing `~/.air`, or use `--dir` to materialize `~/.air/sessions` inside the tmpfs first, or mask `~/.air` with an allow for the log directory.
+**Fix:** bind the log *before* tmpfs-ing `~/.low`, or use `--dir` to materialize `~/.low/sessions` inside the tmpfs first, or mask `~/.low` with an allow for the log directory.
 
 ### F13 — The periodic UI ticker is not synchronized with rendered output — **low** (confidence: medium)
 

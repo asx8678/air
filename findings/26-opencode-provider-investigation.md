@@ -1,15 +1,15 @@
-# OpenCode provider investigation: the zen free tier and what air can use
+# OpenCode provider investigation: the zen free tier and what low can use
 
-2026-10-15 · investigation notes from wiring air to OpenCode inference · head `fee5e65`
+2026-10-15 · investigation notes from wiring low to OpenCode inference · head `fee5e65`
 
 ## Goal
 
-Use `deepseek-v4.1-flash-free` (zen free tier) from air via the user's OpenCode account.
+Use `deepseek-v4.1-flash-free` (zen free tier) from low via the user's OpenCode account.
 
-## What works from air (wired in and verified)
+## What works from low (wired in and verified)
 
 - Endpoint: `https://opencode.ai/inference/go/v1` (the Go plan mount; docs: go.mdx "Endpoints").
-- Free, unlimited on Go, verified end-to-end through air: `cat-jam-free`,
+- Free, unlimited on Go, verified end-to-end through low: `cat-jam-free`,
   `longcat-2.5-preview-free`, `step-5-preview-free`.
 - Paid, verified: `deepseek-v4.1-flash` ($0.15/M in off-peak, $0.30 peak; from the Go plan's
   $80/month deepseek allowance).
@@ -17,10 +17,10 @@ Use `deepseek-v4.1-flash-free` (zen free tier) from air via the user's OpenCode 
   free-tier models and the account has no billing (paid zen models answer "disabled").
 - `x-opencode-session` is mandatory for every chat completion on the Go mount — for paid and
   free alike: without it the gateway answers `400 MissingSessionID`. `GET /models` does not
-  need it. Go docs ask clients for their own User-Agent (air sends `air/<version>`) plus one
-  stable session id per conversation (air sends the session file's name).
+  need it. Go docs ask clients for their own User-Agent (low sends `low/<version>`) plus one
+  stable session id per conversation (low sends the session file's name).
 
-## The zen free tier gate — why deepseek-v4.1-flash-free cannot come from air
+## The zen free tier gate — why deepseek-v4.1-flash-free cannot come from low
 
 The zen mount (`/inference/openai/v1`, `/zen/v1`, `/inference/v1`) answers:
 `403 FreeTierError: "OpenCode's free tier can only be used from within OpenCode."`
@@ -49,13 +49,13 @@ Conclusion: passing check 4 means embedding a version-pinned copy of opencode's 
 schemas to impersonate the client — deliberately circumventing a stated access control
 ("only from within OpenCode"), brittle across opencode updates, and their docs state traffic
 is monitored for abuse. Declined. The sanctioned path for third-party agents is the Go plan,
-which air now uses.
+which low now uses.
 
-## What air implements (src/llm.rs, src/session.rs)
+## What low implements (src/llm.rs, src/session.rs)
 
-- `User-Agent: air/<version>` on every request — air's identity.
+- `User-Agent: low/<version>` on every request — low's identity.
 - `x-opencode-session` with one stable id per conversation, sent only to opencode.ai hosts
   (session.rs writes the id into the session header; llm.rs gates it on the host).
-- No credential reuse: the opencode CLI's login is not read by air.
+- No credential reuse: the opencode CLI's login is not read by low.
 
 Status: settled — Go endpoint with the three free models; zen free-tier model not wired.

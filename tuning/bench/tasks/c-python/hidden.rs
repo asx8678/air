@@ -5,7 +5,7 @@ mod hidden_tests {
     #[test]
     fn hidden_picks_the_newest_runnable_python() {
         use std::os::unix::fs::PermissionsExt;
-        let base = std::env::temp_dir().join(format!("air-hidden-python-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("low-hidden-python-{}", std::process::id()));
         let (first, second) = (base.join("a"), base.join("b"));
         for (dir, name, mode) in [
             (&first, "python3.9", 0o755),

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""air's benchmark: run each task N times per variant, grade it, and append one row per run to results.jsonl.
+"""low's benchmark: run each task N times per variant, grade it, and append one row per run to results.jsonl.
 
   bench.py run --variant REF [REF ...] --model MODEL --n N [--tasks a,b] [--jobs 4] [--label NAME ...]
   bench.py report --baseline LABEL --variant LABEL [--model MODEL] [--results FILE]
 
-A variant is a git ref of air (built once per commit), or `opencode` for OpenCode itself on the same model. Several
+A variant is a git ref of low (built once per commit), or `opencode` for OpenCode itself on the same model. Several
 variants in one run are interleaved, so they share the same time window: compare variants only within a window.
-Runs live in scratch repos under $AIR_BENCH_RUNS (default $TMPDIR/air-bench/runs); air runs in its own sandbox.
+Runs live in scratch repos under $LOW_BENCH_RUNS (default $TMPDIR/low-bench/runs); low runs in its own sandbox.
 """
 import argparse
 import concurrent.futures
@@ -26,10 +26,10 @@ import threading
 import time
 
 BENCH = os.path.dirname(os.path.abspath(__file__))
-AIR = os.path.dirname(os.path.dirname(BENCH))
+REPO = os.path.dirname(os.path.dirname(BENCH))
 TMP = os.environ.get("TMPDIR", "/tmp")
-RUNS = os.environ.get("AIR_BENCH_RUNS", os.path.join(TMP, "air-bench", "runs"))
-CACHE = os.environ.get("AIR_BENCH_CACHE", os.path.join(TMP, "air-bench", "cache"))
+RUNS = os.environ.get("LOW_BENCH_RUNS", os.path.join(TMP, "low-bench", "runs"))
+CACHE = os.environ.get("LOW_BENCH_CACHE", os.path.join(TMP, "low-bench", "cache"))
 RESULTS = os.path.join(BENCH, "results.jsonl")
 # Nominal $/M tokens (uncached input, cached input, output). OpenCode Go is a subscription and returns no cost, so this
 # is DeepSeek's public list price, used as a cost index rather than a bill.
@@ -54,12 +54,12 @@ def tasks():
 
 # ---------------------------------------------------------------- build and prepare
 def build(variant):
-    """The air binary for a git ref, built once per commit in a worktree under the cache."""
+    """The low binary for a git ref, built once per commit in a worktree under the cache."""
     if variant == "opencode":
         return None, "opencode"
-    sha = sh(["git", "rev-parse", "--short=10", variant + "^{commit}"], cwd=AIR).strip()
-    # The binary is named after the crate at that commit: air before the rename, low after.
-    name = re.search(r'^name = "([\w-]+)"', sh(["git", "show", f"{sha}:Cargo.toml"], cwd=AIR), re.M).group(1)
+    sha = sh(["git", "rev-parse", "--short=10", variant + "^{commit}"], cwd=REPO).strip()
+    # The binary is named after the crate at that commit; commits from before the rename use the old name.
+    name = re.search(r'^name = "([\w-]+)"', sh(["git", "show", f"{sha}:Cargo.toml"], cwd=REPO), re.M).group(1)
     out = os.path.join(CACHE, "bin", sha, name)
     os.makedirs(CACHE, exist_ok=True)
     with open(os.path.join(CACHE, "build.lock"), "w") as lock:
@@ -75,10 +75,10 @@ def build(variant):
 def _build(sha, out):
     wt = os.path.join(CACHE, "wt")
     if not os.path.isdir(wt):
-        sh(["git", "worktree", "add", "-q", "--detach", wt, sha], cwd=AIR)
+        sh(["git", "worktree", "add", "-q", "--detach", wt, sha], cwd=REPO)
     else:
         sh(["git", "checkout", "-q", "--detach", sha], cwd=wt)
-    print(f"building air {sha} …", flush=True)
+    print(f"building low {sha} …", flush=True)
     sh(["cargo", "build", "--release", "-q"], cwd=wt, timeout=1800)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     shutil.copy2(os.path.join(wt, "target", "release", os.path.basename(out)), out)
@@ -91,7 +91,7 @@ def prepare(names):
         m = re.search(r"rev-parse --short (\S+)\)", setup)
         if not m:
             continue
-        parent = sh(["git", "rev-parse", "--short", m.group(1)], cwd=AIR).strip()
+        parent = sh(["git", "rev-parse", "--short", m.group(1)], cwd=REPO).strip()
         target = os.path.join(CACHE, parent, "target")
         if os.path.isdir(target):
             continue
@@ -99,7 +99,7 @@ def prepare(names):
         src = os.path.join(CACHE, parent, "src")
         shutil.rmtree(src, ignore_errors=True)
         os.makedirs(src)
-        subprocess.run(f"git -C {AIR} archive {parent} | tar -x -C {src}", shell=True, check=True)
+        subprocess.run(f"git -C {REPO} archive {parent} | tar -x -C {src}", shell=True, check=True)
         sh("cargo build -q && cargo clippy -q --all-targets && cargo test -q --no-run", cwd=src, timeout=3600)
         os.rename(os.path.join(src, "target"), target)
         shutil.rmtree(src)
@@ -121,11 +121,11 @@ def opencode_home():
 
 def opencode_cmd(repo, model, prompt):
     """OpenCode under a sandbox-exec profile of our own: network on (it must reach the gateway), writes only to the run
-    repo, temp and OpenCode's own dirs, and the same home secrets as air's sandbox hidden. --standalone keeps its tool
+    repo, temp and OpenCode's own dirs, and the same home secrets as low's sandbox hidden. --standalone keeps its tool
     server a child of this process (the shared background service runs elsewhere, unsandboxed, in its own cwd)."""
     real, home = opencode_home()
     writable = [os.path.realpath(repo), os.path.realpath(TMP), "/private/tmp", "/dev", home, os.path.join(real, ".local/share/opencode")]
-    secrets = re.search(r'const SECRETS: &str = "(.*?)";', open(os.path.join(AIR, "src", "worker.rs")).read(), re.S).group(1)
+    secrets = re.search(r'const SECRETS: &str = "(.*?)";', open(os.path.join(REPO, "src", "worker.rs")).read(), re.S).group(1)
     secrets = [os.path.join(real, s.strip()) for s in re.sub(r"\\\n\s*", "", secrets).split(",") if s.strip()]
     profile = ("(version 1)(allow default)(deny file-write*)(allow file-write*" + "".join(f' (subpath "{d}")' for d in writable) + ")"
                "(deny file-read-data" + "".join(f' (subpath "{s}")' for s in secrets) + ")")
@@ -136,7 +136,7 @@ def opencode_cmd(repo, model, prompt):
     return cmd, dict(os.environ, HOME=home, XDG_CONFIG_HOME=os.path.join(home, ".config"), PWD=os.path.realpath(repo))
 
 
-def air_metrics(session):
+def low_metrics(session):
     es = [json.loads(l) for l in open(session) if l.startswith("{")]
     m = {"requests": 0, "runs": 0, "tool_errors": 0, "rejected": 0, "edit_failures": 0, "prompt": 0, "cached": 0, "out": 0,
          "reasoning": 0, "model_ms": 0, "tools": {}, "events": {}, "cache_rates": []}
@@ -148,7 +148,7 @@ def air_metrics(session):
         meta = e.get("meta") or {}
         if e.get("event"):
             m["events"][e["event"]] = m["events"].get(e["event"], 0) + 1
-            if e["event"] == "interrupted":  # a cut stream was a model request too, as air's own stats count it
+            if e["event"] == "interrupted":  # a cut stream was a model request too, as low's own stats count it
                 m["requests"] += 1
         if e.get("role") == "assistant" and meta.get("usage"):
             u = meta["usage"]
@@ -268,7 +268,7 @@ def run_one(job):
         m = opencode_metrics(log)
     else:
         found = re.search(r"\[session (\S+\.jsonl)\]", open(log, errors="replace").read())
-        m = air_metrics(found.group(1)) if found else opencode_metrics(os.devnull)
+        m = low_metrics(found.group(1)) if found else opencode_metrics(os.devnull)
         m["session"] = found.group(1) if found else None
     answer = os.path.join(rundir, "answer.md")
     with open(answer, "w") as f:

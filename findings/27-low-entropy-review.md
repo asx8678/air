@@ -17,7 +17,7 @@
 [core]      retries: stream interruption, 500/429 backoff, empty-reply handling, context-overflow
             auto-compact + retry
 [core]      multi-provider: providers.toml (+menus), config.toml default model + profiles
-[core]      opencode.ai identification: User-Agent air/<version>, x-opencode-session
+[core]      opencode.ai identification: User-Agent low/<version>, x-opencode-session
 [core]      --yolo
 [rarely]    --stats cross-session comparison (163 lines)
 [rarely]    markdown table rendering (~60 lines)
@@ -26,7 +26,7 @@
 [half]      config.toml base_url → synthesized "config" provider (second mechanism)
 [half]      FIELDS remap: field/marked cells for providers that name the key "reasoning"
 [half]      profile keys nothing sets today: think_limit, turn_tokens, guidance
-[dead]      header["air"] build stamp — written (session.rs:40), never read anywhere
+[dead]      header["low"] build stamp — written (session.rs:40), never read anywhere
 [dead-ish]  Overthought/reasoning cap — reachable only via think_limit, which nothing sets
 ```
 
@@ -43,8 +43,8 @@ error types   anyhow + Interrupted,          anyhow + Interrupted(String),
               Lost
 CLI flags     5                              5 (same spec)
 config keys   config: model,base_url,check,  config: model,check,fmt
-              fmt,env,models[6 profile keys]; air.toml: check,fmt; providers: 3
-              air.toml: check,fmt; providers: base_url,api_key,models
+              fmt,env,models[6 profile keys]; low.toml: check,fmt; providers: 3
+              low.toml: check,fmt; providers: base_url,api_key,models
 deps          8 (+clap droppable)            7–8
 modules       agent 1064 · llm 615 · ui 533 · worker.py 386 · compact 277 ·
               worker.rs 255 · providers 230 · session 204 · main 200 ·
@@ -82,7 +82,7 @@ git snapshot/diff for report detail ~150 · --stats 163 · compaction quality di
        UI | ~180 — BEHAVIOR CHANGE (visible)
 [med]  src/render.rs:85-140 | markdown table renderer | plain text | ~60 — BEHAVIOR CHANGE
 [med]  src/stats.rs (163) | --stats flag, one user | drop or keep as-is | 163 — BEHAVIOR CHANGE
-[med]  src/session.rs:40 + build.rs | header["air"] stamp + AIR_BUILD git describe:
+[med]  src/session.rs:40 + build.rs | header["low"] stamp + LOW_BUILD git describe:
        written, never read | delete both | ~15
 [low]  src/main.rs:36-46,97 | Config.env: nothing sets it | remove | ~10 — BEHAVIOR CHANGE
 [low]  profile keys think_limit/turn_tokens/guidance: reachable only via config profiles
@@ -95,12 +95,12 @@ git snapshot/diff for report detail ~150 · --stats 163 · compaction quality di
 
 - pi (this harness): npm package ships dist only (20 MB compiled; no readable src) — core tools
   are shell + file ops with a sandbox profile; no embedded interpreter. The one architecture
-  that would shrink air most (~700 lines: worker.rs+worker.py+protocol) but changes the
-  product — code-mode IS air. Not recommended; noted for honesty.
+  that would shrink low most (~700 lines: worker.rs+worker.py+protocol) but changes the
+  product — code-mode IS low. Not recommended; noted for honesty.
 - OpenAI Codex CLI (github.com/openai/codex, codex-rs/core/src): client.rs alone is ~125 KB;
   compact_* totals hundreds of KB; agent_message_board 11 KB; code_mode_host.rs 5.8 KB.
   Ideas worth taking: apply_patch.rs (3.4 KB, one self-contained patch tool), single-file
-  client. air is already 10-50× smaller than codex in every comparable area.
+  client. low is already 10-50× smaller than codex in every comparable area.
 
 ## 5. Top 3 structural changes, in order
 

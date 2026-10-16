@@ -1,4 +1,4 @@
-   Compiling air v0.1.0 (/Users/adam2/projects/air)
+   Compiling low v0.1.0 (/Users/adam2/projects/air)
 warning: binding's name is too similar to existing binding
    --> src/agent.rs:285:46
     |
@@ -1145,6 +1145,6 @@ help: try
 190 ~         },
     |
 
-warning: `air` (bin "air" test) generated 90 warnings (44 duplicates) (run `cargo clippy --fix --bin "air" -p air --tests -- -W clippy::pedantic` to apply 9 suggestions)
-warning: `air` (bin "air") generated 90 warnings (46 duplicates) (run `cargo clippy --fix --bin "air" -p air -- -W clippy::pedantic` to apply 4 suggestions)
+warning: `low` (bin "low" test) generated 90 warnings (44 duplicates) (run `cargo clippy --fix --bin "low" -p low --tests -- -W clippy::pedantic` to apply 9 suggestions)
+warning: `low` (bin "low") generated 90 warnings (46 duplicates) (run `cargo clippy --fix --bin "low" -p low -- -W clippy::pedantic` to apply 4 suggestions)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.12s

@@ -27,10 +27,9 @@ pub fn example(model: &str) -> String {
     )
 }
 
-/// low's config directory, ~/.config/low; a setup made before the rename from air still loads from ~/.config/air.
+/// low's config directory.
 pub fn config_dir(home: &Path) -> PathBuf {
-    let (new, old) = (home.join(".config/low"), home.join(".config/air"));
-    if !new.exists() && old.exists() { old } else { new }
+    home.join(".config/low")
 }
 
 fn file(home: &Path) -> PathBuf {

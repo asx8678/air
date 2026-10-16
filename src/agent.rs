@@ -638,7 +638,7 @@ impl Agent {
                 .as_deref()
                 .unwrap_or_default()
                 .split(|c: char| c.is_whitespace() || "'\"();&|<>=`".contains(c));
-            path == "low.toml" || path == "air.toml" || words.map(|w| w.trim_start_matches("./")).any(|w| w == path)
+            path == "low.toml" || words.map(|w| w.trim_start_matches("./")).any(|w| w == path)
         };
         let inputs: Vec<String> = changes.lines().filter_map(path).filter(|p| named(p)).collect();
         let (check, verdict) = match (changed, checked, &self.config.check) {

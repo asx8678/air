@@ -4,7 +4,7 @@
 
 ## Map
 
-| Entry | `main.rs` — REPL default; `air [TASK]` one-shot; flags `-m/--model --resume --yolo --stats`;
+| Entry | `main.rs` — REPL default; `low [TASK]` one-shot; flags `-m/--model --resume --yolo --stats`;
   REPL commands `/compact /cost /think /models /providers` |
 |---|---|
 | `agent.rs` 1066 | turn loop, retries/nudges, compaction trigger, verify+check, git snapshot/diff,

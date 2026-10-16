@@ -1,15 +1,15 @@
-# air tuning report
+# low tuning report
 
-*After this round, air was renamed **low** (crate, command, `low.toml`, `~/.config/low`, `~/.low/sessions`); the old names still load. This report keeps the names in use at the time.*
+*This report was written before the project got its current name; it now uses low throughout.*
 
 Branch `tune-opus` from `main` (6e5278f), 2026-10-16. The details for every result are in [EXPERIMENTS.md](EXPERIMENTS.md), the harness as found is in [INVENTORY.md](INVENTORY.md), and the suite is [bench/](bench/README.md). Every number below comes from `bench.py report` and `mechanics.py` over `bench/results.jsonl` (1,675 runs).
 
-**Scope.** The brief asked to tune air for Opus 5.5, with Flash as a cheap first tier. By your instruction, everything was measured on `deepseek-v4.1-flash` (OpenCode Go) only. **Tier 2 was not run,** so every prompt-wording result below holds for Flash and is unvalidated on Opus.
+**Scope.** The brief asked to tune low for Opus 5.5, with Flash as a cheap first tier. By your instruction, everything was measured on `deepseek-v4.1-flash` (OpenCode Go) only. **Tier 2 was not run,** so every prompt-wording result below holds for Flash and is unvalidated on Opus.
 
 ## Summary
 
-- **air was already close to the floor for Flash.** At baseline it passed 74/75, averaging 3.4–9.6 turns per task, with ~99% cache efficiency (cached ÷ the previous request's prompt) and no mid-turn prefix breaks.
-- **OpenCode on the same model** passed 15/15 but took 1.5× the turns, 2.7× the uncached input and 4× the prompt tokens.
+- **low was already close to the floor for Flash.** At baseline it passed 74/75, averaging 3.4–9.6 turns per task, with ~99% cache efficiency (cached ÷ the previous request's prompt) and no mid-turn prefix breaks.
+- **OpenCode on the same model** passed 15/15 but took 1.3× the turns, 2.5× the tool calls, 2× the uncached input and 2.9× the prompt tokens (task-balanced, against the final build).
 - **Four changes were kept, one commit each:**
   - **E3** · an edit reloads the modules runs imported instead of deleting their names;
   - **E4** · a turn that changed files without edit()/write() is asked once to clean up;
@@ -57,8 +57,8 @@ Per-task table (generated; columns as in bench/README.md):
 
 | task | variant | n | pass | turns (sd) | uncached in | out | tok sd | cached | cost $ | wall s | calls | tool err | diff dist | outcomes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| airqa | main-h2h | 10 | 100% | 6.0 (1.6) | 9.6k | 1.9k | 4.6k | 77% | 0.0044 | 23 | 6.5 | 0.0 | 0.00 | 1 |
-| airqa | final-h2h | 10 | 100% | 6.1 (1.4) | 8.9k | 2.1k | 2.7k | 78% | 0.0043 | 27 | 6.6 | 0.1 | 0.00 | 1 |
+| lowqa | main-h2h | 10 | 100% | 6.0 (1.6) | 9.6k | 1.9k | 4.6k | 77% | 0.0044 | 23 | 6.5 | 0.0 | 0.00 | 1 |
+| lowqa | final-h2h | 10 | 100% | 6.1 (1.4) | 8.9k | 2.1k | 2.7k | 78% | 0.0043 | 27 | 6.6 | 0.1 | 0.00 | 1 |
 | c-compact-at | main-h2h | 10 | 100% | 9.8 (1.5) | 16.7k | 8.5k | 5.9k | 84% | 0.0108 | 77 | 10.0 | 0.1 | 0.34 | 10 |
 | c-compact-at | final-h2h | 10 | 100% | 9.2 (1.8) | 16.4k | 8.9k | 7.3k | 84% | 0.0108 | 78 | 9.7 | 0.0 | 0.32 | 10 |
 | c-overflow | main-h2h | 10 | 100% | 9.7 (2.8) | 14.7k | 6.8k | 4.8k | 85% | 0.0093 | 64 | 8.8 | 0.3 | 0.09 | 8 |
@@ -90,14 +90,15 @@ Per-task table (generated; columns as in bench/README.md):
 
 **Tier 2 (Opus 5.5): not run, by your instruction.**
 
-External baseline, OpenCode 2.0.29 with the same model (N=1 per task), against air main (all runs):
+External baseline, OpenCode 2.0.29 with the same model (N=1 per task), against low, task-balanced (every task weighs the same):
 
 | | pass | turns | tool calls | uncached in | total prompt | out | wall |
 |---|---|---|---|---|---|---|---|
 | OpenCode | 15/15 | 7.5 | 12.5 | 13.4k | 114k | 3.3k | 41 s |
-| air main | 121/125 | 5.1 | 4.3 | 4.9k | 28k | 2.8k | 25 s |
+| low main (all runs) | 99% | 5.75 | 5.19 | 6.3k | 38.2k | 3.4k | 30 s |
+| low final-h2h | 100% | 5.74 | 5.05 | 6.8k | 39.6k | 3.5k | 35 s |
 
-OpenCode's first request is 5.5k tokens against air's 1.7k, and it reads files one call each: 20 calls on wide.
+OpenCode's first request is 5.5k tokens against low's 1.7k, and it reads files one call each: 20 calls on wide.
 
 ## Accepted changes
 
@@ -136,7 +137,7 @@ Levers from the brief, checked and not built:
 1. **Model time is 93% of wall time.** Turns matter more than tool speed.
 2. **Diff entropy belongs to the model.** At N=10, code tasks give 2–10 distinct diffs per 10 runs (most give 10), at a pairwise edit distance of 0.01–0.63. The harness's own decisions are deterministic. A formatter narrows Rust diffs; the Python templates configure none.
 3. **Noise at N=5.** The same build moves ±0.4–1.4 turns per task between batches. Effects under ~0.5 turns per task need N=10 and interleaved runs. The gateway routes sessions to two upstreams (`deepseek/…` and `deepseek-ai/…`); no turns difference between them was measured once comparisons were task-balanced, but mechanics.py still reports the split.
-4. **The bench is at the ceiling on pass rate.** At N=10, main misses only review (stray files) and qa. Showing a success gain needs harder tasks; more real air commits are the natural source.
+4. **The bench is at the ceiling on pass rate.** At N=10, main misses only review (stray files) and qa. Showing a success gain needs harder tasks; more real low commits are the natural source.
 5. **Real-commit tasks are the costly ones:** 7–12 turns and 48–94 s per run, mostly cargo check.
 6. **E4's cost on review:** +2 turns when it fires (cleanup, then finish). A cheaper form would let the model clean up and answer in one reply. Not tried.
 
@@ -151,7 +152,7 @@ Levers from the brief, checked and not built:
 **Other decisions:**
 5. **The prompt still says accept() is "required before the first edit or write".** After E11 that's a steer, not an enforced rule. Soften it? That would be a prompt change to measure separately, since E1 and E8 showed prompt edits move Flash.
 6. **E4 adds a host message** (model-facing text), like the existing check gate. It is the change that moved pass rate. OK?
-7. **Opus 5.5 transport.** air speaks only `chat/completions`.
+7. **Opus 5.5 transport.** low speaks only `chat/completions`.
    - The stored OpenCode key is Go-only: Zen answers "Model access is disabled" for every model.
    - Through an OpenAI-compatible shim, Claude would lose prompt-cache breakpoints, its thinking blocks and signatures (interleaved thinking), and the effort setting; `max_tokens` is also unset. *(Untested: inferred from the API shapes. Only the Zen probe above was run.)*
    - A native Messages-API path in llm.rs is the prerequisite for any Opus tuning. It is untestable without access, so it isn't built.
@@ -170,7 +171,7 @@ Exact Flash token counts (macOS, check configured). The system prompt is `prompt
 | Example | 147 | Removing it costs +0.8 turns per task (E8, N=10). |
 | Workflow | 284 | The numbered steps make Flash put its edits and check() in one run (E1, E7). Step 4 reworded (E9). |
 | Sandbox | 179 | Messaging for the guards (what fails, and that it's permanent). The guards are unchanged. |
-| AGENTS.md, repo listing | repo-dependent (~200 for air) | The listing saves an exploring turn; frozen at session start, so the prefix stays cached. |
+| AGENTS.md, repo listing | repo-dependent (~200 for low) | The listing saves an exploring turn; frozen at session start, so the prefix stays cached. |
 | `run` tool schema | 263 on the wire (15-word description) | Unchanged; the helpers are documented in the prompt, once. |
 | Host messages | — | GATE (check failed), RETRY (lost, empty or cut-off reply), **STRAY (new, E4)**. Each fires at most once or twice per turn. |
 
@@ -183,7 +184,7 @@ Exact Flash token counts (macOS, check configured). The system prompt is `prompt
 
 ## Incidents during the work
 
-- **OpenCode edited a bench template.** In the first smoke test, its unsandboxed background service took its project from `$PWD` and edited `tuning/bench/tasks/fix/template/stats.py`. I restored the file and diffed it against the original. The bench now runs OpenCode with `--standalone`, under a sandbox-exec profile built from air's secret list, with `PWD` and `HOME` set to scratch paths. Nothing tracked was touched. The 32 rows from the broken attempts were removed.
+- **OpenCode edited a bench template.** In the first smoke test, its unsandboxed background service took its project from `$PWD` and edited `tuning/bench/tasks/fix/template/stats.py`. I restored the file and diffed it against the original. The bench now runs OpenCode with `--standalone`, under a sandbox-exec profile built from low's secret list, with `PWD` and `HOME` set to scratch paths. Nothing tracked was touched. The 32 rows from the broken attempts were removed.
 - **17 result rows were briefly lost.** A `git commit -a` on an experiment branch swept up `results.jsonl`, and the branch switch reverted it. I restored the rows from that commit and reconciled every row against its run directory. Since then, branch work happens in a separate worktree and no commit uses `-a`.
 
 ## Reproduce

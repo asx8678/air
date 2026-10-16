@@ -1,13 +1,46 @@
 # low
 
-A low-entropy, code-mode coding agent for the terminal.
+**A low-entropy, code-mode coding agent for your terminal.**
 
-The model gets one tool: `run(code)`. It writes a short Python script, and low runs it in a persistent, sandboxed worker at the root of your git repository. Exploring, editing and testing happen inside those scripts, so a step that would take a dozen tool calls elsewhere is usually one round trip.
+[![crates.io](https://img.shields.io/crates/v/low.svg)](https://crates.io/crates/low)
+[![downloads](https://img.shields.io/crates/d/low.svg)](https://crates.io/crates/low)
+[![license: MIT](https://img.shields.io/crates/l/low.svg)](https://github.com/asx8678/low/blob/main/LICENSE)
+![platforms: macOS | Linux](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-informational)
+![rust 1.99+](https://img.shields.io/badge/rust-1.99%2B-orange)
 
-- **Sandboxed:** no network, writes only inside the repo and temp dirs, and SSH keys, cloud credentials and shell history are hidden.
-- **Verified:** low runs your project's check on the final tree and reports whether the change passed.
-- **Reversible:** low never commits. Git is the undo, and every turn report prints the command that restores the tree.
-- **Minimal:** a short system prompt, deterministic harness decisions, and no hidden LLM calls (context compaction is rule-based).
+low gives the model one tool, `run(code)`. Each step is a short Python script that runs in a persistent, sandboxed worker at the root of your git repository. Reading files, editing them and running tests all happen inside that script, so a step that takes many tool calls in other agents is usually one round trip here.
+
+```text
+$ low "add() returns the wrong result; fix it"
+  ▸ I'll look at the files first.
+  ◆ criteria add(2, 3) == 5; add returns a + b; the project check passes
+  ✓ edit calc.py  +1 −1
+  ✓ check passed
+
+Fixed `calc.py:2` — `add` subtracted instead of adding (`return a - b` → `return a + b`).
+
+Verified: the project check (`python3 -m unittest -q`) passes, and direct calls give
+`add(2,3)==5`, `add(-4,1)==-3`, `add(0,0)==0`. Nothing open.
+
+── VERIFIED ────────────────────────────────────
+task      add() returns the wrong result; fix it
+criteria  add(2, 3) == 5; add returns a + b; the project check passes
+check     passed on the final tree
+changes   calc.py +1 −1
+undo      git restore --source=790cc5e2fb18 --worktree -- calc.py  (low's edit()/write() paths; new files stay)
+cost      3 requests · 2 runs · 4.9k tok in · 266 tok out · 0:10
+```
+
+## Why low
+
+- **Code mode.** The model writes a program instead of making many small tool calls: fewer round trips, fewer tokens.
+- **Sandboxed by default.** No network, writes only inside the repo and temp dirs, and your SSH keys, cloud credentials and shell history are out of reach.
+- **Verified.** low runs your project's check on the final tree, and every turn ends with a verdict.
+- **Reversible.** low never commits. Git is the undo, and every turn report prints the exact restore command.
+- **Low entropy.** A short system prompt, deterministic harness decisions, rule-based context compaction, and no hidden LLM calls.
+- **Any OpenAI-compatible model.** Point it at any `/chat/completions` endpoint.
+
+In a [15-task benchmark](https://github.com/asx8678/low/blob/main/tuning/REPORT.md) with the same model (DeepSeek V4.1 Flash), OpenCode needed about 1.3× low's round trips, 2.5× its tool calls and 2× its uncached input tokens.
 
 ## Install
 
@@ -15,64 +48,74 @@ The model gets one tool: `run(code)`. It writes a short Python script, and low r
 cargo install low
 ```
 
-You need:
-- macOS or Linux; low's sandbox is `sandbox-exec` on macOS and [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) on Linux;
-- `git`;
-- Python 3 (low uses the newest `python3.N` on your `PATH`).
+| you need | why |
+|---|---|
+| macOS or Linux | the sandbox is `sandbox-exec` on macOS and [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) on Linux |
+| `git` | low works inside a git repository, and git is the undo |
+| Python 3 | the worker runs on the newest `python3.N` on your `PATH` |
 
-## Set up a provider
+## Quick start
 
-low talks to any OpenAI-compatible `/chat/completions` endpoint. Add one to `~/.config/low/providers.toml`:
+**1. Add a provider** in `~/.config/low/providers.toml`:
 
 ```toml
 [opencode]
 base_url = "https://opencode.ai/inference/go/v1"
-api_key = "…"                  # optional: else $LOW_API_KEY, else ~/.config/low/api_key
+api_key = "…"                       # optional: else $LOW_API_KEY, else ~/.config/low/api_key
 models = ["deepseek-v4.1-flash"]
 ```
 
-Inside the REPL, `/providers` adds and edits providers, and `/models` switches models.
-
-`~/.config/low/config.toml` holds your defaults:
+**2. Tell low how to check your repository** with a `low.toml` at its root:
 
 ```toml
-model = "deepseek-v4.1-flash"   # the default model
-env = ["MY_VAR"]                # environment variables passed into the sandbox
-
-[models."deepseek-v4.1-flash"]  # per-model request parameters
-temperature = 0.0
-compact_at = 200000             # compact the context at this many prompt tokens
+check = "cargo build -q && cargo test -q"   # run on the final tree; decides the verdict
+fmt = "rustfmt --edition 2024"              # run on each edited file (its path is appended)
 ```
 
-## Configure a repository
-
-A `low.toml` at the repository root tells low how to verify and format changes:
-
-```toml
-check = "cargo build -q && cargo test -q"     # run on the final tree; decides the verdict
-fmt = "rustfmt --edition 2024"                # run on each edited file (its path is appended)
-```
-
-## Use
+**3. Give it a task:**
 
 ```sh
-low "the median of an even-length list is wrong; fix it"   # one task, then exit
-low                                                         # REPL
-low --resume                                                # continue the latest session in this repo
-low -m some-model "…"                                       # pick a model
+low "the median of an even-length list is wrong; fix it"
 ```
 
-- **One-shot mode** exits with 1 when a configured check didn't pass on the final tree, or when the turn stopped short, and with 0 otherwise.
-- **REPL commands:** `/compact`, `/cost`, `/think` (the model's last reasoning), `/models [filter]`, `/providers`.
-- **`--yolo`** turns the sandbox off: network on, writes anywhere. Environment variables stay filtered either way.
+## Usage
 
-Each turn ends with a report:
-- **the verdict:** VERIFIED, UNVERIFIED, NO CHANGES or NO CHECK;
-- the files changed;
-- the token and time cost;
-- an undo command, such as `git restore --source=<tree> --worktree -- .`.
+| command | does |
+|---|---|
+| `low "<task>"` | runs one task and exits: 1 if a configured check didn't pass on the final tree or the turn stopped short, else 0 |
+| `low` | starts the REPL |
+| `low --resume` | continues the latest session in this repository |
+| `low -m <model>` | picks the model for a new session; with `--resume`, switches the session to it |
+| `low --yolo` | turns the sandbox off: network on, writes anywhere (environment variables stay filtered) |
 
-Sessions are JSONL files in `~/.low/sessions`.
+In the REPL:
+
+| command | does |
+|---|---|
+| `/models [filter]` | lists the models your providers serve and switches to one |
+| `/providers` | adds, edits and removes providers |
+| `/cost` | shows the session's requests and tokens |
+| `/think` | shows the model's last reasoning |
+| `/compact` | compacts the context now |
+
+## Configuration
+
+| file | holds |
+|---|---|
+| `~/.config/low/providers.toml` | endpoints: `base_url`, optional `api_key`, `models` |
+| `~/.config/low/config.toml` | your defaults: `model`, extra sandbox `env`, and per-model request parameters |
+| `low.toml` (repo root) | `check` and `fmt` for that repository |
+
+A `config.toml` example:
+
+```toml
+model = "deepseek-v4.1-flash"        # default model
+env = ["MY_VAR"]                     # environment variables passed into the sandbox
+
+[models."deepseek-v4.1-flash"]       # sent with every request to this model
+temperature = 0.0
+compact_at = 200000                  # compact the context at this many prompt tokens
+```
 
 ## How it works
 
@@ -80,19 +123,33 @@ Inside `run(code)`, the model has a few helpers:
 
 | helper | does |
 |---|---|
-| `sh(cmd)` | runs a shell command; returns stdout+stderr, with `[exit N]` on failure |
-| `show(path, start, end)` | prints numbered lines, and pages long files |
-| `edit(path, old, new)` | replaces one exact occurrence (or several pairs, all or none), then runs `fmt` |
+| `sh(cmd)` | runs a shell command; returns stdout and stderr, with `[exit N]` on failure |
+| `show(path, start, end)` | prints numbered lines, paging long files |
+| `edit(path, old, new)` | replaces exactly one occurrence, or several pairs all-or-none, then runs `fmt` |
 | `write(path, content)` | creates a new file |
-| `check()` | runs the repository's `check` in the sandbox |
-| `accept(criteria)`, `plan(steps)`, `done()` | record what done means and track progress for the turn report |
+| `check()` | runs the repository's `check` inside the sandbox |
+| `accept(criteria)` · `plan(steps)` · `done()` | record what done means and track progress for the turn report |
 
 Repository files change only through `edit` and `write`, so low knows exactly what the model touched. A turn that changed files without using either is asked once to clean up its scratch output.
 
-## Coming from air
+Every turn ends with one of four verdicts:
 
-low was called air. It still reads `~/.config/air`, `air.toml`, `$AIR_API_KEY`, and the sessions in `~/.air/sessions`, so an existing setup keeps working.
+| verdict | meaning |
+|---|---|
+| **VERIFIED** | files changed, and the check passed on the final tree |
+| **UNVERIFIED** | files changed, but the check didn't pass, or the turn changed what the check runs |
+| **NO CHANGES** | nothing changed, e.g. a question or a review |
+| **NO CHECK** | files changed, and no check is configured |
+
+**The sandbox:**
+- **Network:** off. On macOS only localhost is reachable; on Linux, only servers started inside the sandbox.
+- **Writes:** only the repository and temp directories. `.git` and the hooks directory are off limits.
+- **Reads:** credentials and private data in your home directory are hidden, including `~/.ssh`, cloud and Kubernetes configs, keychains, shell histories, browser data and low's own config.
+- **Environment:** only an allowlist of variables is passed in, plus your `env = [...]`.
+- **Redaction:** secrets that appear in output, such as API keys, tokens and private keys, are redacted before the model or the session log sees them.
+
+**Sessions** are JSONL files in `~/.low/sessions`. When the context reaches `compact_at`, low compacts it without an LLM call: it keeps the task, the latest messages and a summary rebuilt from the log.
 
 ## License
 
-MIT
+[MIT](https://github.com/asx8678/low/blob/main/LICENSE)

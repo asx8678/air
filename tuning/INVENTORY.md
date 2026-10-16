@@ -1,4 +1,4 @@
-# air harness inventory (Phase 0)
+# low harness inventory (Phase 0)
 
 2026-10-16 · branch `tune-opus` from `6e5278f` · read-only pass over all of `src/` (4,500 lines: Rust + `worker.py` + `prompt.md`).
 
@@ -16,14 +16,14 @@ Token counts are **exact for DeepSeek V4.1 Flash**: each comes from a `max_token
 
 | section | bytes | Flash tokens |
 |---|---:|---:|
-| opening line ("You are air … smallest correct diff, verified.") | 103 | 22 |
+| opening line ("You are low … smallest correct diff, verified.") | 103 | 22 |
 | `## Code mode` | 623 | 150 |
 | `## Helpers` (signature block + edit/write rule) | 1,405 | 353 |
 | `## Example` (two runs) | 477 | 147 |
 | `## Workflow` (4 numbered steps + closing line) | 1,172 | 281 |
 | `## Sandbox` (SANDBOX + MACOS + PERMANENT) | 783 | 179 |
 | AGENTS.md block | header + file | 8 + file |
-| repo listing | 730 for air itself (29 files) | ~200 for air; 46 for a 5-file bench repo |
+| repo listing | 730 for low itself (29 files) | ~200 for low; 46 for a 5-file bench repo |
 | **whole static part** | **4,561** | **~1,130** |
 | `tools` array (one function) | — | **263** (the gateway's chat template adds a tool preamble; the description itself is 15 words) |
 
@@ -32,7 +32,7 @@ First request on a bench task: median **1,563** prompt tokens (114 Flash session
 Verbatim static part (prompt.md + sandbox text, macOS, check configured):
 
 ````text
-You are air, a coding agent working in a git repository. Aim for the smallest correct diff, verified.
+You are low, a coding agent working in a git repository. Aim for the smallest correct diff, verified.
 
 ## Code mode
 Your one tool is `run(code)`: Python (standard library) in a persistent worker whose working directory is the repo root; variables survive between calls. The repo's own modules import too; every edit or write unloads them, so import them again after a change. Only what you print comes back, at most 32,000 characters per run; longer output keeps its first and last 16,000. Do a whole step in one script. Read files with show().
@@ -83,12 +83,12 @@ Don't repeat steps that worked, don't re-read files you already have, and don't 
 
 
 ## Sandbox
-Your code runs in a sandbox. Writes outside the repo and temp dirs fail, as do writes into any .git directory and reads of credentials and private data in the home directory (ssh and cloud keys, shell history, browser data, other tools' configs). Only a fixed set of environment variables is passed through (env = ["NAME"] in ~/.config/air/config.toml adds more). Internet and DNS are off (localhost works); nested sandbox-exec fails, and Unix sockets work only under the repo's tmp/ directory. These failures (Operation not permitted, EPERM, Read-only file system, DNS lookup errors) are permanent. Don't retry them and don't search the machine for another copy of what was blocked: skip that step, finish the rest, and say in your final message what you could not run.
+Your code runs in a sandbox. Writes outside the repo and temp dirs fail, as do writes into any .git directory and reads of credentials and private data in the home directory (ssh and cloud keys, shell history, browser data, other tools' configs). Only a fixed set of environment variables is passed through (env = ["NAME"] in ~/.config/low/config.toml adds more). Internet and DNS are off (localhost works); nested sandbox-exec fails, and Unix sockets work only under the repo's tmp/ directory. These failures (Operation not permitted, EPERM, Read-only file system, DNS lookup errors) are permanent. Don't retry them and don't search the machine for another copy of what was blocked: skip that step, finish the rest, and say in your final message what you could not run.
 ````
 
 Nothing dynamic sits in the prompt beyond what is frozen at session start. There is no date, no git status and no cwd listing that changes between requests. The listing is "at session start" and stays byte-identical for the whole session.
 
-### 1.2 Other text air injects into the conversation
+### 1.2 Other text low injects into the conversation
 
 | where | text (abridged) | source |
 |---|---|---|
@@ -97,7 +97,7 @@ Nothing dynamic sits in the prompt beyond what is frozen at session start. There
 | user role, end-of-turn gate | `The project check failed on the current tree. Fix what fails, run check(), then finish again. If it cannot pass, say why in one line. The check output ended with:` + last 1,500 chars (once per turn) | `agent::GATE` |
 | user role, retry nudge | `Your last reply {was lost: the provider cut the stream \| was empty \| hit the output limit and was cut off; continue from where it stopped}. Send one run() now with the next step, or a shorter answer.` (≤ 2 in a row) | `agent::retry` |
 | tool role | `tool result missing (interrupted)`; `[interrupted by the user]`; `error: run() arrived without a code argument, probably cut off by the output limit; send it again in smaller steps`; `error: the only tool is run(code)`; `error: <e>; the worker was restarted and its variables are gone` | `session.rs`, `agent::call/run_code` |
-| tool role, from the worker | `(no output)`; traceback limited to `<run>` frames; `[applied before the error: edit a.py; inspect before repeating them]`; `[sh: air's helpers, restored before the next run]`; `[check no longer applies: files changed after it passed; run check() again]`; `[… N characters omitted]`; `[import X: air's helpers are built in; no import needed]`; show() header `[p: lines a-b of N; show('p', k) continues]`; `edit p: ok` (+ `; fmt failed: …` / `; the formatter changed it:` + diff); check output + `[check passed\|FAILED: <cmd>]` (+ `[reused: the tree is unchanged since this check passed]`); sh `[exit N]` / `timeout after Ns` | `worker.py`, `agent::verify` |
+| tool role, from the worker | `(no output)`; traceback limited to `<run>` frames; `[applied before the error: edit a.py; inspect before repeating them]`; `[sh: low's helpers, restored before the next run]`; `[check no longer applies: files changed after it passed; run check() again]`; `[… N characters omitted]`; `[import X: low's helpers are built in; no import needed]`; show() header `[p: lines a-b of N; show('p', k) continues]`; `edit p: ok` (+ `; fmt failed: …` / `; the formatter changed it:` + diff); check output + `[check passed\|FAILED: <cmd>]` (+ `[reused: the tree is unchanged since this check passed]`); sh `[exit N]` / `timeout after Ns` | `worker.py`, `agent::verify` |
 | tool-call shim | a helper name called as a tool (`edit` instead of `run`) is run as `name(**args)` inside run() | `agent::call` |
 
 ## 2. Tools
@@ -117,7 +117,7 @@ The rest of the surface is Python helpers defined in the worker (`src/worker.py`
 | `edit(path, old, new)` / `edit(path, [(old,new),…])` / `edit(path, [old,new])` | exact unique replacement, CRLF-aware, all-or-none, then fmt | `edit p: ok` + formatter diff if it changed the text | `ValueError: old text not found in p` / `occurs N times in p` (+ `(pair k of n; nothing was changed)`). **No nearest match is returned.** |
 | `write(path, content)` | create only | `write p: ok` | `p exists; use edit` |
 | `accept(criteria)` | records done-criteria; **required before the first edit/write of a task** | nothing | `call accept(criteria) before changing files` |
-| `check()` | asks the host to run `check` from air.toml in the sandbox (30 min limit, 1 MB tail kept) | check output + verdict line; reused when the tree is unchanged | `no check command configured` |
+| `check()` | asks the host to run `check` from low.toml in the sandbox (30 min limit, 1 MB tail kept) | check output + verdict line; reused when the tree is unchanged | `no check command configured` |
 | `plan(steps)` / `done(step=None)` | UI progress only | nothing / next step | `no step n` |
 
 Edits and writes refuse anything outside the repo, in `.git`, in the hooks path, hard-linked, or on another volume. Writing repo files through the shell or `open(...,'w')` is forbidden by the prompt, not by code; the turn report flags such changes as "outside".
@@ -139,7 +139,7 @@ Edits and writes refuse anything outside the repo, in `.git`, in the hooks path,
 
 ## 4. Context management
 
-- **compact_at:** the profile's `compact_at`, else 80% of a window learned from an overflow error, else 100,000. The Flash profile in `~/.config/air/config.toml` sets 200,000.
+- **compact_at:** the profile's `compact_at`, else 80% of a window learned from an overflow error, else 100,000. The Flash profile in `~/.config/low/config.toml` sets 200,000.
 - **Trigger:** before each request, when the provider's last `prompt_tokens` plus bytes/4 of the entries added since reaches compact_at. No turn-start compaction (removed in 4cb8830). `/compact` is manual.
 - **Compaction is deterministic and LLM-free** (`compact.rs`). It keeps the newest entries up to compact_at/5 tokens, cut at an assistant boundary, and puts the summary from §1.2 before them. What survives: the system prompt, the current task verbatim, criteria, files touched, the last failing check output, unresolved failures, and the last 40 events.
 - **Superseded results are not elided.** Masking was removed in 9da80fa: each logged mask was followed by re-reading what it hid.
@@ -152,7 +152,7 @@ Edits and writes refuse anything outside the repo, in `.git`, in the hooks path,
 
 ## 5. Thinking and effort
 
-- air sends `temperature` (default 0.0) plus any profile keys verbatim (`settings()` passes everything except `compact_at`). It sends no `reasoning_effort` or `thinking` and no `max_tokens`.
+- low sends `temperature` (default 0.0) plus any profile keys verbatim (`settings()` passes everything except `compact_at`). It sends no `reasoning_effort` or `thinking` and no `max_tokens`.
 - Reasoning streams in `reasoning_content` (or `reasoning`) and is shown live. It is stored and replayed within the current task; that is interleaved thinking, kept.
 - Gateway probe (same arithmetic prompt; reasoning tokens):
 
@@ -177,18 +177,18 @@ Edits and writes refuse anything outside the repo, in `.git`, in the hooks path,
   - Also denied: tty ioctl and writes, AppleEvents, `osascript/open/launchctl/automator`.
 - **Environment.** An allowlist, so no `KUBECONFIG`, `AWS_*`, `AZURE_*` or `ARM_*`, plus hermetic pins.
 - **Redaction.** Secret redaction (AWS/GitHub/Slack/sk-/oc_ keys, PEM private keys) on run output, check output, errors and logged headers.
-- **git hardening.** git filter and diff drivers are neutralized for air's own git calls.
+- **git hardening.** git filter and diff drivers are neutralized for low's own git calls.
 - **`--yolo`** disables the sandbox; the bench never uses it.
-- **No command filter.** air has no destructive-command filter: the sandbox plus git-as-undo carry that.
+- **No command filter.** low has no destructive-command filter: the sandbox plus git-as-undo carry that.
 - On this machine `~/.kube`, `~/.azure`, `~/.aws` and `~/.config/gcloud` don't exist, and no cloud env vars are set.
 
 ## 7. Existing tests and evals
 
-- `cargo test`: 16 unit tests. The check is `cargo build && cargo clippy --all-targets -D warnings && cargo test` (air.toml).
+- `cargo test`: 16 unit tests. The check is `cargo build && cargo clippy --all-targets -D warnings && cargo test` (low.toml).
 - `~/projects/air-bench`, all synthetic:
   - `bench/templates` holds 7 tasks: fix, feature, debug, refactor, qa, review, rust;
-  - `check_bench.py` graders, `bench_run.py` runner (air vs pi), `trace.py`/`turns.py` log rollups;
-  - `sim.py` reasoning-replay simulator, `replay/` compaction A/B, `real/flow.sh` review→fix on an air clone.
+  - `check_bench.py` graders, `bench_run.py` runner (low vs pi), `trace.py`/`turns.py` log rollups;
+  - `sim.py` reasoning-replay simulator, `replay/` compaction A/B, `real/flow.sh` review→fix on an low clone.
 - The last results (memory, 2026-10-16) are 14/14 and 28/28 passes on Flash at a median of 4 requests per turn: **at the floor.** These tasks can't show an improvement.
 
 ## 8. Measured profile (Flash, current builds)

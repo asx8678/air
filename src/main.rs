@@ -71,23 +71,19 @@ async fn start() -> Result<()> {
     let root = PathBuf::from(String::from_utf8(top.stdout)?.trim()).canonicalize()?;
     let user = load(&providers::config_dir(&home).join("config.toml"))?;
     check_config(&user)?;
-    // low.toml; a repo set up before the rename from air keeps its air.toml.
-    let repo_file = if !root.join("low.toml").exists() && root.join("air.toml").exists() { "air.toml" } else { "low.toml" };
-    let repo = load(&root.join(repo_file))?;
+    let repo = load(&root.join("low.toml"))?;
     let warn = |text: &str| {
         eprintln!("{text}");
         ui::record("note", text, serde_json::Value::Null);
     };
     if repo.model.is_some() || repo.base_url.is_some() || !repo.models.is_empty() {
         warn(
-            &format!(
-                "{repo_file}: model, base_url and models are ignored; models go in ~/.config/low/config.toml, providers \
-                 in ~/.config/low/providers.toml"
-            ),
+            "low.toml: model, base_url and models are ignored; models go in ~/.config/low/config.toml, providers in \
+             ~/.config/low/providers.toml",
         );
     }
     if !repo.env.is_empty() {
-        warn(&format!("{repo_file}: env is ignored; set env in ~/.config/low/config.toml"));
+        warn("low.toml: env is ignored; set env in ~/.config/low/config.toml");
     }
     let providers = providers::load(&home)?.unwrap_or_default();
     let picked = cli.model.clone().filter(|_| cli.resume);

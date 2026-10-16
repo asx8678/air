@@ -1,8 +1,8 @@
-# Sourced by each task's setup.sh. $1 = the repo to create; BENCH = tuning/bench; AIR = the air repo.
+# Sourced by each task's setup.sh. $1 = the repo to create; BENCH = tuning/bench; REPO = this repository.
 set -eu
 DEST=$1
 BENCH=$(cd "$(dirname "$0")/../.." && pwd)
-AIR=$(cd "$BENCH/../.." && pwd)
+REPO=$(cd "$BENCH/../.." && pwd)
 
 # A fresh repo with one commit: the agent sees no history, so it can't look up the answer.
 commit_all() {
@@ -17,11 +17,13 @@ from_template() {
     commit_all
 }
 
-# The air tree at a commit, without its history; a warm target/ from the prepared cache when there is one.
-from_air() {
+# This repository's tree at a commit, without its history, checked by today's low.toml (older commits predate it);
+# a warm target/ from the prepared cache when there is one.
+from_repo() {
     mkdir -p "$DEST"
-    git -C "$AIR" archive "$1" | tar -x -C "$DEST"
+    git -C "$REPO" archive "$1" | tar -x -C "$DEST"
+    cp "$REPO/low.toml" "$DEST/low.toml"
     commit_all
-    cache="${AIR_BENCH_CACHE:-${TMPDIR:-/tmp}/air-bench/cache}/$1/target"
+    cache="${LOW_BENCH_CACHE:-${TMPDIR:-/tmp}/low-bench/cache}/$1/target"
     if [ -d "$cache" ]; then cp -cR "$cache" "$DEST/target" 2>/dev/null || cp -R "$cache" "$DEST/target"; fi
 }

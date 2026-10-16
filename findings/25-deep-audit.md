@@ -24,10 +24,10 @@ No subagent facility in this harness — passes ran sequentially with fresh prob
         "Unauthenticated ServerHello can downgrade later connections" | cargo update
         (lockfile bump only) | 0
 [med]  [3] src/session.rs:33,36 | session create/open errors carry no path | repro:
-        read-only ~/.air → `error: Permission denied (os error 13)` with no hint which file
+        read-only ~/.low → `error: Permission denied (os error 13)` with no hint which file
         | .context(path) | +1 line
 [med]  [1] Cargo.toml:2 | no `license` field, no LICENSE file in the repo | cargo-deny:
-        "air = 0.1.0 is unlicensed" | add both | +1 line
+        "low = 0.1.0 is unlicensed" | add both | +1 line
 [med]  [4] src/worker.rs:69 | host↔worker reply lines uncapped (llm.rs has a 16 MB LINE_MAX;
         the worker side trusts worker.py's own caps) | BufReader::lines() with no limit
         | cap the read (~4 MB) | +2 lines
@@ -39,7 +39,7 @@ No subagent facility in this harness — passes ran sequentially with fresh prob
         (convention: 130) | B5: interrupted run exits 1 | exit(130) on interrupt
         | +1 line — BEHAVIOR CHANGE
 [low]  [3] src/main.rs (task mode) | empty task "" runs a full model round-trip on nothing
-        | A1: exit 0, 2 requests, 1 run for `air ""` | reject empty task | +2 lines
+        | A1: exit 0, 2 requests, 1 run for `low ""` | reject empty task | +2 lines
         — BEHAVIOR CHANGE
 [low]  [5] src/worker.py:16 RUN_CAP=570 | prompt.md says "a whole run is cut at 10 minutes"
         but 570 s = 9.5 min | align either side | 0

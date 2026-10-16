@@ -17,7 +17,7 @@ None of the Tier 2 problems has fired in the owner's 437 local sessions. They ar
 - **No new tests:** the owner asked for none. Verify each fix with throwaway experiments outside the repo instead:
   - Use a scratch HOME and a local mock provider: an `http.server` answering `/v1/chat/completions` with server-sent events.
   - Use the built binary.
-  - Never touch the real `~/.air` or `~/.config/air`.
+  - Never touch the real `~/.low` or `~/.config/low`.
 - **Checks before each commit:**
   - `rustfmt --edition 2024` on the changed `.rs` files, except `src/main.rs`.
   - `cargo build -q && cargo clippy -q --all-targets -- -D warnings && cargo test -q`
@@ -54,7 +54,7 @@ None of the Tier 2 problems has fired in the owner's 437 local sessions. They ar
 
 **Where:** `verify()` and `grouped()`.
 
-**Problem:** on CHECK_TIMEOUT, air drops the future that owns the output file. The model then sees only `timeout after 1800s`, with no hint of which step hung.
+**Problem:** on CHECK_TIMEOUT, low drops the future that owns the output file. The model then sees only `timeout after 1800s`, with no hint of which step hung.
 
 **Fix:** move the deadline into `grouped()`'s select loop. When it passes, kill the group, read the file as usual, and append `[timeout after Ns]`.
 
@@ -70,7 +70,7 @@ None of the Tier 2 problems has fired in the owner's 437 local sessions. They ar
 
 ### 5. Leftovers from snapshot failures
 
-Tier 1 already handles fatal `git add` errors: the private index is rebuilt once, and air's git runs with `core.safecrlf=false`. Two problems remain.
+Tier 1 already handles fatal `git add` errors: the private index is rebuilt once, and low's git runs with `core.safecrlf=false`. Two problems remain.
 
 **Where:** `changes()` and `verify()`.
 
@@ -80,7 +80,7 @@ Tier 1 already handles fatal `git add` errors: the private index is rebuilt once
 
 **Fix:**
 - In `changes()`, list an untracked file as "(new)" only if its mtime is at or after the turn's start.
-- In `verify()`, report a snapshot failure as air's (`[check passed, but air could not snapshot the tree: ...]`) and send no GATE nudge for it.
+- In `verify()`, report a snapshot failure as low's (`[check passed, but low could not snapshot the tree: ...]`) and send no GATE nudge for it.
 
 ### 6. Small fixes
 
@@ -109,7 +109,7 @@ These can go in one commit or several.
 - Naming the files a check changed.
 - The turn-start compaction estimate.
 - The second snapshot in `verify()`.
-- An air that exits during a snapshot leaves its git process running. An immediate `--resume` removes that git's lock and races it. The index is a cache, so the worst case is a rebuild.
+- An low that exits during a snapshot leaves its git process running. An immediate `--resume` removes that git's lock and races it. The index is a cache, so the worst case is a rebuild.
 - Writes made from Python itself (`open()`, `subprocess`) after a passing check are not seen. Shell commands are: any `sh()` after a check makes it stale.
 - A SKILL.md larger than 32 KB whose `description:` line comes after the first 32 KB is not listed.
 - An AGENTS.md or skills folder linked from outside the repo is left out of the prompt, by design. Such a link could otherwise point at host-only files such as `/proc/self/environ` on Linux.

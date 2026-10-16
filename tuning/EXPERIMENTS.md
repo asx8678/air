@@ -32,10 +32,10 @@ Diffs vary a lot: pairwise normalized edit distance is 0.4–0.5 on fix, feature
 
 ## A0 · Prompt prefix and caching (analysis, no change)
 
-- **Hypothesis:** something air sends breaks the cached prefix mid-turn.
+- **Hypothesis:** something low sends breaks the cached prefix mid-turn.
 - **Evidence:** each request's `cached_tokens` equals the previous request's prompt, rounded down to the provider's 64–128-token blocks. Cache efficiency is 98.5% over 75 sessions. The per-request "cache hit rate" (79–88%) is low only because each run's new output can't be cached yet.
 - **Decision:** nothing to fix.
-- Found on the way: the gateway routes sessions to two upstreams. That is run-to-run variance air can't control; mechanics.py now reports it.
+- Found on the way: the gateway routes sessions to two upstreams. That is run-to-run variance low can't control; mechanics.py now reports it.
 
 ## A1 · Nearest-match text on a failed edit (analysis, not built)
 
@@ -87,15 +87,15 @@ Diffs vary a lot: pairwise normalized edit distance is 0.4–0.5 on fix, feature
 
 ## E4 · Ask once about files a turn changed without edit()/write(): KEPT (win on success)
 
-- **Hypothesis:** a review or question turn that runs the code under test leaves demo output in the repo. Examples from the logs: `tmp_demo5.json`, `pwned.txt`, `exports/out.csv`. That fails the "change no files" ask and makes the diff non-minimal. air already knows when this happened: the tree moved, but no edit() or write() did it.
-- **Change:** `exp/stray`, applied as 9a4e8fb (+30 lines in agent.rs). At the end of a turn with no edit()/write() whose tree changed, air sends one host message listing the files: "This turn changed files without edit() or write(): …. Delete the ones that are scratch output from running code, keep any that are part of your answer, then finish again."
+- **Hypothesis:** a review or question turn that runs the code under test leaves demo output in the repo. Examples from the logs: `tmp_demo5.json`, `pwned.txt`, `exports/out.csv`. That fails the "change no files" ask and makes the diff non-minimal. low already knows when this happened: the tree moved, but no edit() or write() did it.
+- **Change:** `exp/stray`, applied as 9a4e8fb (+30 lines in agent.rs). At the end of a turn with no edit()/write() whose tree changed, low sends one host message listing the files: "This turn changed files without edit() or write(): …. Delete the ones that are scratch output from running code, keep any that are part of your answer, then finish again."
 - **Result:**
 
   | | main | stray |
   |---|---|---|
   | review pass | 21/25 (84%) | **20/20 (100%)** |
   | review runs leaving files | 7/25 | 0/20 |
-  | gate fired | — | 3/20 review runs, 0 on qa, airqa, wide, ops |
+  | gate fired | — | 3/20 review runs, 0 on qa, lowqa, wide, ops |
   | pooled pass, 5 tasks | 92% | 100%: **+8.0pp [+2.0, +16.0]** |
   | turns | 4.92 | 5.20: +0.3 [−0.2, +0.8] |
   | uncached input | 4.7k | 4.7k: +0.0k [−0.6, +0.6] |
@@ -137,19 +137,19 @@ Diffs vary a lot: pairwise normalized edit distance is 0.4–0.5 on fix, feature
 - **Setup:** `opencode run --standalone -m opencode-go/deepseek-v4.1-flash --format json --auto`, under the bench's sandbox profile, with temperature 0 set in the project's opencode.json.
 - **Two bench bugs found on the way, both fixed before these numbers:**
   - Without `--standalone`, the shared background service ran tools unsandboxed in its own cwd.
-  - OpenCode takes its project directory from `$PWD`. The inherited PWD made it work on the air repo itself, and it edited one bench template in the first smoke test; restored and checked against the original. The broken attempts are the `opencode`, `opencode-seq` and `opencode-fg` labels in results.jsonl; they failed at startup and are excluded.
+  - OpenCode takes its project directory from `$PWD`. The inherited PWD made it work on the low repo itself, and it edited one bench template in the first smoke test; restored and checked against the original. The broken attempts are the `opencode`, `opencode-seq` and `opencode-fg` labels in results.jsonl; they failed at startup and are excluded.
 
-| per task (15 tasks) | OpenCode | air main (all 125 runs) |
+| per task (15 tasks, task-balanced) | OpenCode | low main (all runs) |
 |---|---|---|
-| pass | 15/15 | 121/125 |
-| turns | 7.5 | 5.1 |
-| tool calls | 12.5 | 4.3 |
-| uncached input | 13.4k | 4.9k |
-| total prompt | 114k | 28k |
-| output | 3.3k | 2.8k |
-| wall | 41 s | 25 s |
+| pass | 15/15 | 99% (121/125) |
+| turns | 7.5 | 5.75 |
+| tool calls | 12.5 | 5.19 |
+| uncached input | 13.4k | 6.3k |
+| total prompt | 114k | 38.2k |
+| output | 3.3k | 3.4k |
+| wall | 41 s | 30 s |
 
-OpenCode's tools are one call per file: wide took 20 calls, 18 of them parallel reads, in 4 turns. Its system prompt and tool schemas make a first request of 5.5k tokens (median 5,480; air: 1.7k). air's code mode gets the same work done in fewer turns and about a quarter of the prompt tokens.
+OpenCode's tools are one call per file: wide took 20 calls, 18 of them parallel reads, in 4 turns. Its system prompt and tool schemas make a first request of 5.5k tokens (median 5,480; low: 1.7k). low's code mode gets the same work done in fewer turns and about a third of the prompt tokens. (These low figures were first given as unbalanced means over 125 runs, which overstated the gap; corrected with the task-balanced estimator.)
 
 ## Re-baseline · tune1 = main + E3 + E4 (e53f2d5), N=5 at 11:51–12:01
 
