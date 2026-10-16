@@ -331,7 +331,8 @@ impl Agent {
             ui::usage(usage);
             let calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
             let empty = calls.is_empty() && message["content"].as_str().is_none_or(|c| c.trim().is_empty());
-            if calls.is_empty() && (empty || message["meta"]["finish"] == "length") && retries < 2 {
+            let cut = calls.is_empty() && !empty && message["meta"]["finish"] == "length";
+            if (empty || cut) && retries < 2 {
                 retries += 1;
                 if empty {
                     // The reply is dropped, so its usage stays on the event.
@@ -349,9 +350,14 @@ impl Agent {
                 }
                 continue;
             }
-            if empty {
-                ui::event("empty", "the model sent an empty reply again; finishing the turn", Value::Null);
+            // Retries count in a row: a reply that is kept starts them over, and one that is still unusable after
+            // them ends the turn as stopped.
+            if empty || cut {
+                let (kind, what) = if empty { ("empty", "an empty reply") } else { ("length", "a cut-off reply") };
+                ui::event(kind, &format!("the model sent {what} again; finishing the turn"), Value::Null);
                 stalled = true;
+            } else {
+                retries = 0;
             }
             self.session.push(message)?;
             for call in &calls {
