@@ -1,5 +1,6 @@
 use serde_json::Value;
 use std::io::{IsTerminal, Write};
+use std::os::fd::AsRawFd;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant};
@@ -35,12 +36,12 @@ pub fn printable(text: &str) -> String {
         .collect()
 }
 
+/// The terminal's rows and columns, asked of the tty itself: the ticker calls this every second.
 fn size() -> Option<(u16, u16)> {
     let tty = std::fs::File::open("/dev/tty").ok()?;
-    let out = std::process::Command::new("stty").arg("size").stdin(tty).output().ok()?;
-    let text = String::from_utf8(out.stdout).ok()?;
-    let mut it = text.split_whitespace().map(|n| n.parse().ok());
-    Some((it.next()??, it.next()??)).filter(|&(rows, cols)| rows >= 5 && cols >= 20)
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    let asked = unsafe { libc::ioctl(tty.as_raw_fd(), libc::TIOCGWINSZ, &mut ws) } == 0;
+    Some((ws.ws_row, ws.ws_col)).filter(|&(rows, cols)| asked && rows >= 5 && cols >= 20)
 }
 
 pub struct Turn(Option<tokio::task::JoinHandle<()>>);
