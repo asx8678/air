@@ -288,3 +288,25 @@ That is 37 of 156 tool errors (24%), about one round trip each. The expected poo
 - refactor or ops (the tasks where "exists; use edit" occurred) have a mean diff_bytes above 1.5× the tip's.
 
 **Reported for both, not a reject trigger:** the share of changing turns with no accept() criteria. It is a UX cost, because the turn report's criteria row then shows "-".
+
+### E11 / E12 outcome: run stopped at your request, decided on the evidence at hand
+
+- **What ran:** the interleaved N=10 run was stopped after ~24 runs per variant (about 1.6 per task) when you asked for a decision without more testing. That is too few runs for the pre-registered cost CIs, so neither variant was decided by its rule.
+- **Partial run:**
+
+  | | pass | targeted errors | all tool errors | changing turns with accept() criteria |
+  |---|---|---|---|---|
+  | tip | 24/24 | 1 (accept gate) | 5 | 19/19 |
+  | E11 | 24/24 | 0 | 5 | 19/19 |
+  | E12 | 23/23 | 0 | 2 | 19/19 |
+
+  E12's replace-a-file path was never used in these runs (refactor and ops had 1 run each).
+- **E11: KEPT** (abdf2c9 on tune-opus).
+  - It accepts exactly the call shapes the model sent (6 of the 7 logged shape errors) and stops refusing edits made before accept() (9 errors), with the prompt unchanged.
+  - The standalone worker test confirmed every accepted shape, both rejections, and all-or-none.
+  - It is the same kind of change as E3: the harness tolerates a habit the model shows in the logs. Low risk.
+  - **Open:** the prompt still says accept() is "required before the first edit or write". That is now a steer, not an enforced rule; softening the wording would be a separate, measured prompt change (E1 and E8 showed prompt edits move Flash).
+- **E12: NOT APPLIED.**
+  - It targets the largest class (21 errors), but its one real risk is untested: a whole-file rewrite that drops content or bloats the diff, guarded by the diff-size rule.
+  - It also changes the prompt.
+  - Left on `exp/tolerance-write` (e6cd074) for a future N=10 run.

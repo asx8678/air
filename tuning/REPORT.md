@@ -8,10 +8,11 @@ Branch `tune-opus` from `main` (6e5278f), 2026-10-16. The details for every resu
 
 - **air was already close to the floor for Flash.** At baseline it passed 74/75, averaging 3.4–9.6 turns per task, with ~99% cache efficiency (cached ÷ the previous request's prompt) and no mid-turn prefix breaks.
 - **OpenCode on the same model** passed 15/15 but took 1.5× the turns, 2.7× the uncached input and 4× the prompt tokens.
-- **Three changes were kept, one commit each:**
+- **Four changes were kept, one commit each:**
   - **E3** · an edit reloads the modules runs imported instead of deleting their names;
   - **E4** · a turn that changed files without edit()/write() is asked once to clean up;
-  - **E9** · the final message reports what changed, how it was verified, and what is still open.
+  - **E9** · the final message reports what changed, how it was verified, and what is still open;
+  - **E11** · edit() accepts the extra call shapes the model uses, and accept() no longer gates edits. Added after the before/after below, decided without a full run at your request.
 - **Against main, interleaved at N=10 per task:** pass **150/150 vs 147/150** (+2.0pp [0.0, +4.0]), with turns, tokens and wall time unchanged within noise. Tool errors per run fell 0.17 → 0.10.
 - **Rejected, with numbers:** every prompt cut (E1, E2, E7, E8), both effort settings (E5, E6), and the nearest-match edit error (A1). For Flash, the example and the numbered workflow are what make it batch its work: removing the example costs +0.8 turns per task at N=10.
 - **At N=5, Flash's run-to-run noise is as large as most prompt effects.** The same build's per-task turns move ±0.4–1.4 between batches. Close calls were settled with an interleaved N=10 head-to-head (E10).
@@ -102,6 +103,7 @@ OpenCode's first request is 5.5k tokens against air's 1.7k, and it reads files o
 |---|---|---|---|
 | E3 | `_forget()` in worker.py rebinds names imported from a reloaded repo module (modules, functions, classes) to the new code. Instances and names whose module no longer imports are dropped, as before. Prompt: "…an edit or write reloads the ones you imported". | c7f3879 | 7 Python tasks × 10 runs: NameError right after an edit **5 → 0**, tool errors 23 → 13, turns 4.17 → 4.14 (Δ −0.0 [−0.3, +0.2]). The pass difference there (68 → 70/70) is main's review stray-file misses, not E3. The prompt sentence slightly overstates: instances are dropped (no occurrence in 70 runs). |
 | E4 | agent.rs: at the end of a turn with no edit()/write() whose tree still changed, one host message lists the files and asks the model to delete scratch output and keep its answer. | 9a4e8fb | review: pass 21/25 → **20/20** in the targeted run; runs leaving demo files 7/25 → 0/20. 5-task pooled pass **+3.2pp [+0.8, +6.4]**. It fired only on review (14 times across all variants), costing about +2 turns each time. At N=10, review turns went 3.7 → 5.1 with 3 firings; the firings explain about +0.6 of that. **The rest (+0.8) is unexplained.** It recurred in both review comparisons (+0.5 without the nudged runs in the first), so it could be a real cost of the gate's presence, or noise. |
+| E11 | worker.py: edit() also takes a flat `[old1, new1, old2, new2, …]` list and several `[old, new]` pairs as extra arguments (a 3-string list still raises; all-or-none kept); the accept() gate is removed while the prompt still asks for accept(). | abdf2c9 | Targets 16 of the tip's 156 tool errors (9 gate refusals, 6 of 7 shape errors). Standalone worker test confirmed every shape and both rejections. Partial interleaved run (24 runs per variant, stopped at your request): 24/24 pass, 0 targeted errors (tip: 1), criteria still recorded in 19/19 changing turns. **Not measured at N=10; not in the before/after table.** |
 | E9 | Workflow step 4: "End with a short report: what changed, how you verified it, and what is still open." | 9e275a9 | **Cost-neutral:** interleaved vs tune1-late, output +0.3k [−0.2, +0.8]. The earlier −0.4k back-to-back "win" did not replicate. Kept because it is the report format the brief asks for. |
 
 ## Rejected experiments, and why
@@ -114,6 +116,8 @@ OpenCode's first request is 5.5k tokens against air's 1.7k, and it reads files o
 | E6 | thinking disabled | pass **−17.6pp**, turns **+19.6** | Hard tasks loop: 8 runs hit the 200-request limit, c-python averaged 135 turns. |
 | E7 | accept() optional, no plan()/done() asked (on the tip, N=10) | Δturns **+0.3 [−0.0, +0.6]**, costs neutral | Fails E10's rule: a +0.3-turn cost can't be ruled out. |
 | E8 | drop the Example (on the tip, N=10) | Δturns **+0.8 [+0.5, +1.1]**, pass −2.0pp | The example is what makes Flash batch its work. |
+| E12 | write() replaces an existing regular file (the largest error class: 21 on the tip) | not applied | The replace path was never used in the partial run, so the risk (whole-file rewrites dropping content or bloating the diff) is untested; it also changes the prompt. Left on `exp/tolerance-write`. |
+| A2 | end the turn right after the stray-file cleanup run | not built | It would save at most 14 requests in ~1,600 sessions, and it adds a stop condition. |
 | A1 | nearest-match text when edit()'s old text isn't found | not built | 9 of 13 logged failures were fixed by the next run without a re-read: at most ~4 requests saved in ~4,100 runs. |
 
 Levers from the brief, checked and not built:
@@ -139,16 +143,18 @@ Levers from the brief, checked and not built:
 **Where I departed from the decision rule I wrote before the runs (three places):**
 1. **E3 was kept by judgment.** Its pooled metrics are neutral, and the strict rule rejects neutral additions. The error class it removes was entirely harness-caused, and the fix is the "tolerate the model's habit in the harness" your memory rule prefers. Keep, or revert c7f3879?
 2. **E9 was kept on the brief's grounds.** It is cost-neutral, and the rule has no category for a rewording; the brief asks for exactly this report format.
-3. **E10 replaced the entropy check.** The pre-written check (pooled per-task turns sd) turned out to be as noisy as the effects at N=5: the same build scored 1.11 vs 1.36. The close calls were re-decided by a rule written before the N=10 head-to-head ran. E7 and E8 were rejected under it.
+3. **E11 was kept without its full run.** You asked for a decision before the pre-registered N=10 run could finish, so it rests on the error census, the standalone test and 24 runs per variant. E12 was left out for the same reason.
+4. **E10 replaced the entropy check.** The pre-written check (pooled per-task turns sd) turned out to be as noisy as the effects at N=5: the same build scored 1.11 vs 1.36. The close calls were re-decided by a rule written before the N=10 head-to-head ran. E7 and E8 were rejected under it.
 
 **Other decisions:**
-4. **E4 adds a host message** (model-facing text), like the existing check gate. It is the change that moved pass rate. OK?
-5. **Opus 5.5 transport.** air speaks only `chat/completions`.
+5. **The prompt still says accept() is "required before the first edit or write".** After E11 that's a steer, not an enforced rule. Soften it? That would be a prompt change to measure separately, since E1 and E8 showed prompt edits move Flash.
+6. **E4 adds a host message** (model-facing text), like the existing check gate. It is the change that moved pass rate. OK?
+7. **Opus 5.5 transport.** air speaks only `chat/completions`.
    - The stored OpenCode key is Go-only: Zen answers "Model access is disabled" for every model.
    - Through an OpenAI-compatible shim, Claude would lose prompt-cache breakpoints, its thinking blocks and signatures (interleaved thinking), and the effort setting; `max_tokens` is also unset. *(Untested: inferred from the API shapes. Only the Zen probe above was run.)*
    - A native Messages-API path in llm.rs is the prerequisite for any Opus tuning. It is untestable without access, so it isn't built.
-6. **E7 (optional rituals) is the change most likely to help a stronger model.** It failed here only by not ruling out +0.3 turns on Flash. Worth one Opus run if Opus comes into scope.
-7. **Merging `tune-opus`.** It's one commit per accepted change (c7f3879, 9a4e8fb, 9e275a9) plus `tuning/`. The `exp/*` branches hold the rejected variants and can be deleted.
+8. **E7 (optional rituals) is the change most likely to help a stronger model.** It failed here only by not ruling out +0.3 turns on Flash. Worth one Opus run if Opus comes into scope.
+9. **Merging `tune-opus`.** It's one commit per accepted change (c7f3879, 9a4e8fb, 9e275a9, abdf2c9) plus `tuning/`. The `exp/*` branches hold the rejected variants and can be deleted.
 
 ## Final system prompt and tool description
 
