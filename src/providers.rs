@@ -19,6 +19,14 @@ pub struct Provider {
 
 pub type Providers = BTreeMap<String, Provider>;
 
+/// What to write when there is no provider yet; /providers manages them once one works.
+pub fn example(model: &str) -> String {
+    format!(
+        "put a provider in ~/.config/air/providers.toml, for example:\n\n[myprovider]\nbase_url = \"https://…/v1\"\n\
+         models = [\"{model}\"]"
+    )
+}
+
 fn file(home: &Path) -> PathBuf {
     home.join(".config/air/providers.toml")
 }
@@ -67,23 +75,14 @@ fn number(i: usize) -> String {
     ui::paint("2", &format!("{i:>3}"))
 }
 
-pub async fn menu(
-    home: &Path,
-    providers: &mut Providers,
-    fixed: Option<&Provider>,
-    current: &str,
-    editor: &mut DefaultEditor,
-) -> Result<()> {
+pub async fn menu(home: &Path, providers: &mut Providers, current: &str, editor: &mut DefaultEditor) -> Result<()> {
     if std::fs::read_to_string(file(home)).is_ok_and(|t| t.lines().any(|l| l.trim_start().starts_with('#'))) {
         ui::note("changes made here rewrite providers.toml without its comments");
     }
     let mark = |name: &str| if name == current { ui::paint("32", " ● current") } else { String::new() };
     loop {
         let names: Vec<String> = providers.keys().cloned().collect();
-        if let Some(p) = fixed {
-            let info = ui::paint("2", &format!("{}  {}  from config.toml", ui::printable(&p.base_url), key(p)));
-            println!("    config  {info}{}", mark("config"));
-        } else if names.is_empty() {
+        if names.is_empty() {
             ui::note("no providers yet");
         }
         for (i, name) in (1..).zip(&names) {
@@ -128,10 +127,6 @@ pub async fn menu(
 
 async fn add(home: &Path, providers: &mut Providers, editor: &mut DefaultEditor) -> Result<()> {
     let Some(name) = ask(editor, "name › ").filter(|n| !n.is_empty()) else { return Ok(()) };
-    if name == "config" {
-        ui::note("config is the provider built from base_url in config.toml; pick another name");
-        return Ok(());
-    }
     if providers.contains_key(&name) {
         ui::note(&format!("{name} already exists; edit it with e <n>"));
         return Ok(());

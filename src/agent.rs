@@ -87,14 +87,18 @@ impl Agent {
                 .model
                 .clone()
                 .or_else(|| config.providers.values().find_map(|p| p.models.first().cloned()))
-                .context("no model: pass -m or set model in ~/.config/air/config.toml")?;
+                .context(
+                    "no model: pass -m, set model in ~/.config/air/config.toml, or list one under a provider in \
+                     ~/.config/air/providers.toml",
+                )?;
             let only = config.providers.keys().next().filter(|_| config.providers.len() == 1);
-            let fallback = config.providers.get_key_value("config").map(|(name, _)| name).or(only);
-            let Some(provider) = holding(&config.providers, &model).or(fallback) else {
+            let Some(provider) = holding(&config.providers, &model).or(only) else {
+                if config.providers.is_empty() {
+                    anyhow::bail!("no provider for {model}: {}", crate::providers::example(&model));
+                }
                 let names: Vec<&str> = config.providers.keys().map(String::as_str).collect();
                 anyhow::bail!(
-                    "no provider for {model}: set base_url in ~/.config/air/config.toml or add one to \
-                     ~/.config/air/providers.toml; to use one of [{}], list {model} under it there",
+                    "no provider lists {model}: list it under one of [{}] in ~/.config/air/providers.toml",
                     names.join(", ")
                 );
             };
@@ -174,9 +178,8 @@ impl Agent {
             .iter()
             .flat_map(|(name, p)| p.models.iter().map(move |m| (name.clone(), m.clone())))
             .collect();
-        // A providers.toml entry that lists its models shows just those (/providers lists the rest it serves); the
-        // provider built from config.toml's base_url has only its default model, so its endpoint is asked.
-        if self.provider == "config" || self.config.providers.get(&self.provider).is_none_or(|p| p.models.is_empty()) {
+        // A provider that lists its models shows just those; /providers lists the rest of what it serves.
+        if self.config.providers.get(&self.provider).is_none_or(|p| p.models.is_empty()) {
             match self.llm.models().await {
                 Ok(listed) => known.extend(listed.into_iter().map(|m| (self.provider.clone(), m))),
                 Err(e) => ui::note(&format!("could not list {}'s models: {e:#}", self.provider)),
@@ -764,30 +767,26 @@ fn web(name: &str, base_url: &str) -> Result<()> {
     Ok(())
 }
 
-/// The provider that lists a model; the synthesized config fallback loses to a named provider.
+/// The provider that lists a model.
 fn holding<'a>(providers: &'a Providers, model: &str) -> Option<&'a String> {
-    providers
-        .iter()
-        .filter(|(name, _)| name.as_str() != "config")
-        .find(|(_, p)| p.models.iter().any(|m| m == model))
-        .or_else(|| providers.get_key_value("config").filter(|(_, p)| p.models.iter().any(|m| m == model)))
-        .map(|(name, _)| name)
+    providers.iter().find(|(_, p)| p.models.iter().any(|m| m == model)).map(|(name, _)| name)
 }
 
 fn connect(providers: &Providers, header: &Value) -> Result<(String, Llm)> {
     let model = header["model"].as_str().unwrap_or_default();
     let recorded = header["provider"].as_str();
     let listed = holding(providers, model).map(String::as_str);
-    let fallback = providers.get_key_value("config").or(providers.iter().next()).map(|(name, _)| name.as_str());
-    let name =
-        recorded.filter(|n| providers.contains_key(*n)).or(listed).or(fallback).context(
-            "no provider: set base_url in ~/.config/air/config.toml or add one to ~/.config/air/providers.toml",
-        )?;
+    let fallback = providers.keys().next().map(String::as_str);
+    let name = recorded
+        .filter(|n| providers.contains_key(*n))
+        .or(listed)
+        .or(fallback)
+        .with_context(|| format!("no provider: {}", crate::providers::example(model)))?;
     match recorded {
         Some(old) if old != name => {
             ui::note(&format!("provider {old} is gone; sending {model} to {name} (/models or /providers changes it)"))
         }
-        None if listed.is_none() && name != "config" && providers.len() > 1 => {
+        None if listed.is_none() && providers.len() > 1 => {
             ui::note(&format!("no provider lists {model}; using {name} (/models or /providers changes it)"))
         }
         _ => {}

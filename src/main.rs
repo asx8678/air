@@ -70,23 +70,22 @@ async fn start() -> Result<()> {
     }
     let root = PathBuf::from(String::from_utf8(top.stdout)?.trim()).canonicalize()?;
     let user = load(&home.join(".config/air/config.toml"))?;
-    check_profiles(&user)?;
+    check_config(&user)?;
     let repo = load(&root.join("air.toml"))?;
     let warn = |text: &str| {
         eprintln!("{text}");
         ui::record("note", text, serde_json::Value::Null);
     };
     if repo.model.is_some() || repo.base_url.is_some() || !repo.models.is_empty() {
-        warn("air.toml: model, base_url and models are ignored; set them in ~/.config/air/config.toml");
+        warn(
+            "air.toml: model, base_url and models are ignored; models go in ~/.config/air/config.toml, providers in \
+             ~/.config/air/providers.toml",
+        );
     }
     if !repo.env.is_empty() {
         warn("air.toml: env is ignored; set env in ~/.config/air/config.toml");
     }
-    let fallback = user.base_url.map(|base_url| {
-        let models = user.model.iter().cloned().collect();
-        providers::Provider { base_url, api_key: None, models }
-    });
-    let providers = with_config(providers::load(&home)?.unwrap_or_default(), &fallback);
+    let providers = providers::load(&home)?.unwrap_or_default();
     let picked = cli.model.clone().filter(|_| cli.resume);
     let config = Config {
         model: cli.model.or(user.model),
@@ -137,9 +136,8 @@ async fn start() -> Result<()> {
             "/providers" => match providers::load(&home) {
                 Ok(loaded) => {
                     let mut providers = loaded.unwrap_or_default();
-                    let fixed = fallback.as_ref().filter(|_| !providers.contains_key("config"));
-                    let result = providers::menu(&home, &mut providers, fixed, agent.provider(), &mut editor).await;
-                    agent.set_providers(with_config(providers, &fallback)).and(result)
+                    let result = providers::menu(&home, &mut providers, agent.provider(), &mut editor).await;
+                    agent.set_providers(providers).and(result)
                 }
                 Err(e) => Err(e),
             },
@@ -159,16 +157,6 @@ async fn start() -> Result<()> {
             eprintln!("error: {error}");
         }
     }
-}
-
-fn with_config(mut providers: providers::Providers, fallback: &Option<providers::Provider>) -> providers::Providers {
-    if let Some(provider) = fallback {
-        if providers.contains_key("config") {
-            ui::note("providers.toml: its [config] entry replaces base_url and model from config.toml");
-        }
-        providers.entry("config".into()).or_insert_with(|| provider.clone());
-    }
-    providers
 }
 
 async fn pick(agent: &mut agent::Agent, editor: &mut rustyline::DefaultEditor, filter: &str) -> Result<()> {
@@ -230,8 +218,12 @@ fn unknown(line: &str) -> Option<String> {
     })
 }
 
-/// Stops on a profile key air no longer reads, or on a compact_at it cannot use.
-fn check_profiles(user: &Config) -> Result<()> {
+/// Stops on a setting air no longer reads, or on a compact_at it cannot use.
+fn check_config(user: &Config) -> Result<()> {
+    if user.base_url.is_some() {
+        let model = user.model.as_deref().unwrap_or("model-id");
+        bail!("~/.config/air/config.toml sets base_url, which air no longer reads; {}", providers::example(model));
+    }
     for (model, profile) in &user.models {
         let at = format!("~/.config/air/config.toml: [models.\"{model}\"]");
         if let Some(key) = ["think_limit", "turn_tokens", "guidance"].into_iter().find(|k| profile.contains_key(*k)) {
@@ -246,7 +238,7 @@ fn check_profiles(user: &Config) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_profiles, unknown};
+    use super::{check_config, unknown};
 
     #[test]
     fn typos_are_not_tasks() {
@@ -260,11 +252,14 @@ mod tests {
 
     #[test]
     fn profiles_need_a_usable_compact_at() {
-        let check = |text: &str| check_profiles(&toml::from_str(text).expect("valid toml"));
+        let check = |text: &str| check_config(&toml::from_str(text).expect("valid toml"));
         assert!(check("[models.m]\ncompact_at = 200000\ntemperature = 1.0\n").is_ok());
         for bad in ["0", "100", "\"200k\"", "2.5e5"] {
             assert!(check(&format!("[models.m]\ncompact_at = {bad}\n")).is_err(), "{bad}");
         }
         assert!(check("[models.m]\nturn_tokens = 5\n").is_err());
+        let moved = check("model = \"m1\"\nbase_url = \"https://x.example/v1\"\n").unwrap_err().to_string();
+        assert!(moved.contains("providers.toml") && moved.contains("models = [\"m1\"]"), "{moved}");
+        assert!(!moved.contains("x.example"), "a base_url can carry credentials, so the message leaves it out");
     }
 }
