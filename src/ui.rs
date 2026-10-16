@@ -1,6 +1,8 @@
+use rustix::process::{Pid, Signal, kill_process_group};
+use rustix::stdio::{stdin, stdout};
+use rustix::termios::{OptionalActions, Termios, tcgetattr, tcgetwinsize, tcsetattr};
 use serde_json::Value;
 use std::io::{IsTerminal, Write};
-use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -17,7 +19,7 @@ struct Bar {
 static BAR: Mutex<Option<Bar>> = Mutex::new(None);
 static STEP: AtomicUsize = AtomicUsize::new(0);
 static EVENTS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
-static TERMIOS: OnceLock<libc::termios> = OnceLock::new();
+static TERMIOS: OnceLock<Termios> = OnceLock::new();
 static BARRED: AtomicBool = AtomicBool::new(false);
 pub static CHECK: AtomicI32 = AtomicI32::new(0);
 
@@ -41,10 +43,8 @@ pub fn printable(text: &str) -> String {
 
 /// The terminal's rows and columns, asked of the tty itself: the ticker calls this every second.
 fn size() -> Option<(u16, u16)> {
-    let tty = std::fs::File::open("/dev/tty").ok()?;
-    let mut ws = libc::winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
-    let asked = unsafe { libc::ioctl(tty.as_raw_fd(), libc::TIOCGWINSZ, &raw mut ws) } == 0;
-    Some((ws.ws_row, ws.ws_col)).filter(|&(rows, cols)| asked && rows >= 5 && cols >= 20)
+    let ws = tcgetwinsize(std::fs::File::open("/dev/tty").ok()?).ok()?;
+    Some((ws.ws_row, ws.ws_col)).filter(|&(rows, cols)| rows >= 5 && cols >= 20)
 }
 
 pub struct Turn(Option<tokio::task::JoinHandle<()>>);
@@ -91,8 +91,7 @@ impl Drop for Turn {
 }
 
 pub fn guard() {
-    let mut saved: libc::termios = unsafe { std::mem::zeroed() };
-    if unsafe { libc::tcgetattr(0, &raw mut saved) } == 0 {
+    if let Ok(saved) = tcgetattr(stdin()) {
         let _ = TERMIOS.set(saved);
     }
     for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
@@ -105,16 +104,17 @@ pub fn guard() {
 extern "C" fn quit(signal: libc::c_int) {
     let group = CHECK.load(Ordering::Relaxed);
     let reset: &[u8] = if BARRED.load(Ordering::Relaxed) { b"\x1b7\x1b[999;1H\x1b[2K\x1b[r\x1b8\n" } else { b"" };
-    unsafe {
-        if group > 1 {
-            libc::kill(-group, libc::SIGKILL);
-        }
-        if let Some(saved) = TERMIOS.get() {
-            libc::tcsetattr(0, libc::TCSANOW, saved);
-        }
-        libc::write(1, reset.as_ptr().cast(), reset.len());
-        libc::_exit(128 + signal);
+    // Only async-signal-safe calls from here: each is one system call.
+    if group > 1
+        && let Some(group) = Pid::from_raw(group)
+    {
+        let _ = kill_process_group(group, Signal::KILL);
     }
+    if let Some(saved) = TERMIOS.get() {
+        let _ = tcsetattr(stdin(), OptionalActions::Now, saved);
+    }
+    let _ = rustix::io::write(stdout(), reset);
+    unsafe { libc::_exit(128 + signal) };
 }
 
 fn reserve(rows: u16) {

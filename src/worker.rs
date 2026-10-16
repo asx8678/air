@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
+use rustix::process::{Pid, Signal, getpgrp, kill_process, kill_process_group};
 use serde_json::{Value, json};
 use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
 use std::path::{Path, PathBuf};
@@ -105,8 +106,8 @@ impl Worker {
             return Ok(None);
         }
         self.busy = false;
-        if let Some(pid) = self.child.id() {
-            unsafe { libc::kill(pid.cast_signed(), libc::SIGINT) };
+        if let Some(pid) = self.child.id().and_then(|pid| Pid::from_raw(pid.cast_signed())) {
+            let _ = kill_process(pid, Signal::INT);
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         loop {
@@ -132,9 +133,9 @@ impl Drop for Worker {
 
 /// SIGKILLs these process groups, never low's own or groups 0 and 1.
 pub fn kill_groups(groups: impl IntoIterator<Item = i32>) {
-    let own = unsafe { libc::getpgrp() };
-    for group in groups.into_iter().filter(|&g| g > 1 && g != own) {
-        unsafe { libc::kill(-group, libc::SIGKILL) };
+    let own = Pid::as_raw(Some(getpgrp()));
+    for group in groups.into_iter().filter(|&g| g > 1 && g != own).filter_map(Pid::from_raw) {
+        let _ = kill_process_group(group, Signal::KILL);
     }
 }
 
