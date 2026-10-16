@@ -16,3 +16,29 @@ With N=5, one task's pass rate moves in 20-point steps, and a difference of unde
 ## Baseline
 
 `main` = 6e5278f (the harness unchanged; `tune-opus` only adds `tuning/`). The external baseline is OpenCode 2.0.29 with the same model, N=1.
+
+| metric (pooled, 75 runs) | main |
+|---|---|
+| pass | 74/75 (review #4 found 4 of 6 planted bugs) |
+| turns per task | 3.4–9.6 (mean 5.8) |
+| cache efficiency (cached ÷ previous request's prompt) | 98.5% |
+| first request | 1,682 prompt tokens |
+| output that is reasoning | 56% |
+| tool errors | 17 (5 rejected before acting, 3 failed edits) |
+| verdicts | VERIFIED 51 · NO CHANGES 14 · NO CHECK 10 |
+| upstreams the gateway picked | `deepseek/…` 52 · `deepseek-ai/…` 23 sessions |
+
+Diffs vary a lot: pairwise normalized edit distance is 0.4–0.5 on fix, feature, review, c-python and c-window, with 5 distinct diffs in 5 runs on most code tasks. So the entropy left is in *what code the model writes*, not in the harness's decisions.
+
+## A0 · Prompt prefix and caching (analysis, no change)
+
+- **Hypothesis:** something air sends breaks the cached prefix mid-turn.
+- **Evidence:** each request's `cached_tokens` equals the previous request's prompt, rounded down to the provider's 64–128-token blocks. Cache efficiency is 98.5% over 75 sessions. The per-request "cache hit rate" (79–88%) is low only because each run's new output can't be cached yet.
+- **Decision:** nothing to fix.
+- Found on the way: the gateway routes sessions to two upstreams. That is run-to-run variance air can't control; mechanics.py now reports it.
+
+## A1 · Nearest-match text on a failed edit (analysis, not built)
+
+- **Hypothesis:** returning the closest lines on "old text not found" saves a re-read turn.
+- **Evidence:** of the 13 not-found/occurs failures in all logged sessions, 9 were fixed by the very next run with no re-read in between. One Flash case needed a re-read and 2 runs. The baseline had 1 "occurs 4 times" in 75 runs, fixed the next run.
+- **Decision:** not built. It would save at most ~4 requests in ~4,100 runs, and it adds code. Rejected by the decision rule.
