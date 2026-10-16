@@ -22,13 +22,19 @@ pub type Providers = BTreeMap<String, Provider>;
 /// What to write when there is no provider yet; /providers manages them once one works.
 pub fn example(model: &str) -> String {
     format!(
-        "put a provider in ~/.config/air/providers.toml, for example:\n\n[myprovider]\nbase_url = \"https://…/v1\"\n\
+        "put a provider in ~/.config/low/providers.toml, for example:\n\n[myprovider]\nbase_url = \"https://…/v1\"\n\
          models = [\"{model}\"]"
     )
 }
 
+/// low's config directory, ~/.config/low; a setup made before the rename from air still loads from ~/.config/air.
+pub fn config_dir(home: &Path) -> PathBuf {
+    let (new, old) = (home.join(".config/low"), home.join(".config/air"));
+    if !new.exists() && old.exists() { old } else { new }
+}
+
 fn file(home: &Path) -> PathBuf {
-    home.join(".config/air/providers.toml")
+    config_dir(home).join("providers.toml")
 }
 
 pub fn load(home: &Path) -> Result<Option<Providers>> {
@@ -140,7 +146,7 @@ async fn add(home: &Path, providers: &mut Providers, editor: &mut DefaultEditor)
         ui::note(&format!("{} is not an http(s) URL; nothing added", ui::printable(&base_url)));
         return Ok(());
     }
-    let Some(key) = ask(editor, "api key (enter uses AIR_API_KEY or ~/.config/air/api_key, none sends no key) › ")
+    let Some(key) = ask(editor, "api key (enter uses LOW_API_KEY or ~/.config/low/api_key, none sends no key) › ")
     else {
         return Ok(());
     };

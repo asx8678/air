@@ -13,7 +13,7 @@ const HERMETIC: &str = "TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8 NO_COLOR=1 CLICOLOR=0
                         PAGER=cat GIT_PAGER=cat GIT_TERMINAL_PROMPT=0 PYTHONHASHSEED=0 PYTHONUTF8=1 PYTHONDONTWRITEBYTECODE=1";
 const CACHES: &str =
     "XDG_CACHE_HOME GOCACHE UV_CACHE_DIR PIP_CACHE_DIR PRE_COMMIT_HOME npm_config_cache PYTHONPYCACHEPREFIX";
-const SECRETS: &str = ".air, .config/air, .ssh, .gnupg, .aws, .azure, .kube, .docker, .netrc, .pi, .config/gh, \
+const SECRETS: &str = ".low, .config/low, .air, .config/air, .ssh, .gnupg, .aws, .azure, .kube, .docker, .netrc, .pi, .config/gh, \
                        .config/gcloud, .config/op, .password-store, .git-credentials, .config/git/credentials, \
                        .npmrc, .pypirc, .cargo/credentials, .cargo/credentials.toml, .vault-token, .claude, \
                        .claude.json, .codex, .zsh_history, .zsh_sessions, .bash_history, .python_history, \
@@ -57,8 +57,8 @@ impl Worker {
             );
         }
         let mut child = sandboxed(root, yolo, &python(), &["-I", "-B", "-u", "-c", include_str!("worker.py")])
-            .env("AIR_CHECK", if check.is_some() { "1" } else { "" })
-            .env("AIR_FMT", fmt.unwrap_or_default())
+            .env("LOW_CHECK", if check.is_some() { "1" } else { "" })
+            .env("LOW_FMT", fmt.unwrap_or_default())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .process_group(0)
@@ -196,7 +196,7 @@ pub fn sandboxed(root: &Path, yolo: bool, program: &str, args: &[&str]) -> Comma
     };
     let mut hasher = std::hash::DefaultHasher::new();
     root.hash(&mut hasher);
-    let cache = std::env::temp_dir().join(format!("air-cache/{:016x}", hasher.finish()));
+    let cache = std::env::temp_dir().join(format!("low-cache/{:016x}", hasher.finish()));
     let _ = std::fs::create_dir_all(&cache);
     let extra = EXTRA_ENV.get().into_iter().flatten().map(String::as_str);
     let allowed: Vec<&str> = ENV.split_whitespace().chain(extra).collect();
@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn picks_the_newest_runnable_python() {
-        let base = std::env::temp_dir().join(format!("air-python-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("low-python-{}", std::process::id()));
         let (first, second) = (base.join("a"), base.join("b"));
         for (dir, name, mode) in [
             (&first, "python3.9", 0o755),

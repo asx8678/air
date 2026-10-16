@@ -50,9 +50,9 @@ const HELPERS: &[&str] = &["sh", "show", "accept", "edit", "write", "check", "pl
 const SANDBOX: &str = "\n\n## Sandbox\nYour code runs in a sandbox. Writes outside the repo and temp dirs fail, as do \
                        writes into any .git directory and reads of credentials and private data in the home directory \
                        (ssh and cloud keys, shell history, browser data, other tools' configs). Only a fixed set of \
-                       environment variables is passed through (env = [\"NAME\"] in ~/.config/air/config.toml adds more).";
+                       environment variables is passed through (env = [\"NAME\"] in ~/.config/low/config.toml adds more).";
 static GIT_GUARD: OnceLock<(String, Vec<String>)> = OnceLock::new();
-/// One git at a time on air's index: a snapshot abandoned by Ctrl-C keeps running on the blocking pool.
+/// One git at a time on low's index: a snapshot abandoned by Ctrl-C keeps running on the blocking pool.
 static INDEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 const MACOS: &str = " Internet and DNS are off (localhost works); nested sandbox-exec fails, and Unix sockets work only \
                      under the repo's tmp/ directory.";
@@ -91,8 +91,8 @@ impl Agent {
                 .clone()
                 .or_else(|| config.providers.values().find_map(|p| p.models.first().cloned()))
                 .context(
-                    "no model: pass -m, set model in ~/.config/air/config.toml, or list one under a provider in \
-                     ~/.config/air/providers.toml",
+                    "no model: pass -m, set model in ~/.config/low/config.toml, or list one under a provider in \
+                     ~/.config/low/providers.toml",
                 )?;
             let only = config.providers.keys().next().filter(|_| config.providers.len() == 1);
             let Some(provider) = holding(&config.providers, &model).or(only) else {
@@ -101,7 +101,7 @@ impl Agent {
                 }
                 let names: Vec<&str> = config.providers.keys().map(String::as_str).collect();
                 anyhow::bail!(
-                    "no provider lists {model}: list it under one of [{}] in ~/.config/air/providers.toml",
+                    "no provider lists {model}: list it under one of [{}] in ~/.config/low/providers.toml",
                     names.join(", ")
                 );
             };
@@ -277,7 +277,7 @@ impl Agent {
         (self.pending, self.restarts, self.broken, self.passed) = (None, 0, None, None);
         self.session.flush()?;
         let clock = Instant::now();
-        let why = "air's change detection (a private git index, not your staging area) could not snapshot the tree";
+        let why = "low's change detection (a private git index, not your staging area) could not snapshot the tree";
         let start = self.tree().await.context(why)?;
         let snapshot_ms = clock.elapsed().as_millis() as u64;
         self.session
@@ -510,7 +510,7 @@ impl Agent {
                 }
                 let (ok, out) = match self.config.check.clone() {
                     Some(check) => self.verify(&check, false).await,
-                    None => (false, "no check command configured (set check in air.toml)".into()),
+                    None => (false, "no check command configured (set check in low.toml)".into()),
                 };
                 reply = self.worker()?.resume(ok, &out).await?;
             }
@@ -638,14 +638,14 @@ impl Agent {
                 .as_deref()
                 .unwrap_or_default()
                 .split(|c: char| c.is_whitespace() || "'\"();&|<>=`".contains(c));
-            path == "air.toml" || words.map(|w| w.trim_start_matches("./")).any(|w| w == path)
+            path == "low.toml" || path == "air.toml" || words.map(|w| w.trim_start_matches("./")).any(|w| w == path)
         };
         let inputs: Vec<String> = changes.lines().filter_map(path).filter(|p| named(p)).collect();
         let (check, verdict) = match (changed, checked, &self.config.check) {
             (false, _, _) => ("-", "NO CHANGES"),
             (true, true, _) if !inputs.is_empty() => ("passed, but this turn changed what it runs", "UNVERIFIED"),
             (true, true, _) => ("passed on the final tree", "VERIFIED"),
-            (true, false, None) => ("none configured: set check in air.toml", "NO CHECK"),
+            (true, false, None) => ("none configured: set check in low.toml", "NO CHECK"),
             (true, false, Some(_)) => ("not passed on the final tree", "UNVERIFIED"),
         };
         let checked = checked && inputs.is_empty();
@@ -664,7 +664,7 @@ impl Agent {
         }
         rows.push(("changes", changes.clone()));
         if !outside.is_empty() {
-            let text = format!("not through air's edit()/write(), maybe outside air: {}", outside.join(", "));
+            let text = format!("not through low's edit()/write(), maybe outside low: {}", outside.join(", "));
             rows.push(("outside", text));
         }
         if let Some(tree) = snapshot.filter(|_| changed) {
@@ -683,7 +683,7 @@ impl Agent {
             let undo = match (outside.is_empty(), modified.is_empty()) {
                 (true, _) => format!("git restore --source={short} --worktree -- .  (new files stay)"),
                 (false, false) => format!(
-                    "git restore --source={short} --worktree -- {}  (air's edit()/write() paths; new files stay)",
+                    "git restore --source={short} --worktree -- {}  (low's edit()/write() paths; new files stay)",
                     modified.iter().map(|p| quoted(p)).collect::<Vec<_>>().join(" ")
                 ),
                 (false, true) => format!("git restore --source={short} --worktree -- <path>  (new files stay)"),
@@ -822,7 +822,7 @@ fn connect(providers: &Providers, header: &Value) -> Result<(String, Llm)> {
 }
 
 async fn grouped(mut cmd: tokio::process::Command) -> Result<(bool, String)> {
-    let path = std::env::temp_dir().join(format!("air-check-{}-{}", std::process::id(), ui::now_ms()));
+    let path = std::env::temp_dir().join(format!("low-check-{}-{}", std::process::id(), ui::now_ms()));
     let mut file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(&path)?;
     let _ = std::fs::remove_file(&path);
     let mut child = cmd.stdin(Stdio::null()).stdout(file.try_clone()?).process_group(0).spawn()?;
@@ -924,7 +924,7 @@ fn guard_git(root: &Path) {
     }
     if !local.is_empty() {
         ui::note(&format!(
-            ".git/config defines filter or diff drivers ({}); air's own git calls skip them",
+            ".git/config defines filter or diff drivers ({}); low's own git calls skip them",
             local.join(", ")
         ));
     }
@@ -943,7 +943,7 @@ fn context(root: &Path, config: &Config, yolo: bool) -> serde_json::Map<String, 
         (false, false) => "bwrap",
     };
     let context = json!({
-        "air": format!("{} {}", env!("CARGO_PKG_VERSION"), env!("AIR_BUILD")),
+        "low": format!("{} {}", env!("CARGO_PKG_VERSION"), env!("LOW_BUILD")),
         "pid": std::process::id(), "os": std::env::consts::OS, "arch": std::env::consts::ARCH,
         "branch": rev(&["symbolic-ref", "--short", "-q", "HEAD"]),
         "head": rev(&["rev-parse", "-q", "--verify", "HEAD"]),

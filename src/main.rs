@@ -15,7 +15,7 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(version = concat!(env!("CARGO_PKG_VERSION"), " ", env!("AIR_BUILD")), about = "Minimal code-mode coding agent. Without a task it starts a REPL (/compact, /cost, /think, /models [filter], /providers).")]
+#[command(version = concat!(env!("CARGO_PKG_VERSION"), " ", env!("LOW_BUILD")), about = "A low-entropy, code-mode coding agent. Without a task it starts a REPL (/compact, /cost, /think, /models [filter], /providers).")]
 struct Cli {
     #[arg(help = "Run this task once and exit (status 1 when a configured check did not pass on the final tree or the turn stopped short)")]
     task: Option<String>,
@@ -23,7 +23,7 @@ struct Cli {
     resume: bool,
     #[arg(short, long, help = "Model for a new session; with --resume it switches the session to it (so does /models)")]
     model: Option<String>,
-    #[arg(long, help = "No sandbox: network on, writes anywhere (env vars stay filtered; env = [...] in ~/.config/air/config.toml passes more)")]
+    #[arg(long, help = "No sandbox: network on, writes anywhere (env vars stay filtered; env = [...] in ~/.config/low/config.toml passes more)")]
     yolo: bool,
 }
 
@@ -62,28 +62,32 @@ async fn start() -> Result<()> {
     let cli = Cli::parse();
     let home = PathBuf::from(std::env::var("HOME")?);
     if cli.task.as_deref().is_some_and(|t| t.trim().is_empty()) {
-        bail!("the task is empty: give air something to do, or run it without a task for the REPL");
+        bail!("the task is empty: give low something to do, or run it without a task for the REPL");
     }
     let top = std::process::Command::new("git").args(["rev-parse", "--show-toplevel"]).output()?;
     if !top.status.success() {
-        bail!("air works inside a git repository (git is the undo)");
+        bail!("low works inside a git repository (git is the undo)");
     }
     let root = PathBuf::from(String::from_utf8(top.stdout)?.trim()).canonicalize()?;
-    let user = load(&home.join(".config/air/config.toml"))?;
+    let user = load(&providers::config_dir(&home).join("config.toml"))?;
     check_config(&user)?;
-    let repo = load(&root.join("air.toml"))?;
+    // low.toml; a repo set up before the rename from air keeps its air.toml.
+    let repo_file = if !root.join("low.toml").exists() && root.join("air.toml").exists() { "air.toml" } else { "low.toml" };
+    let repo = load(&root.join(repo_file))?;
     let warn = |text: &str| {
         eprintln!("{text}");
         ui::record("note", text, serde_json::Value::Null);
     };
     if repo.model.is_some() || repo.base_url.is_some() || !repo.models.is_empty() {
         warn(
-            "air.toml: model, base_url and models are ignored; models go in ~/.config/air/config.toml, providers in \
-             ~/.config/air/providers.toml",
+            &format!(
+                "{repo_file}: model, base_url and models are ignored; models go in ~/.config/low/config.toml, providers \
+                 in ~/.config/low/providers.toml"
+            ),
         );
     }
     if !repo.env.is_empty() {
-        warn("air.toml: env is ignored; set env in ~/.config/air/config.toml");
+        warn(&format!("{repo_file}: env is ignored; set env in ~/.config/low/config.toml"));
     }
     let providers = providers::load(&home)?.unwrap_or_default();
     let picked = cli.model.clone().filter(|_| cli.resume);
@@ -218,16 +222,16 @@ fn unknown(line: &str) -> Option<String> {
     })
 }
 
-/// Stops on a setting air no longer reads, or on a compact_at it cannot use.
+/// Stops on a setting low no longer reads, or on a compact_at it cannot use.
 fn check_config(user: &Config) -> Result<()> {
     if user.base_url.is_some() {
         let model = user.model.as_deref().unwrap_or("model-id");
-        bail!("~/.config/air/config.toml sets base_url, which air no longer reads; {}", providers::example(model));
+        bail!("~/.config/low/config.toml sets base_url, which low no longer reads; {}", providers::example(model));
     }
     for (model, profile) in &user.models {
-        let at = format!("~/.config/air/config.toml: [models.\"{model}\"]");
+        let at = format!("~/.config/low/config.toml: [models.\"{model}\"]");
         if let Some(key) = ["think_limit", "turn_tokens", "guidance"].into_iter().find(|k| profile.contains_key(*k)) {
-            bail!("{at} sets {key}, which air no longer supports; remove it");
+            bail!("{at} sets {key}, which low no longer supports; remove it");
         }
         if let Some(value) = profile.get("compact_at").filter(|v| v.as_u64().is_none_or(|n| n < 1024)) {
             bail!("{at} sets compact_at = {value}; it takes a whole number of tokens, at least 1024");

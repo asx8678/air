@@ -2,8 +2,8 @@ import ast, contextlib, ctypes, difflib, importlib.util, json, linecache, os, re
 
 ROOT = os.getcwd()
 sys.path.append(ROOT)
-CHECK = os.environ.pop("AIR_CHECK", "")
-FMT = os.environ.pop("AIR_FMT", "")
+CHECK = os.environ.pop("LOW_CHECK", "")
+FMT = os.environ.pop("LOW_FMT", "")
 HALF = 16000
 LIMIT = 8 << 20
 RUN_CAP = 570
@@ -114,7 +114,7 @@ def _change(tool, path, make):
             raise ValueError(f"{path} is off limits: git runs code from there outside the sandbox")
         st = os.stat(real) if os.path.lexists(real) else None
         if st and stat.S_ISREG(st.st_mode) and (st.st_nlink > 1 or st.st_dev != os.stat(ROOT).st_dev):
-            raise ValueError(f"{path} has other hard links or lives on another volume; air will not change it")
+            raise ValueError(f"{path} has other hard links or lives on another volume; low will not change it")
         before, written = make(os.path.join(ROOT, rel), rel)
         delta = [l[0] for l in difflib.unified_diff(before.splitlines(), written.splitlines(), lineterm="")][2:]
         _report.setdefault("actions", []).append(
@@ -254,7 +254,7 @@ def accept(criteria):
 
 def check():
     if not CHECK:
-        print("no check command configured (set check in air.toml)")
+        print("no check command configured (set check in low.toml)")
         return None
     ran = len(_report.get("cmds", []))
     _outbox.write(json.dumps({"needs_check": True, "actions": _report.get("actions", []), "cmds": _report.get("cmds", [])}) + "\n")
@@ -312,7 +312,7 @@ class _Helpers:
         return TOOLS[spec.name.split("_")[0]]
 
     def exec_module(self, module):
-        print(f"[import {module.__spec__.name}: air's helpers are built in; no import needed]")
+        print(f"[import {module.__spec__.name}: low's helpers are built in; no import needed]")
 
 
 sh.sh = sys.modules["sh"] = sh
@@ -357,7 +357,7 @@ for request in _inbox:
     shadowed = [name for name, tool in TOOLS.items() if G.get(name) is not tool]
     if shadowed:
         _report["shadowed"] = shadowed
-        print(f"[{', '.join(shadowed)}: air's helpers, restored before the next run]")
+        print(f"[{', '.join(shadowed)}: low's helpers, restored before the next run]")
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     if _report.get("check") and _tree() != _checked:
         _report["check"] = False

@@ -1,5 +1,7 @@
 # air tuning report
 
+*After this round, air was renamed **low** (crate, command, `low.toml`, `~/.config/low`, `~/.low/sessions`); the old names still load. This report keeps the names in use at the time.*
+
 Branch `tune-opus` from `main` (6e5278f), 2026-10-16. The details for every result are in [EXPERIMENTS.md](EXPERIMENTS.md), the harness as found is in [INVENTORY.md](INVENTORY.md), and the suite is [bench/](bench/README.md). Every number below comes from `bench.py report` and `mechanics.py` over `bench/results.jsonl` (1,675 runs).
 
 **Scope.** The brief asked to tune air for Opus 5.5, with Flash as a cheap first tier. By your instruction, everything was measured on `deepseek-v4.1-flash` (OpenCode Go) only. **Tier 2 was not run,** so every prompt-wording result below holds for Flash and is unvalidated on Opus.

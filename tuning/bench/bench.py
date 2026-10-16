@@ -58,7 +58,9 @@ def build(variant):
     if variant == "opencode":
         return None, "opencode"
     sha = sh(["git", "rev-parse", "--short=10", variant + "^{commit}"], cwd=AIR).strip()
-    out = os.path.join(CACHE, "bin", sha, "air")
+    # The binary is named after the crate at that commit: air before the rename, low after.
+    name = re.search(r'^name = "([\w-]+)"', sh(["git", "show", f"{sha}:Cargo.toml"], cwd=AIR), re.M).group(1)
+    out = os.path.join(CACHE, "bin", sha, name)
     os.makedirs(CACHE, exist_ok=True)
     with open(os.path.join(CACHE, "build.lock"), "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)  # one build at a time in the shared worktree
@@ -79,7 +81,7 @@ def _build(sha, out):
     print(f"building air {sha} …", flush=True)
     sh(["cargo", "build", "--release", "-q"], cwd=wt, timeout=1800)
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    shutil.copy2(os.path.join(wt, "target", "release", "air"), out)
+    shutil.copy2(os.path.join(wt, "target", "release", os.path.basename(out)), out)
 
 
 def prepare(names):

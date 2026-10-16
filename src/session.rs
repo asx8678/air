@@ -1,4 +1,4 @@
-//! A session is one JSONL file in ~/.air/sessions, named <unix secs>-<pid>. Line 0 is the header: settings, cwd,
+//! A session is one JSONL file in ~/.low/sessions (sessions from before the rename from air stay in ~/.air/sessions), named <unix secs>-<pid>. Line 0 is the header: settings, cwd,
 //! build, git and sandbox. Each later line is one of
 //! - a message {role, content, tool_calls?, reasoning_content?, meta}: an assistant's meta holds the request's
 //!   usage, timing, request and response; a tool's meta holds the run's actions, commands, errors and ms
@@ -38,7 +38,7 @@ impl Session {
         profile: Map<String, Value>,
         context: Map<String, Value>,
     ) -> Result<Self> {
-        let dir = home.join(".air/sessions");
+        let dir = home.join(".low/sessions");
         DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
         let secs = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let path = dir.join(format!("{secs}-{}.jsonl", std::process::id()));
@@ -70,20 +70,20 @@ impl Session {
     }
 
     pub fn resume(home: &Path, root: &Path, context: Map<String, Value>) -> Result<Self> {
-        let mut paths: Vec<PathBuf> = fs::read_dir(home.join(".air/sessions"))
-            .into_iter()
-            .flatten()
-            .flatten()
+        // Sessions from before the rename from air stay in ~/.air/sessions; the newest of both is resumed.
+        let mut paths: Vec<PathBuf> = [".low/sessions", ".air/sessions"]
+            .iter()
+            .flat_map(|dir| fs::read_dir(home.join(dir)).into_iter().flatten().flatten())
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
             .collect();
-        paths.sort();
+        paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
         for path in paths.into_iter().rev() {
             let Ok(Some(Ok(first))) = File::open(&path).map(|f| BufReader::new(f).lines().next()) else { continue };
             if serde_json::from_str::<Value>(&first).is_ok_and(|header| header["cwd"] == json!(root)) {
                 let mut file = OpenOptions::new().append(true).open(&path)?;
                 if file.try_lock().is_err() {
-                    bail!("{} is in use by another air", path.display());
+                    bail!("{} is in use by another low", path.display());
                 }
                 let mut text = fs::read_to_string(&path)?;
                 let cut = text.rfind('\n').map_or(0, |i| i + 1);
@@ -207,7 +207,7 @@ impl Session {
     }
 }
 
-/// Every way out of air short of a signal drops the session, so each run ends with its totals.
+/// Every way out of low short of a signal drops the session, so each run ends with its totals.
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.flush();
@@ -215,7 +215,7 @@ impl Drop for Session {
         let mut totals = crate::stats::totals(&self.entries[from..]);
         totals["ms"] = (clock.elapsed().as_millis() as u64).into();
         let _ = self.push(json!({"end": totals}));
-        // One per session would pile up in ~/.air/sessions; a resumed session builds a fresh one.
+        // One per session would pile up in ~/.low/sessions; a resumed session builds a fresh one.
         let _ = std::fs::remove_file(self.index());
     }
 }

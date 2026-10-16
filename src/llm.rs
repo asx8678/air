@@ -4,8 +4,8 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 pub const TEMPERATURE: f64 = 0.0;
-/// What air calls itself on the wire.
-const USER_AGENT: &str = concat!("air/", env!("CARGO_PKG_VERSION"));
+/// What low calls itself on the wire.
+const USER_AGENT: &str = concat!("low/", env!("CARGO_PKG_VERSION"));
 const LONG: Duration = Duration::from_secs(150);
 const FIRST_BYTE: Duration = Duration::from_secs(90);
 const IDLE: Duration = Duration::from_secs(300);
@@ -33,7 +33,7 @@ const WINDOW: &[&str] = &[
 ];
 const QUOTA: &str = "insufficient_quota";
 const REJECTED: &[&str] = &["invalid", "authentication", "permission", "not_found", "insufficient_quota"];
-/// Stream chunk fields air reads itself or that carry nothing; the rest (id, model, provider, …) go in the log.
+/// Stream chunk fields low reads itself or that carry nothing; the rest (id, model, provider, …) go in the log.
 const CHUNK: &[&str] = &["choices", "object", "created", "usage", "error", "obfuscation"];
 const HEADERS: &[&str] = &["request-id", "cf-ray", "server", "via", "retry-after", "server-timing"];
 
@@ -107,8 +107,8 @@ pub fn params(header: &Value) -> Value {
 }
 
 /// OpenCode's gateway refuses requests without `x-opencode-session`, a stable id per
-/// conversation it routes by. That is its protocol, not air's identity — the User-Agent above
-/// is where air names itself.
+/// conversation it routes by. That is its protocol, not low's identity — the User-Agent above
+/// is where low names itself.
 fn session_id(base_url: &str, header: &Value) -> Option<String> {
     let host = base_url.rsplit_once("://").map_or(base_url, |(_, rest)| rest);
     let host = host.split('/').next().unwrap_or("");
@@ -141,7 +141,7 @@ fn window(error: &str) -> Option<u64> {
 }
 
 pub fn key_file() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/air/api_key")
+    crate::providers::config_dir(&std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())).join("api_key")
 }
 
 /// The URL without credentials, fit for the session log.
@@ -189,6 +189,7 @@ impl Llm {
             base: base_url.trim_end_matches('/').into(),
             key: key
                 .map(String::from)
+                .or_else(|| std::env::var("LOW_API_KEY").ok())
                 .or_else(|| std::env::var("AIR_API_KEY").ok())
                 .or_else(|| std::fs::read_to_string(key_file()).ok())
                 .map(|k| k.trim().to_string())
@@ -598,7 +599,7 @@ mod tests {
 
     #[test]
     fn names_itself() {
-        assert!(USER_AGENT.starts_with("air/"));
+        assert!(USER_AGENT.starts_with("low/"));
     }
 
     #[test]

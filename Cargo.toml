@@ -1,9 +1,15 @@
 [package]
-name = "air"
+name = "low"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
-description = "Minimal code-mode coding agent"
+description = "A low-entropy, code-mode coding agent: one sandboxed Python tool, verified diffs, git as the undo"
+license = "MIT"
+repository = "https://github.com/asx8678/low"
+readme = "README.md"
+keywords = ["agent", "llm", "coding-agent", "cli", "sandbox"]
+categories = ["command-line-utilities", "development-tools"]
+include = ["src/**/*", "build.rs", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE"]
 
 [dependencies]
 anyhow = "1.0.104"
