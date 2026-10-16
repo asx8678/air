@@ -483,8 +483,12 @@ impl Llm {
         if !thinking.is_empty() {
             message["reasoning_content"] = thinking.into();
         }
+        // Which way the reasoning came: a stream field, or <think> tags in the text.
         if let Some(field) = via {
             self.field.set(field);
+            message["meta"]["reasoning_field"] = field.into();
+        } else if message["reasoning_content"].is_string() {
+            message["meta"]["reasoning_field"] = "inline".into();
         }
         if !calls.is_empty() {
             message["tool_calls"] = calls
