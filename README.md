@@ -40,7 +40,7 @@ cost      3 requests · 2 runs · 4.9k tok in · 266 tok out · 0:10
 - **Low entropy.** A short system prompt, deterministic harness decisions, rule-based context compaction, and no hidden LLM calls.
 - **Any OpenAI-compatible model.** Point it at any `/chat/completions` endpoint.
 
-In a [15-task benchmark](https://github.com/asx8678/low/blob/main/tuning/REPORT.md) with the same model (DeepSeek V4.1 Flash), OpenCode needed about 1.3× low's round trips, 2.5× its tool calls and 2× its uncached input tokens.
+In a [15-task benchmark](https://github.com/asx8678/low/blob/7d9ab8a/tuning/REPORT.md) with the same model (DeepSeek V4.1 Flash), OpenCode needed about 1.3× low's round trips, 2.5× its tool calls and 2× its uncached input tokens.
 
 ## Install
 
