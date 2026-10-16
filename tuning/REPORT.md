@@ -14,7 +14,7 @@ Branch `tune-opus` from `main` (6e5278f), 2026-10-16. The details for every resu
   - **E9** · the final message reports what changed, how it was verified, and what is still open.
 - **Against main, interleaved at N=10 per task:** pass **150/150 vs 147/150** (+2.0pp [0.0, +4.0]), with turns, tokens and wall time unchanged within noise. Tool errors per run fell 0.17 → 0.10.
 - **Rejected, with numbers:** every prompt cut (E1, E2, E7, E8), both effort settings (E5, E6), and the nearest-match edit error (A1). For Flash, the example and the numbered workflow are what make it batch its work: removing the example costs +0.8 turns per task at N=10.
-- **At N=5, Flash's run-to-run noise is as large as most prompt effects.** The same build's per-task turns move ±0.4–1.4 between batches, and the gateway splits sessions over two upstreams. Close calls were settled with an interleaved N=10 head-to-head (E10).
+- **At N=5, Flash's run-to-run noise is as large as most prompt effects.** The same build's per-task turns move ±0.4–1.4 between batches. Close calls were settled with an interleaved N=10 head-to-head (E10).
 - **One analysis bug, found and fixed mid-way:** pooled numbers weren't task-balanced. All decisions were recomputed.
 
 ## Before / after (tier 1)
@@ -101,7 +101,7 @@ OpenCode's first request is 5.5k tokens against air's 1.7k, and it reads files o
 | # | change | commit | measured effect |
 |---|---|---|---|
 | E3 | `_forget()` in worker.py rebinds names imported from a reloaded repo module (modules, functions, classes) to the new code. Instances and names whose module no longer imports are dropped, as before. Prompt: "…an edit or write reloads the ones you imported". | c7f3879 | 7 Python tasks × 10 runs: NameError right after an edit **5 → 0**, tool errors 23 → 13, turns 4.17 → 4.14 (Δ −0.0 [−0.3, +0.2]). The pass difference there (68 → 70/70) is main's review stray-file misses, not E3. The prompt sentence slightly overstates: instances are dropped (no occurrence in 70 runs). |
-| E4 | agent.rs: at the end of a turn with no edit()/write() whose tree still changed, one host message lists the files and asks the model to delete scratch output and keep its answer. | 9a4e8fb | review: pass 21/25 → **20/20** in the targeted run; runs leaving demo files 7/25 → 0/20. 5-task pooled pass **+3.2pp [+0.8, +6.4]**. It fired only on review (14 times across all variants), costing about +2 turns each time. At N=10, review turns went 3.7 → 5.1 with 3 firings; the firings explain about +0.6 of that. |
+| E4 | agent.rs: at the end of a turn with no edit()/write() whose tree still changed, one host message lists the files and asks the model to delete scratch output and keep its answer. | 9a4e8fb | review: pass 21/25 → **20/20** in the targeted run; runs leaving demo files 7/25 → 0/20. 5-task pooled pass **+3.2pp [+0.8, +6.4]**. It fired only on review (14 times across all variants), costing about +2 turns each time. At N=10, review turns went 3.7 → 5.1 with 3 firings; the firings explain about +0.6 of that. **The rest (+0.8) is unexplained.** It recurred in both review comparisons (+0.5 without the nudged runs in the first), so it could be a real cost of the gate's presence, or noise. |
 | E9 | Workflow step 4: "End with a short report: what changed, how you verified it, and what is still open." | 9e275a9 | **Cost-neutral:** interleaved vs tune1-late, output +0.3k [−0.2, +0.8]. The earlier −0.4k back-to-back "win" did not replicate. Kept because it is the report format the brief asks for. |
 
 ## Rejected experiments, and why
@@ -129,7 +129,7 @@ Levers from the brief, checked and not built:
 
 1. **Model time is 93% of wall time.** Turns matter more than tool speed.
 2. **Diff entropy belongs to the model.** At N=10, code tasks give 2–10 distinct diffs per 10 runs (most give 10), at a pairwise edit distance of 0.01–0.63. The harness's own decisions are deterministic. A formatter narrows Rust diffs; the Python templates configure none.
-3. **Noise at N=5.** The same build moves ±0.4–1.4 turns per task between batches, and the gateway splits sessions over two upstreams (`deepseek/…` and `deepseek-ai/…`). Effects under ~0.5 turns per task need N=10 and interleaved runs.
+3. **Noise at N=5.** The same build moves ±0.4–1.4 turns per task between batches. Effects under ~0.5 turns per task need N=10 and interleaved runs. The gateway routes sessions to two upstreams (`deepseek/…` and `deepseek-ai/…`); no turns difference between them was measured once comparisons were task-balanced, but mechanics.py still reports the split.
 4. **The bench is at the ceiling on pass rate.** At N=10, main misses only review (stray files) and qa. Showing a success gain needs harder tasks; more real air commits are the natural source.
 5. **Real-commit tasks are the costly ones:** 7–12 turns and 48–94 s per run, mostly cargo check.
 6. **E4's cost on review:** +2 turns when it fires (cleanup, then finish). A cheaper form would let the model clean up and answer in one reply. Not tried.
@@ -145,7 +145,7 @@ Levers from the brief, checked and not built:
 4. **E4 adds a host message** (model-facing text), like the existing check gate. It is the change that moved pass rate. OK?
 5. **Opus 5.5 transport.** air speaks only `chat/completions`.
    - The stored OpenCode key is Go-only: Zen answers "Model access is disabled" for every model.
-   - Through an OpenAI-compatible shim, Claude would lose prompt-cache breakpoints, its thinking blocks and signatures (interleaved thinking), and the effort setting; `max_tokens` is also unset.
+   - Through an OpenAI-compatible shim, Claude would lose prompt-cache breakpoints, its thinking blocks and signatures (interleaved thinking), and the effort setting; `max_tokens` is also unset. *(Untested: inferred from the API shapes. Only the Zen probe above was run.)*
    - A native Messages-API path in llm.rs is the prerequisite for any Opus tuning. It is untestable without access, so it isn't built.
 6. **E7 (optional rituals) is the change most likely to help a stronger model.** It failed here only by not ruling out +0.3 turns on Flash. Worth one Opus run if Opus comes into scope.
 7. **Merging `tune-opus`.** It's one commit per accepted change (c7f3879, 9a4e8fb, 9e275a9) plus `tuning/`. The `exp/*` branches hold the rejected variants and can be deleted.
@@ -165,6 +165,13 @@ Exact Flash token counts (macOS, check configured). The system prompt is `prompt
 | AGENTS.md, repo listing | repo-dependent (~200 for air) | The listing saves an exploring turn; frozen at session start, so the prefix stays cached. |
 | `run` tool schema | 263 on the wire (15-word description) | Unchanged; the helpers are documented in the prompt, once. |
 | Host messages | — | GATE (check failed), RETRY (lost, empty or cut-off reply), **STRAY (new, E4)**. Each fires at most once or twice per turn. |
+
+## Final-tree verification
+
+- `cargo build`, `clippy --all-targets -D warnings` and all 16 tests pass on tune-opus.
+- A smoke run of the final build passes fix and review.
+- **E3 under the real sandbox:** in 6 logged runs (refactor, `shop.pricing`), a name imported in an earlier run (`calc_total`, `order_total`) was called after editing its module in the same run, with no exception. main's `_forget()` would have deleted those names.
+- **E4:** fired 14 times across all variants, all on review.
 
 ## Incidents during the work
 
