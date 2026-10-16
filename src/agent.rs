@@ -17,7 +17,6 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 const COMPACT_AT: u64 = 100_000;
-const RECENT_RUNS: usize = 5;
 const MAX_REQUESTS: usize = 200;
 const REPEAT_WARN: usize = 3;
 const REPEAT_BLOCK: usize = 6;
@@ -305,12 +304,8 @@ impl Agent {
                 limit = format!("stopped after {} in one turn ({TURN_BUDGET} × compact_at)", ui::tokens(spent));
                 break;
             }
-            let prompt = self.session.last_prompt_tokens();
-            if prompt >= self.compact_at / 2 {
-                let freed = self.mask()?;
-                if prompt.saturating_sub(freed) >= self.compact_at {
-                    self.compact()?;
-                }
+            if self.session.last_prompt_tokens() >= self.compact_at {
+                self.compact()?;
             }
             let result = self.llm.complete(self.session.messages(), &tools()).await;
             if let Some(lost) = result.as_ref().err().and_then(llm::lost) {
@@ -427,14 +422,13 @@ impl Agent {
     fn overflow(&mut self, error: &str) -> Result<()> {
         let seen = self.session.last_prompt_tokens();
         let entries = &self.session.entries;
-        let compacted =
-            entries.iter().rposition(|e| e["compact"].is_object() || e["mask"].is_object()).map_or(0, |i| i + 1);
+        let compacted = entries.iter().rposition(|e| e["compact"].is_object()).map_or(0, |i| i + 1);
         let used = (compacted..entries.len()).rev().find(|&i| entries[i]["meta"]["usage"]["prompt_tokens"].is_u64());
         let estimate = match used {
             Some(i) => {
-                let (newest, masked) = (compact::newest_task(entries), compact::masked(entries));
+                let newest = compact::newest_task(entries);
                 let sent = (i..entries.len()).filter(|&j| entries[j]["role"].is_string());
-                let sent = sent.map(|j| compact::wire(&entries[j], j, newest, masked).to_string().len() as u64);
+                let sent = sent.map(|j| compact::wire(&entries[j], j, newest).to_string().len() as u64);
                 seen + sent.sum::<u64>() / 4
             }
             None => self.sent(),
@@ -756,28 +750,6 @@ impl Agent {
 
     pub fn compact(&mut self) -> Result<()> {
         self.compact_to(self.compact_at as usize / 5, false)
-    }
-
-    /// The step before a summary: the model keeps every reply and the last RECENT_RUNS outputs whole, and earlier
-    /// output shrinks to its first line (recall(n) returns it). Taken only when it frees a tenth of compact_at, so the
-    /// cached prefix it breaks pays for itself. Returns the tokens freed.
-    fn mask(&mut self) -> Result<u64> {
-        let entries = &self.session.entries;
-        let (newest, masked) = (compact::newest_task(entries), compact::masked(entries));
-        let runs: Vec<usize> =
-            (self.session.keep().max(masked)..entries.len()).filter(|&i| entries[i]["role"] == "tool").collect();
-        let Some(&before) = runs.len().checked_sub(RECENT_RUNS).and_then(|n| runs.get(n)) else { return Ok(0) };
-        let size = |i: usize, masked| compact::wire(&entries[i], i, newest, masked).to_string().len() as u64;
-        let saved: Vec<u64> =
-            runs.iter().take_while(|&&i| i < before).map(|&i| size(i, 0).saturating_sub(size(i, before))).collect();
-        let freed = saved.iter().sum::<u64>() / 4;
-        if freed < self.compact_at / 10 {
-            return Ok(0);
-        }
-        let elided = saved.iter().filter(|&&s| s > 0).count();
-        ui::note(&format!("elided the output of {elided} runs before #{before} ({} freed)", ui::tokens(freed)));
-        self.session.push(json!({"mask": {"before": before}}))?;
-        Ok(freed)
     }
 
     fn compact_to(&mut self, keep_tokens: usize, whole: bool) -> Result<()> {

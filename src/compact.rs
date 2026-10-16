@@ -10,19 +10,14 @@ pub fn newest_task(entries: &[Value]) -> Option<usize> {
     (1..entries.len()).rev().find(|&i| entries[i]["role"] == "user" && entries[i]["meta"]["host"].is_null())
 }
 
-/// Runs before this entry show the model only the first line of their output; 0 before the first {mask}.
-pub fn masked(entries: &[Value]) -> usize {
-    entries.iter().rev().find_map(|e| e["mask"]["before"].as_u64()).map_or(0, |m| m as usize)
-}
-
 pub fn baked(u: usize) -> String {
     format!("[Latest task when this summary was written, entry #{u}]")
 }
 
-/// Entry `i` as the model sees it: no meta; reasoning only from the newest task on, cut to its head and tail; and
-/// the output of a run before `masked` cut to its first line. All of it follows from the log alone, so every request
-/// and every resume sends the same bytes for an entry and the prompt prefix stays cached.
-pub fn wire(entry: &Value, i: usize, newest: Option<usize>, masked: usize) -> Value {
+/// Entry `i` as the model sees it: no meta, and reasoning only from the newest task on, cut to its head and tail.
+/// All of it follows from the log alone, so every request and every resume sends the same bytes for an entry and the
+/// prompt prefix stays cached.
+pub fn wire(entry: &Value, i: usize, newest: Option<usize>) -> Value {
     let mut message = entry.clone();
     if let Some(fields) = message.as_object_mut() {
         fields.remove("meta");
@@ -34,25 +29,16 @@ pub fn wire(entry: &Value, i: usize, newest: Option<usize>, masked: usize) -> Va
             let (start, end) = (clip(r, REPLAY / 4), tail(r, REPLAY * 3 / 4));
             *r = format!("{start}\n[… {} bytes of reasoning omitted]\n{end}", r.len() - start.len() - end.len());
         }
-        if i < masked
-            && entry["role"] == "tool"
-            && let Some(Value::String(out)) = fields.get_mut("content")
-        {
-            let stub = format!("{}\n[output elided: {} bytes; recall({i}) returns it]", line(out, 200), out.len());
-            if stub.len() < out.len() {
-                *out = stub;
-            }
-        }
     }
     message
 }
 
 pub fn cut(entries: &[Value], prev: usize, keep_tokens: usize, whole: bool) -> usize {
-    let (newest, masked) = (newest_task(entries), masked(entries));
+    let newest = newest_task(entries);
     let (mut tail, mut keep) = (0, entries.len());
     for i in (prev + 1..entries.len()).rev() {
         let Some(role) = entries[i]["role"].as_str() else { continue };
-        tail += wire(&entries[i], i, newest, masked).to_string().len() / 4;
+        tail += wire(&entries[i], i, newest).to_string().len() / 4;
         if tail > keep_tokens && (whole || keep < entries.len()) {
             break;
         }
@@ -305,39 +291,23 @@ mod tests {
     fn long_reasoning_replays_as_head_and_tail() {
         let thinking = format!("PLAN{}DECIDE", "x".repeat(3 * REPLAY));
         let reply = json!({"role": "assistant", "content": "", "reasoning_content": thinking, "meta": {"at": 1}});
-        let sent = wire(&reply, 2, Some(1), 0);
+        let sent = wire(&reply, 2, Some(1));
         let replayed = sent["reasoning_content"].as_str().unwrap_or_default();
         assert!(replayed.starts_with("PLAN") && replayed.ends_with("DECIDE"), "keeps the plan and the decision");
         assert!(replayed.len() < REPLAY + 64 && replayed.contains("bytes of reasoning omitted"));
-        assert_eq!(sent, wire(&reply, 2, Some(1), 0), "an entry always sends the same bytes");
-        assert_eq!(wire(&reply, 0, Some(1), 0).get("reasoning_content"), None, "dropped before the newest task");
+        assert_eq!(sent, wire(&reply, 2, Some(1)), "an entry always sends the same bytes");
+        assert_eq!(wire(&reply, 0, Some(1)).get("reasoning_content"), None, "dropped before the newest task");
         let short = json!({"role": "assistant", "reasoning_content": "brief"});
-        assert_eq!(wire(&short, 2, Some(1), 0)["reasoning_content"], "brief");
+        assert_eq!(wire(&short, 2, Some(1))["reasoning_content"], "brief");
     }
 
     #[test]
-    fn masked_runs_keep_their_first_line() {
-        let out = format!("[src/a.rs: lines 1-400 of 400]\n{}", "1: fn a() {}\n".repeat(400));
-        let run = json!({"role": "tool", "tool_call_id": "c1", "content": out});
-        assert_eq!(wire(&run, 7, None, 7)["content"], run["content"], "from the mask on, output stays whole");
-        let stub =
-            format!("[src/a.rs: lines 1-400 of 400]\n[output elided: {} bytes; recall(7) returns it]", out.len());
-        assert_eq!(wire(&run, 7, None, 8)["content"], stub);
-        let short = json!({"role": "tool", "content": "edit src/a.rs: ok"});
-        assert_eq!(wire(&short, 7, None, 8)["content"], "edit src/a.rs: ok", "no stub longer than the output");
-        let reply = json!({"role": "assistant", "content": "a long answer ".repeat(100)});
-        assert_eq!(wire(&reply, 7, None, 8)["content"], reply["content"], "only run output is masked");
-    }
-
-    #[test]
-    fn cut_counts_masked_runs_at_their_masked_size() {
+    fn cut_keeps_the_runs_that_fit_the_budget() {
         let mut entries = vec![json!({"system": "s"}), json!({"role": "user", "content": "task", "meta": {}})];
         for k in 0..6 {
             entries.push(json!({"role": "assistant", "content": "", "tool_calls": [{"id": format!("c{k}")}]}));
             entries.push(json!({"role": "tool", "tool_call_id": format!("c{k}"), "content": "x\n".repeat(6000)}));
         }
         assert_eq!(cut(&entries, 1, 10_000, false), 10, "two whole runs fill the budget");
-        entries.push(json!({"mask": {"before": 11}}));
-        assert_eq!(cut(&entries, 1, 10_000, false), 2, "masked runs are small, so everything after the task stays");
     }
 }
