@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::io::{IsTerminal, Write};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 struct Bar {
@@ -21,8 +21,11 @@ static TERMIOS: OnceLock<libc::termios> = OnceLock::new();
 static BARRED: AtomicBool = AtomicBool::new(false);
 pub static CHECK: AtomicI32 = AtomicI32::new(0);
 
+static STYLED: LazyLock<bool> =
+    LazyLock::new(|| std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none());
+
 pub fn styled() -> bool {
-    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+    *STYLED
 }
 
 pub fn paint(code: &str, text: &str) -> String {

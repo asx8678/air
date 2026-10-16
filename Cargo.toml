@@ -24,3 +24,5 @@ toml = "1.1.8"
 
 [profile.release]
 strip = true
+lto = "fat"
+codegen-units = 1
