@@ -150,3 +150,47 @@ Diffs vary a lot: pairwise normalized edit distance is 0.4–0.5 on fix, feature
 | wall | 41 s | 25 s |
 
 OpenCode's tools are one call per file: wide took 20 calls, 18 of them parallel reads, in 4 turns. Its system prompt and tool schemas make a first request of 5.5k tokens (median 5,480; air: 1.7k). air's code mode gets the same work done in fewer turns and about a quarter of the prompt tokens.
+
+## Re-baseline · tune1 = main + E3 + E4 (e53f2d5), N=5 at 11:51–12:01
+
+tune1 vs main (10:21–10:53): turns +1.0 [+0.6, +1.3], uncached input +2.1k [+1.4, +2.8], output +0.9k [+0.6, +1.2].
+
+All of the increase sits on the Rust real-commit tasks: c-compact-at 8.6 → 11.4, c-window 6.2 → 7.4, c-overflow 9.6 → 10.4. Neither E3 (Python modules only) nor E4 (it never fired: 0 nudges in tune1) can act there. The Python and review tasks are flat or better. **This is drift over the day in the model or gateway, not an effect of the changes.**
+
+Consequences:
+- Comparisons across runs hours apart are not trustworthy.
+- E3's and E4's own comparisons ran within ~30 minutes of their baselines, on the tasks they target.
+- The closing before/after (below) runs main, tune1 and final at the same time, interleaved.
+
+## E7 · rituals2: accept() optional, no plan()/done() asked for, on the main prompt: REJECTED (entropy)
+
+- **Change:** `exp/rituals2`.
+  - worker.py: the accept() gate is removed.
+  - prompt: `accept(criteria)  # what done means, for the turn report`.
+  - Workflow step 2 shrinks to "the first step's edits … and check()".
+- **Result vs tune1 (back to back):**
+  - Δturns −0.1 [−0.5, +0.4], Δuncached −0.6k [−1.5, +0.3], Δout −0.3k [−0.6, +0.2], pass 75/75.
+  - accept() calls fell 0.84 → 0.20 per run, plan() 0.44 → 0.04.
+  - **Pooled per-task turns sd rose 1.12 → 1.37.** It was worse on 5 tasks, c-python 1.6 → 3.9, and tool errors went 15 → 22 (6 misshapen edit() calls, 4 write() on an existing file).
+- **Decision:** rejected by the entropy check. The cost metrics are neutral, and the run-to-run spread grew.
+- This is the change most likely to suit a stronger model, since the rituals exist to steer weak ones. **Worth one Opus run if Opus is ever in scope.**
+
+## E8 · Drop the Example only (−147 tokens per request): REJECTED (entropy, trend)
+
+- **Result vs tune1:**
+  - Δturns +0.3 [−0.1, +0.7], Δuncached −0.0k, Δout −0.1k, pass 75/75.
+  - Pooled per-task turns sd 1.12 → 1.40, worse on 9 of 15 tasks.
+- **Reading:** together with E1, the example is the part of the prompt that steadies Flash. It shows the explore run, then the one run with accept, edit and check.
+- **Decision:** rejected.
+
+## E9 · The final message reports what changed, how it was verified, and what is still open: KEPT (win)
+
+- **Change:** Workflow step 4.
+  - Before: "End with a short message: what changed, why, and what showed it works."
+  - After: "End with a short report: what changed, how you verified it, and what is still open."
+  - Same length; 9e275a9.
+- **Result vs tune1:**
+  - **Δout −0.4k [−0.7, −0.2]**, Δturns −0.1 [−0.5, +0.3], Δuncached −0.5k [−1.3, +0.3], pass 75/75.
+  - Pooled per-task turns sd 1.12 → 1.11; distinct outcomes up on 1 task (debug).
+  - The final answer's size barely moved (1,119 → 1,171 chars), so the saving is in output before the end: less narration.
+- **Decision:** kept. Rechecked in the closing interleaved run, since back-to-back batches are 30 minutes apart.
