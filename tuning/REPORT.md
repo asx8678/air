@@ -140,7 +140,7 @@ Levers from the brief, checked and not built:
 
 ## Decisions that need you
 
-**Where I departed from the decision rule I wrote before the runs (three places):**
+**Where I departed from the decision rule I wrote before the runs (four places):**
 1. **E3 was kept by judgment.** Its pooled metrics are neutral, and the strict rule rejects neutral additions. The error class it removes was entirely harness-caused, and the fix is the "tolerate the model's habit in the harness" your memory rule prefers. Keep, or revert c7f3879?
 2. **E9 was kept on the brief's grounds.** It is cost-neutral, and the rule has no category for a rewording; the brief asks for exactly this report format.
 3. **E11 was kept without its full run.** You asked for a decision before the pre-registered N=10 run could finish, so it rests on the error census, the standalone test and 24 runs per variant. E12 was left out for the same reason.
