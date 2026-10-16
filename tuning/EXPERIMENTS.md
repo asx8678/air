@@ -229,3 +229,5 @@ Recomputed against all of main's runs:
   - the Δturns CI upper bound is below +0.3;
   - its per-task turns sd rises by no more than twice the noise floor.
 - **Otherwise reject.**
+- **How to read a result under this rule (also written before running):** at N=10 per task the Δturns CI is about ±0.3 wide, so "upper bound below +0.3" works out to "point estimate ≤ ~0". A reject therefore means *a +0.3-turn cost could not be ruled out*, not that the removal was shown to cost turns.
+- `main-h2h` (6e5278f, N=10) was started ~10 minutes after the other three and overlaps most of their window. It is the "before" column of the final table.
