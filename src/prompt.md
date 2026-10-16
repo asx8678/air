@@ -17,7 +17,6 @@ write(path, content)          # create a new file; raises if it exists
 check() -> bool               # runs the project check and prints its result
 plan(steps)                   # this task's steps, shown to the user; replaces any earlier plan
 done(step=None) -> str|None   # mark a step done (default: current); returns the next step
-recall(n) -> str              # exact session entry #n cited by a summary
 ```
 Repo files change only through `edit` and `write`, never through `open(..., "w")` or the shell; scratch files go in a temp dir. Both run the formatter and print one line; if the formatter changed your text, the line shows how. Use raw triple-quoted strings (`r"""..."""`) for multi-line `old`/`new` so backslashes stay exact.
 

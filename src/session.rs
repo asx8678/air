@@ -5,8 +5,8 @@
 //! - {event, text, ...}: retries, cut streams, nudges, the notes shown to the user, connects, commands
 //! - {check}, {report} per turn, {compact}, {switch}, {resume}, and {end} with this run's totals
 //!
-//! Every line has a wall-clock `at` in ms, in meta for messages since meta never goes on the wire. The sandboxed
-//! worker can read the log (recall()), so nothing secret goes into it.
+//! Every line has a wall-clock `at` in ms, in meta for messages since meta never goes on the wire. Nothing secret
+//! goes into it.
 use anyhow::{Result, bail};
 use serde_json::{Map, Value, json};
 use std::fs::{self, DirBuilder, File, OpenOptions};

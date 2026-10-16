@@ -4,7 +4,6 @@ ROOT = os.getcwd()
 sys.path.append(ROOT)
 CHECK = os.environ.pop("AIR_CHECK", "")
 FMT = os.environ.pop("AIR_FMT", "")
-LOG = os.environ.pop("AIR_LOG", "")
 HALF = 16000
 LIMIT = 8 << 20
 RUN_CAP = 570
@@ -264,22 +263,7 @@ def done(step=None):
     return p["steps"][rest[0] - 1] if rest else None
 
 
-def recall(n):
-    with open(LOG, encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            if i == n:
-                entry = json.loads(line)
-                parts = [f"#{n} {entry.get('role', 'record')}", entry.get("content") or ""]
-                for call in entry.get("tool_calls") or []:
-                    name, args = call["function"]["name"], call["function"]["arguments"]
-                    with contextlib.suppress(ValueError, AttributeError):
-                        args = "\n".join(f"{k}:\n{v}" for k, v in json.loads(args).items())
-                    parts.append(f"{name}\n{args}")
-                return "\n".join(p for p in parts if p)
-    raise IndexError(f"no entry #{n}")
-
-
-TOOLS = {"sh": sh, "show": show,"edit": edit, "write": write, "accept": accept, "plan": plan, "done": done, "check": check, "recall": recall}
+TOOLS = {"sh": sh, "show": show,"edit": edit, "write": write, "accept": accept, "plan": plan, "done": done, "check": check}
 G = {"__name__": "__main__", **TOOLS}
 HELPERS = tuple(f"{name}()" for name in TOOLS)
 

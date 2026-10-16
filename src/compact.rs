@@ -197,10 +197,7 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
     }
     let events = events.split_off(events.len().saturating_sub(40));
 
-    let footer = format!(
-        "\n[Entries #1-#{} are summarized here; recall(n) returns entry #n exactly. Continue the task.]",
-        keep - 1
-    );
+    let footer = format!("\n[Entries #1-#{} are summarized here. Continue the task.]", keep - 1);
     let mut out = String::from("[Summary of earlier work, rebuilt from the session log. Newer messages follow it.]\n");
     for (title, lines, cap) in [
         ("Recent user directions", dialogue, 16_384),
@@ -238,7 +235,7 @@ fn block(title: &str, lines: &[String], cap: usize) -> String {
         let mut kept = vec![title.to_string()];
         kept.extend_from_slice(&lines[..keep.div_ceil(2)]);
         if keep < n {
-            kept.push(format!("… {} omitted; recall(n) any #n around here", n - keep));
+            kept.push(format!("… {} omitted", n - keep));
         }
         kept.extend_from_slice(&lines[n - keep / 2..]);
         let block = kept.join("\n");

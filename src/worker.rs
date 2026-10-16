@@ -49,17 +49,16 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn start(root: &Path, yolo: bool, check: Option<&str>, fmt: Option<&str>, log: &Path) -> Result<Self> {
+    pub fn start(root: &Path, yolo: bool, check: Option<&str>, fmt: Option<&str>) -> Result<Self> {
         let bwrap = || std::process::Command::new("bwrap").arg("--version").output().is_ok_and(|o| o.status.success());
         if !yolo && !cfg!(target_os = "macos") && !bwrap() {
             return Err(
                 anyhow!("bwrap (bubblewrap) is not installed; install it or run with --yolo").context(StartFailed)
             );
         }
-        let mut child = sandboxed(root, yolo, log, &python(), &["-I", "-B", "-u", "-c", include_str!("worker.py")])
+        let mut child = sandboxed(root, yolo, &python(), &["-I", "-B", "-u", "-c", include_str!("worker.py")])
             .env("AIR_CHECK", if check.is_some() { "1" } else { "" })
             .env("AIR_FMT", fmt.unwrap_or_default())
-            .env("AIR_LOG", log)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .process_group(0)
@@ -149,10 +148,9 @@ pub fn descendants(pid: i32) -> Vec<i32> {
     groups
 }
 
-pub fn sandboxed(root: &Path, yolo: bool, log: &Path, program: &str, args: &[&str]) -> Command {
+pub fn sandboxed(root: &Path, yolo: bool, program: &str, args: &[&str]) -> Command {
     let writable = writable(root);
     let secrets = secrets();
-    let log = log.canonicalize().unwrap_or_else(|_| log.into());
     let protected = protected(root);
     let mut cmd = if yolo {
         Command::new(program)
@@ -169,7 +167,7 @@ pub fn sandboxed(root: &Path, yolo: bool, log: &Path, program: &str, args: &[&st
               (local unix-socket (subpath {sockets:?})) (remote unix-socket (subpath {sockets:?})))\
              (deny file-write*)(allow file-write*{dirs} (subpath \"/dev\"))(deny file-write*{protected})\
              (deny file-write* (require-all (subpath {root:?}) (regex #\"/\\.[gG][iI][tT](/|$)\")))\
-             (deny file-read-data{secrets})(allow file-read-data (literal {log:?}))\
+             (deny file-read-data{secrets})\
              (deny file-ioctl (regex #\"^/dev/tty\"))(deny file-write* (regex #\"^/dev/tty\"))(deny appleevent-send)\
              (deny process-exec (literal \"/usr/bin/osascript\") (literal \"/usr/bin/osacompile\") \
               (literal \"/usr/bin/open\") (literal \"/bin/launchctl\") (literal \"/usr/bin/automator\"))"
@@ -193,7 +191,6 @@ pub fn sandboxed(root: &Path, yolo: bool, log: &Path, program: &str, args: &[&st
         for dir in protected.iter().chain(&nested(root)).filter(|d| d.exists()) {
             cmd.arg("--ro-bind").arg(dir).arg(dir);
         }
-        cmd.arg("--ro-bind").arg(&log).arg(&log);
         cmd.args(["--unshare-all", "--die-with-parent", "--new-session", "--chdir"]).arg(root).arg(program);
         cmd
     };

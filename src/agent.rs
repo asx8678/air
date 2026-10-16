@@ -43,7 +43,7 @@ const SECRETS: &[(&str, &str, usize, &str)] = &[
 const GATE: &str = "The project check failed on the current tree. Fix what fails, run check(), then finish again. \
                     If it cannot pass, say why in one line. The check output ended with:";
 const RETRY: &str = "Send one run() now with the next step, or a shorter answer.";
-const HELPERS: &[&str] = &["sh", "show", "accept", "edit", "write", "check", "plan", "done", "recall"];
+const HELPERS: &[&str] = &["sh", "show", "accept", "edit", "write", "check", "plan", "done"];
 const SANDBOX: &str = "\n\n## Sandbox\nYour code runs in a sandbox. Writes outside the repo and temp dirs fail, as do \
                        writes into any .git directory and reads of credentials and private data in the home directory \
                        (ssh and cloud keys, shell history, browser data, other tools' configs). Only a fixed set of \
@@ -519,7 +519,7 @@ impl Agent {
     fn worker(&mut self) -> Result<&mut Worker> {
         if self.worker.is_none() {
             let (check, fmt) = (self.config.check.as_deref(), self.config.fmt.as_deref());
-            self.worker = Some(Worker::start(&self.root, self.yolo, check, fmt, &self.session.path)?);
+            self.worker = Some(Worker::start(&self.root, self.yolo, check, fmt)?);
         }
         Ok(self.worker.as_mut().expect("just started"))
     }
@@ -542,7 +542,7 @@ impl Agent {
             ui::activity("running check()");
         }
         let script = format!("exec 2>&1\n{check}");
-        let cmd = worker::sandboxed(&self.root, self.yolo, &self.session.path, "/bin/sh", &["-c", &script]);
+        let cmd = worker::sandboxed(&self.root, self.yolo, "/bin/sh", &["-c", &script]);
         let (passed, out) = match tokio::time::timeout(CHECK_TIMEOUT, grouped(cmd)).await {
             Ok(Ok((passed, out))) => (passed, redact(&out).0),
             Ok(Err(e)) => (false, format!("{e:#}")),
