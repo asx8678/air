@@ -280,7 +280,7 @@ def recall(n):
 
 
 TOOLS = {"sh": sh, "show": show,"edit": edit, "write": write, "accept": accept, "plan": plan, "done": done, "check": check, "recall": recall}
-G = {"__name__": "__main__", "_last": "", **TOOLS}
+G = {"__name__": "__main__", **TOOLS}
 HELPERS = tuple(f"{name}()" for name in TOOLS)
 
 
@@ -349,10 +349,9 @@ for request in _inbox:
     os.dup2(_null, 2)
     text = ANSI.sub("", _read(capture).decode("utf-8", "replace"))
     capture.close()
-    G["_last"] = text
     _report["chars"] = len(text)
     if len(text) > 2 * HALF:
-        text = f"{text[:HALF]}\n[… {len(text) - 2 * HALF} characters omitted; the full output is in _last]\n{text[-HALF:]}"
+        text = f"{text[:HALF]}\n[… {len(text) - 2 * HALF} characters omitted]\n{text[-HALF:]}"
     _outbox.write(json.dumps(dict(_report, out=text or "(no output)", error=failed)) + "\n")
     _outbox.flush()
 _kill()
