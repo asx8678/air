@@ -114,6 +114,7 @@ impl Agent {
                     names.join(", ")
                 );
             };
+            web(provider, &config.providers[provider].base_url)?;
             let profile = config.models.get(&model).cloned().unwrap_or_default();
             let system = system_prompt(root, yolo, config.check.is_some());
             Session::create(home, root, provider, &model, &system, profile, context)?
@@ -121,7 +122,7 @@ impl Agent {
         let (provider, llm) = connect(&config.providers, session.header())?;
         let mut since = session.entries.iter().rev().take_while(|e| e["switch"].is_null());
         let learned = since.find_map(|e| e["compact"]["at"].as_u64());
-        let compact_at = learned.or(session.header()["compact_at"].as_u64()).unwrap_or(COMPACT_AT);
+        let compact_at = learned.or(session.header()["compact_at"].as_u64()).filter(|&at| at > 0).unwrap_or(COMPACT_AT);
         let repeat = (0, 0);
         let mut agent = Self {
             root: root.into(),
@@ -210,11 +211,12 @@ impl Agent {
         if !self.config.providers.contains_key(provider) {
             anyhow::bail!("no provider named {provider}");
         }
+        web(provider, &self.config.providers[provider].base_url)?;
         let profile = self.config.models.get(model).cloned().unwrap_or_default();
         let system = system_prompt(&self.root, self.yolo, self.config.check.is_some());
         self.session.switch(provider, model, &system, profile)?;
         (self.provider, self.llm) = connect(&self.config.providers, self.session.header())?;
-        self.compact_at = self.session.header()["compact_at"].as_u64().unwrap_or(COMPACT_AT);
+        self.compact_at = self.session.header()["compact_at"].as_u64().filter(|&at| at > 0).unwrap_or(COMPACT_AT);
         ui::note(&format!("now using {model} on {provider}"));
         Ok(())
     }
@@ -580,7 +582,7 @@ impl Agent {
         let why = match (&before, &after) {
             (Err(e), _) | (_, Err(e)) => format!("{e:#}"),
             (Ok(a), Ok(b)) if a != b => "the check changed the working tree".into(),
-            _ => check.into(),
+            _ => redact(check).0,
         };
         let ok = passed && matches!((&before, &after), (Ok(a), Ok(b)) if a == b);
         let verdict = if ok { "passed" } else { "FAILED" };
@@ -684,7 +686,13 @@ impl Agent {
             let mine: Vec<String> = mine.into_iter().filter_map(path).collect();
             let mut args = vec!["--literal-pathspecs", "ls-tree", "-z", "--name-only", tree, "--"];
             args.extend(mine.iter().map(String::as_str));
-            let known = if mine.is_empty() { String::new() } else { git(&self.root, None, &args).unwrap_or_default() };
+            let known = if mine.is_empty() {
+                String::new()
+            } else {
+                let (root, args) = (self.root.clone(), args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+                let run = move || git(&root, None, &args.iter().map(String::as_str).collect::<Vec<_>>());
+                tokio::task::spawn_blocking(run).await?.unwrap_or_default()
+            };
             let modified: Vec<&str> = known.split('\0').filter(|p| !p.is_empty()).collect();
             let undo = match (outside.is_empty(), modified.is_empty()) {
                 (true, _) => format!("git restore --source={short} --worktree -- .  (new files stay)"),
@@ -775,6 +783,17 @@ impl Drop for Group {
     }
 }
 
+/// A provider must have a usable base_url before a session record names it.
+fn web(name: &str, base_url: &str) -> Result<()> {
+    if !crate::providers::web_url(base_url) {
+        anyhow::bail!(
+            "provider {name}: base_url {} is not an http(s) URL (/providers changes it)",
+            ui::printable(base_url)
+        );
+    }
+    Ok(())
+}
+
 /// The provider that lists a model; the synthesized config fallback loses to a named provider.
 fn holding<'a>(providers: &'a Providers, model: &str) -> Option<&'a String> {
     providers
@@ -804,12 +823,7 @@ fn connect(providers: &Providers, header: &Value) -> Result<(String, Llm)> {
         _ => {}
     }
     let p = &providers[name];
-    if !crate::providers::web_url(&p.base_url) {
-        anyhow::bail!(
-            "provider {name}: base_url {} is not an http(s) URL (/providers changes it)",
-            ui::printable(&p.base_url)
-        );
-    }
+    web(name, &p.base_url)?;
     let url = llm::endpoint(&p.base_url);
     let extra = json!({"provider": name, "model": model, "base_url": url, "key": crate::providers::key(p)});
     ui::record("connect", &format!("{model} on {name} at {url}"), extra);
@@ -1119,9 +1133,14 @@ fn tools() -> Value {
 fn window(error: &str) -> Option<u64> {
     let lower = error.to_lowercase();
     WINDOW.iter().find_map(|marker| {
-        let rest = &lower[lower.find(marker)? + marker.len()..];
-        let digits = rest.trim_start().chars().take_while(|c| c.is_ascii_digit() || *c == ',');
-        digits.filter(char::is_ascii_digit).collect::<String>().parse().ok()
+        let rest = lower[lower.find(marker)? + marker.len()..].trim_start();
+        let run: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == ',').collect();
+        let n: u64 = run.chars().filter(char::is_ascii_digit).collect::<String>().parse().ok()?;
+        Some(match rest[run.len()..].chars().next() {
+            Some('k') => n * 1_000,
+            Some('m') => n * 1_000_000,
+            _ => n,
+        })
     })
 }
 
@@ -1224,12 +1243,19 @@ fn changes(root: &Path, snapshot: Option<(&str, &Path)>, since: std::time::Syste
 
 #[cfg(test)]
 mod tests {
-    use super::redact;
+    use super::{redact, window};
 
     #[test]
     fn redacts_opencode_keys_but_not_identifiers() {
         let (out, hidden) = redact("key oc_sk_4f9Qx2LmZ8rT7vW1yB3nK6hJ and oc_some_long_identifier_name");
         assert_eq!(hidden, 1);
         assert_eq!(out, "key [redacted opencode key] and oc_some_long_identifier_name");
+    }
+
+    #[test]
+    fn window_sizes_read_a_k_suffix() {
+        assert_eq!(window("context length is 32k tokens"), Some(32_000));
+        assert_eq!(window("the context window of 200,000"), Some(200_000));
+        assert_eq!(window("no size here"), None);
     }
 }

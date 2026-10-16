@@ -257,7 +257,7 @@ fn excerpt(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
-    let head = clip(s, max - 40);
+    let head = clip(s, max.saturating_sub(40));
     format!("{head}\n[… {} bytes omitted]", s.len() - head.len())
 }
 
@@ -284,7 +284,7 @@ pub fn tail(s: &str, max: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{REPLAY, cut, wire};
+    use super::{REPLAY, cut, excerpt, wire};
     use serde_json::json;
 
     #[test]
@@ -309,5 +309,11 @@ mod tests {
             entries.push(json!({"role": "tool", "tool_call_id": format!("c{k}"), "content": "x\n".repeat(6000)}));
         }
         assert_eq!(cut(&entries, 1, 10_000, false), 10, "two whole runs fill the budget");
+    }
+
+    #[test]
+    fn excerpt_never_underflows() {
+        assert!(excerpt(&"x".repeat(100), 21).ends_with("bytes omitted]"));
+        assert_eq!(excerpt("short", 21), "short");
     }
 }
