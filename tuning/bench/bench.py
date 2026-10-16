@@ -128,7 +128,9 @@ def opencode_cmd(repo, model, prompt):
                "(deny file-read-data" + "".join(f' (subpath "{s}")' for s in secrets) + ")")
     cmd = ["/usr/bin/sandbox-exec", "-p", profile, "opencode", "run", "--standalone", "-m", OPENCODE_MODEL.get(model, model),
            "--format", "json", "--auto", prompt]
-    return cmd, dict(os.environ, HOME=home, XDG_CONFIG_HOME=os.path.join(home, ".config"))
+    # OpenCode takes its project directory from $PWD, not the process's cwd: an inherited PWD made it work on the
+    # caller's repo (and walk up into ~/.claude, which the sandbox hides).
+    return cmd, dict(os.environ, HOME=home, XDG_CONFIG_HOME=os.path.join(home, ".config"), PWD=os.path.realpath(repo))
 
 
 def air_metrics(session):
