@@ -1,17 +1,18 @@
 use crate::{llm::Llm, ui};
 use anyhow::{Context, Result};
 use rustyline::DefaultEditor;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use toml_edit::{DocumentMut, Item, TableLike};
 
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Provider {
     pub base_url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
     pub models: Vec<String>,
@@ -45,18 +46,54 @@ pub fn load(home: &Path) -> Result<Option<Providers>> {
     }
 }
 
+/// Writes the providers into providers.toml, touching only what changed, so its comments and layout stay.
 fn save(home: &Path, providers: &Providers) -> Result<()> {
     let path = file(home);
     let dir = path.parent().context("providers.toml has a parent")?;
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).with_context(|| dir.display().to_string())?;
+    let text = match std::fs::read_to_string(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        read => read.with_context(|| path.display().to_string())?,
+    };
+    let saved: Providers = toml::from_str(&text).with_context(|| path.display().to_string())?;
+    let mut doc: DocumentMut = text.parse().with_context(|| path.display().to_string())?;
+    doc.retain(|name, _| providers.contains_key(name));
+    for (name, provider) in providers {
+        let was = saved.get(name);
+        let table =
+            doc.entry(name).or_insert(toml_edit::table()).as_table_like_mut().context("a provider is a table")?;
+        if was.is_none_or(|w| w.base_url != provider.base_url) {
+            set(table, "base_url", provider.base_url.as_str().into());
+        }
+        if was.is_none_or(|w| w.api_key != provider.api_key) {
+            match &provider.api_key {
+                Some(key) => set(table, "api_key", key.into()),
+                None => drop(table.remove("api_key")),
+            }
+        }
+        if was.is_none_or(|w| w.models != provider.models) {
+            set(table, "models", provider.models.iter().collect::<toml_edit::Array>().into());
+        }
+    }
     let tmp = path.with_added_extension(format!("{}.tmp", std::process::id()));
     let write = || -> Result<()> {
         let mut out = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
-        out.write_all(toml::to_string(providers)?.as_bytes())?;
+        out.write_all(doc.to_string().as_bytes())?;
         out.sync_all()?;
         Ok(std::fs::rename(&tmp, &path)?)
     };
     write().inspect_err(|_| drop(std::fs::remove_file(&tmp))).with_context(|| path.display().to_string())
+}
+
+/// Sets a provider's key, keeping the comment that follows the value it replaces.
+fn set(table: &mut dyn TableLike, key: &str, mut value: toml_edit::Value) {
+    match table.get_mut(key).and_then(Item::as_value_mut) {
+        Some(old) => {
+            *value.decor_mut() = old.decor().clone();
+            *old = value;
+        }
+        None => drop(table.insert(key, Item::Value(value))),
+    }
 }
 
 pub fn key(provider: &Provider) -> &'static str {
@@ -81,9 +118,6 @@ fn number(i: usize) -> String {
 }
 
 pub async fn menu(home: &Path, providers: &mut Providers, current: &str, editor: &mut DefaultEditor) -> Result<()> {
-    if std::fs::read_to_string(file(home)).is_ok_and(|t| t.lines().any(|l| l.trim_start().starts_with('#'))) {
-        ui::note("changes made here rewrite providers.toml without its comments");
-    }
     let mark = |name: &str| if name == current { ui::paint("32", " ● current") } else { String::new() };
     loop {
         let names: Vec<String> = providers.keys().cloned().collect();
