@@ -106,7 +106,7 @@ impl Worker {
         }
         self.busy = false;
         if let Some(pid) = self.child.id() {
-            unsafe { libc::kill(pid as i32, libc::SIGINT) };
+            unsafe { libc::kill(pid.cast_signed(), libc::SIGINT) };
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         loop {
@@ -125,9 +125,9 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        let Some(pid) = self.child.id() else { return };
+        let Some(pid) = self.child.id().map(u32::cast_signed) else { return };
         let own = unsafe { libc::getpgrp() };
-        for group in descendants(pid as i32).into_iter().chain([pid as i32]).filter(|&g| g > 1 && g != own) {
+        for group in descendants(pid).into_iter().chain([pid]).filter(|&g| g > 1 && g != own) {
             unsafe { libc::kill(-group, libc::SIGKILL) };
         }
     }
@@ -136,14 +136,16 @@ impl Drop for Worker {
 pub fn descendants(pid: i32) -> Vec<i32> {
     let ps = std::process::Command::new("ps").args(["-axo", "pid=,ppid=,pgid="]).output();
     let table = ps.map(|o| String::from_utf8_lossy_owned(o.stdout)).unwrap_or_default();
-    let rows: Vec<Vec<i32>> =
-        table.lines().map(|l| l.split_whitespace().filter_map(|n| n.parse().ok()).collect()).collect();
+    let rows: Vec<[i32; 3]> = table
+        .lines()
+        .filter_map(|l| l.split_whitespace().filter_map(|n| n.parse().ok()).collect::<Vec<i32>>().as_array().copied())
+        .collect();
     let (mut tree, mut groups, mut i) = (vec![pid], vec![], 0);
     while i < tree.len() {
         let parent = tree[i];
-        for row in rows.iter().filter(|r| r.len() == 3 && r[1] == parent && r[0] != parent) {
-            tree.push(row[0]);
-            groups.push(row[2]);
+        for &[child, _, group] in rows.iter().filter(|&&[child, ppid, _]| ppid == parent && child != parent) {
+            tree.push(child);
+            groups.push(group);
         }
         i += 1;
     }

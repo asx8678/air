@@ -838,7 +838,7 @@ async fn grouped(mut cmd: tokio::process::Command) -> Result<(bool, String)> {
     let mut file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(&path)?;
     let _ = std::fs::remove_file(&path);
     let mut child = cmd.stdin(Stdio::null()).stdout(file.try_clone()?).process_group(0).spawn()?;
-    let pid = child.id().context("the check exited before it started")? as i32;
+    let pid = child.id().context("the check exited before it started")?.cast_signed();
     ui::CHECK.store(pid, Ordering::Relaxed);
     let mut group = Group(vec![pid]);
     let status = loop {

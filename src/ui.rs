@@ -40,7 +40,7 @@ pub fn printable(text: &str) -> String {
 fn size() -> Option<(u16, u16)> {
     let tty = std::fs::File::open("/dev/tty").ok()?;
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-    let asked = unsafe { libc::ioctl(tty.as_raw_fd(), libc::TIOCGWINSZ, &mut ws) } == 0;
+    let asked = unsafe { libc::ioctl(tty.as_raw_fd(), libc::TIOCGWINSZ, &raw mut ws) } == 0;
     Some((ws.ws_row, ws.ws_col)).filter(|&(rows, cols)| asked && rows >= 5 && cols >= 20)
 }
 
@@ -89,7 +89,7 @@ impl Drop for Turn {
 
 pub fn guard() {
     let mut saved: libc::termios = unsafe { std::mem::zeroed() };
-    if unsafe { libc::tcgetattr(0, &mut saved) } == 0 {
+    if unsafe { libc::tcgetattr(0, &raw mut saved) } == 0 {
         let _ = TERMIOS.set(saved);
     }
     for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
