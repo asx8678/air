@@ -174,8 +174,9 @@ impl Agent {
             .iter()
             .flat_map(|(name, p)| p.models.iter().map(move |m| (name.clone(), m.clone())))
             .collect();
-        // A provider that lists its models shows just those; /providers lists the rest of what it serves.
-        if self.config.providers.get(&self.provider).is_none_or(|p| p.models.is_empty()) {
+        // A providers.toml entry that lists its models shows just those (/providers lists the rest it serves); the
+        // provider built from config.toml's base_url has only its default model, so its endpoint is asked.
+        if self.provider == "config" || self.config.providers.get(&self.provider).is_none_or(|p| p.models.is_empty()) {
             match self.llm.models().await {
                 Ok(listed) => known.extend(listed.into_iter().map(|m| (self.provider.clone(), m))),
                 Err(e) => ui::note(&format!("could not list {}'s models: {e:#}", self.provider)),
