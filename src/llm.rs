@@ -34,6 +34,9 @@ const WINDOW: &[&str] = &[
     "tokens allowed (",
 ];
 const QUOTA: &str = "insufficient_quota";
+/// OpenCode Go's gateway adds a prompt_cache_key field to requests, and some upstreams refuse it with a 400. Another
+/// try may reach one that takes it; low tries once more.
+const CACHE_KEY: &str = "prompt_cache_key";
 const REJECTED: &[&str] = &["invalid", "authentication", "permission", "not_found", "insufficient_quota"];
 /// Stream chunk fields low reads itself or that carry nothing; the rest (id, model, provider, …) go in the log.
 const CHUNK: &[&str] = &["choices", "object", "created", "usage", "error", "obfuscation"];
@@ -372,7 +375,7 @@ impl Llm {
     }
 
     async fn send(&self, request: &reqwest::RequestBuilder) -> Result<(reqwest::Response, Instant)> {
-        let mut timed_out = false;
+        let (mut timed_out, mut refused_key) = (false, false);
         for attempt in 1.. {
             let sent = Instant::now();
             // None when the builder holds an error: a malformed base_url, or an API key that is no valid header.
@@ -385,7 +388,9 @@ impl Llm {
                 Ok(Ok(r)) => {
                     let (status, after) = (r.status(), retry_after(r.headers()));
                     let text = head(r).await;
-                    let retryable = status == 429 || status.is_server_error();
+                    let key = status == 400 && text.contains(CACHE_KEY);
+                    let retryable = status == 429 || status.is_server_error() || key && !refused_key;
+                    refused_key |= key;
                     if status == 413 || !retryable && overflow(&text) {
                         return Err(ContextOverflow::new(format!("{status}: {text}")).into());
                     }
