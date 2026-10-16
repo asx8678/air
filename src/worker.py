@@ -201,9 +201,18 @@ def show(path, start=1, end=None):
     with open(os.path.join(ROOT, path), encoding="utf-8", errors="replace") as f:
         lines = f.read().splitlines()
     _report.setdefault("reads", []).append(_rel(path))
-    start, end = max(start, 1), min(end or len(lines), len(lines))
-    print(f"[{_rel(path)}: lines {start}-{end} of {len(lines)}]")
-    print("\n".join(f"{n}: {lines[n - 1]}" for n in range(start, end + 1)))
+    asked, start, end = end, max(start, 1), min(end or len(lines), len(lines))
+    sys.stdout.flush()
+    room, rows = 2 * HALF - os.fstat(1).st_size - 2000, []
+    for n in range(start, end + 1):
+        room -= len(lines[n - 1]) + len(str(n)) + 3
+        if room < 0 and rows:
+            break
+        rows.append(f"{n}: {lines[n - 1]}")
+    stop = start + len(rows) - 1
+    rest = f"; show({_rel(path)!r}, {stop + 1}{f', {asked}' if asked else ''}) continues" if stop < end else ""
+    print(f"[{_rel(path)}: lines {start}-{stop} of {len(lines)}{rest}]")
+    print("\n".join(rows))
 
 
 def accept(criteria):
