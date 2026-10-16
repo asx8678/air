@@ -287,7 +287,7 @@ impl Agent {
                 limit = format!("stopped after {} in one turn ({TURN_BUDGET} × compact_at)", ui::tokens(spent));
                 break;
             }
-            if self.session.last_prompt_tokens() >= self.compact_at {
+            if self.upcoming() >= self.compact_at {
                 self.compact()?;
             }
             let result = self.llm.complete(self.session.messages(), &tools()).await;
@@ -405,21 +405,22 @@ impl Agent {
         serde_json::to_string(&self.session.messages()).map_or(0, |m| m.len() as u64) / 4
     }
 
-    fn overflow(&mut self, window: Option<u64>) -> Result<()> {
-        let seen = self.session.last_prompt_tokens();
+    /// The next request's size in tokens: the provider's count for the last one plus what has been added since, or
+    /// the whole request by bytes when no count has come back since the last compaction.
+    fn upcoming(&self) -> u64 {
         let entries = &self.session.entries;
         let compacted = entries.iter().rposition(|e| e["compact"].is_object()).map_or(0, |i| i + 1);
-        let used = (compacted..entries.len()).rev().find(|&i| entries[i]["meta"]["usage"]["prompt_tokens"].is_u64());
-        let estimate = match used {
-            Some(i) => {
-                let newest = compact::newest_task(entries);
-                let sent = (i..entries.len()).filter(|&j| entries[j]["role"].is_string());
-                let sent = sent.map(|j| compact::wire(&entries[j], j, newest).to_string().len() as u64);
-                seen + sent.sum::<u64>() / 4
-            }
-            None => self.sent(),
-        };
-        // Compaction waits for compact_at, and one request can add two full runs and a reply: keep a fifth free.
+        let counted = (compacted..entries.len()).rev().find(|&i| entries[i]["meta"]["usage"]["prompt_tokens"].is_u64());
+        let Some(i) = counted else { return self.sent() };
+        let newest = compact::newest_task(entries);
+        let added = (i..entries.len()).filter(|&j| entries[j]["role"].is_string());
+        let added: u64 = added.map(|j| compact::wire(&entries[j], j, newest).to_string().len() as u64).sum();
+        entries[i]["meta"]["usage"]["prompt_tokens"].as_u64().unwrap_or(0) + added / 4
+    }
+
+    fn overflow(&mut self, window: Option<u64>) -> Result<()> {
+        let (seen, estimate) = (self.session.last_prompt_tokens(), self.upcoming());
+        // A fifth stays free: the reply needs room too, and the estimate counts bytes, not tokens.
         self.compact_at = self.compact_at.min(window.unwrap_or(estimate) * 4 / 5);
         self.compact_to(self.compact_at as usize / 5, true)?;
         self.compact_at = self.compact_at.max(self.sent());
