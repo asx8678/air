@@ -978,7 +978,7 @@ fn context(root: &Path, config: &Config, yolo: bool) -> serde_json::Map<String, 
         (false, false) => "bwrap",
     };
     let context = json!({
-        "low": format!("{} {}", env!("CARGO_PKG_VERSION"), env!("LOW_BUILD")),
+        "low": crate::VERSION,
         "pid": std::process::id(), "os": std::env::consts::OS, "arch": std::env::consts::ARCH,
         "branch": rev(&["symbolic-ref", "--short", "-q", "HEAD"]),
         "head": rev(&["rev-parse", "-q", "--verify", "HEAD"]),

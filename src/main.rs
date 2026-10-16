@@ -9,22 +9,64 @@ mod ui;
 mod worker;
 
 use anyhow::{Context, Result, bail, ensure};
-use clap::Parser;
 use rustyline::error::ReadlineError;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-#[derive(Parser)]
-#[command(version = concat!(env!("CARGO_PKG_VERSION"), " ", env!("LOW_BUILD")), about = "A low-entropy, code-mode coding agent. Without a task it starts a REPL (/compact, /cost, /think, /models [filter], /providers).")]
+/// The build `low --version` names and the session log records.
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " ", env!("LOW_BUILD"));
+const ABOUT: &str = "A low-entropy, code-mode coding agent. Without a task it starts a REPL (/compact, /cost, /think, /models [filter], /providers).";
+const USAGE: &str = "Usage: low [OPTIONS] [TASK]";
+const HELP: &str = "\
+Arguments:
+  [TASK]  Run this task once and exit (status 1 when a configured check did not pass on the final tree or the turn stopped short)
+
+Options:
+      --resume         Resume the latest session in this repo
+  -m, --model <MODEL>  Model for a new session; with --resume it switches the session to it (so does /models)
+      --yolo           No sandbox: network on, writes anywhere (env vars stay filtered; env = [...] in ~/.config/low/config.toml passes more)
+  -h, --help           Print help
+  -V, --version        Print version";
+
 struct Cli {
-    #[arg(help = "Run this task once and exit (status 1 when a configured check did not pass on the final tree or the turn stopped short)")]
     task: Option<String>,
-    #[arg(long, help = "Resume the latest session in this repo")]
     resume: bool,
-    #[arg(short, long, help = "Model for a new session; with --resume it switches the session to it (so does /models)")]
     model: Option<String>,
-    #[arg(long, help = "No sandbox: network on, writes anywhere (env vars stay filtered; env = [...] in ~/.config/low/config.toml passes more)")]
     yolo: bool,
+}
+
+impl Cli {
+    /// Exits on --help and --version, and with status 2 on an argument low does not take.
+    fn parse() -> Self {
+        Self::args().unwrap_or_else(|e| {
+            eprintln!("error: {e}\n\n{USAGE}\n\nFor more information, try '--help'.");
+            std::process::exit(2)
+        })
+    }
+
+    fn args() -> Result<Self, lexopt::Error> {
+        use lexopt::prelude::*;
+        let mut cli = Self { task: None, resume: false, model: None, yolo: false };
+        let mut parser = lexopt::Parser::from_env();
+        while let Some(arg) = parser.next()? {
+            match arg {
+                Value(task) if cli.task.is_none() => cli.task = Some(task.string()?),
+                Long("resume") => cli.resume = true,
+                Short('m') | Long("model") => cli.model = Some(parser.value()?.string()?),
+                Long("yolo") => cli.yolo = true,
+                Short('h') | Long("help") => {
+                    println!("{ABOUT}\n\n{USAGE}\n\n{HELP}");
+                    std::process::exit(0)
+                }
+                Short('V') | Long("version") => {
+                    println!("low {VERSION}");
+                    std::process::exit(0)
+                }
+                _ => return Err(arg.unexpected()),
+            }
+        }
+        Ok(cli)
+    }
 }
 
 #[derive(Deserialize, Default)]
