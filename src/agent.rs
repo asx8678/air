@@ -59,7 +59,7 @@ const AGAIN: &str =
     "That happened twice in a row: send one run() now with the smallest next step, and reason less first.";
 const LENGTH: &str = "Your last reply hit the output limit and was cut off. Continue from where it stopped, in smaller \
                       steps: one run() at a time, or a shorter answer.";
-const HELPERS: &[&str] = &["sh", "show", "accept", "edit", "write", "check", "carry", "plan", "done", "recall"];
+const HELPERS: &[&str] = &["sh", "show", "accept", "edit", "write", "check", "plan", "done", "recall"];
 const SANDBOX: &str = "\n\n## Sandbox\nYour code runs in a sandbox. Writes outside the repo and temp dirs fail, as do \
                        writes into any .git directory and reads of credentials and private data in the home directory \
                        (ssh and cloud keys, shell history, browser data, other tools' configs). Only a fixed set of \
@@ -507,7 +507,7 @@ impl Agent {
         }
         ui::run(code);
         let state = self.session.state();
-        let state = json!({"accepted": state.accepted, "carry": state.carry, "plan": state.plan});
+        let state = json!({"accepted": state.accepted, "plan": state.plan});
         let clock = Instant::now();
         let ran = async {
             let mut reply = self.worker()?.run(code, &state).await?;

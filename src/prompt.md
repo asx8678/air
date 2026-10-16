@@ -15,7 +15,6 @@ edit(path, old, new)          # replace the one exact occurrence of old; raises 
 edit(path, [(old, new), ...]) # several replacements in one file, in order: all or none, formatted once
 write(path, content)          # create a new file; raises if it exists
 check() -> bool               # runs the project check and prints its result
-carry(note=None, clear=False)  # keep a note in every compaction summary until cleared
 plan(steps)                   # this task's steps, shown to the user; replaces any earlier plan
 done(step=None) -> str|None   # mark a step done (default: current); returns the next step
 recall(n) -> str              # exact session entry #n cited by a summary

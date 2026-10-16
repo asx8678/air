@@ -123,7 +123,7 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
         })
         .collect();
 
-    let (mut criteria, mut carry) = (vec![], vec![]);
+    let mut criteria = vec![];
     let mut files: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
     let mut failures: Vec<(String, String)> = vec![];
     let mut status = vec![];
@@ -135,9 +135,6 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
         }
         if let Some(c) = meta["accepted"].as_str() {
             criteria = vec![format!("#{i}\n{}", excerpt(&quote(c), 1800))];
-        }
-        if let Some(notes) = meta["carry"].as_array() {
-            carry = notes.iter().filter_map(Value::as_str).map(|n| format!("#{i}\n{}", quote(n))).collect();
         }
         for act in meta["actions"].as_array().into_iter().flatten() {
             let (tool, path, ok) = (act["tool"].as_str().unwrap_or_default(), act["path"].as_str(), act["ok"] == true);
@@ -222,7 +219,6 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
     for (title, lines, cap) in [
         ("Recent user directions", dialogue, 16_384),
         ("Accepted criteria", criteria, 2_048),
-        ("Carry forward", carry, 3_072),
         ("Unresolved failures", failures.into_iter().map(|(_, l)| l).collect(), 3_072),
         ("Failing check output", check_output, 3_200),
         ("Status", status, 1_536),

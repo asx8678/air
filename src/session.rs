@@ -25,7 +25,6 @@ pub struct Session {
 #[derive(Default)]
 pub struct State {
     pub accepted: Option<String>,
-    pub carry: Vec<String>,
     pub plan: Value,
 }
 
@@ -203,9 +202,6 @@ impl Session {
             }
             if meta["plan"].is_object() {
                 state.plan = meta["plan"].clone();
-            }
-            if let Some(notes) = meta["carry"].as_array() {
-                state.carry = notes.iter().filter_map(|n| n.as_str().map(String::from)).collect();
             }
         }
         state

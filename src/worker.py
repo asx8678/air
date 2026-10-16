@@ -238,21 +238,6 @@ def _tree():
     return tree
 
 
-def carry(note=None, clear=False):
-    notes = [] if clear else list(_report.get("carry", _state.get("carry") or []))
-    if note is not None:
-        note = str(note)
-        if len(note.encode()) > 2048:
-            raise ValueError("a carry note is limited to 2 KiB")
-        if note not in notes:
-            notes.append(note)
-        if len(notes) > 16:
-            raise ValueError("at most 16 carry notes; carry(clear=True) and add back what still matters")
-    if clear or note is not None:
-        _report["carry"] = notes
-    return notes
-
-
 def plan(steps):
     _report["plan"] = {"steps": [str(s) for s in steps], "done": []}
 
@@ -285,7 +270,7 @@ def recall(n):
     raise IndexError(f"no entry #{n}")
 
 
-TOOLS = {"sh": sh, "show": show,"edit": edit, "write": write, "accept": accept, "carry": carry, "plan": plan, "done": done, "check": check, "recall": recall}
+TOOLS = {"sh": sh, "show": show,"edit": edit, "write": write, "accept": accept, "plan": plan, "done": done, "check": check, "recall": recall}
 G = {"__name__": "__main__", "_last": "", **TOOLS}
 HELPERS = tuple(f"{name}()" for name in TOOLS)
 
