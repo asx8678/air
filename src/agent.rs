@@ -333,16 +333,17 @@ impl Agent {
             let empty = calls.is_empty() && message["content"].as_str().is_none_or(|c| c.trim().is_empty());
             if calls.is_empty() && (empty || message["meta"]["finish"] == "length") && retries < 2 {
                 retries += 1;
-                let meta = &message["meta"];
-                let extra =
-                    json!({"meta": {"usage": meta["usage"], "timing": meta["timing"]}, "finish": meta["finish"]});
                 if empty {
+                    // The reply is dropped, so its usage stays on the event.
+                    let meta = &message["meta"];
+                    let extra =
+                        json!({"meta": {"usage": meta["usage"], "timing": meta["timing"]}, "finish": meta["finish"]});
                     ui::event("empty", "the model sent an empty reply; asking it to act", extra);
                     let thinking = message["reasoning_content"].as_str().unwrap_or_default();
                     self.discard("the reply was empty", thinking);
                     self.retry("was empty")?;
                 } else {
-                    ui::event("length", "the reply hit the output limit; asking the model to continue", extra);
+                    ui::event("length", "the reply hit the output limit; asking the model to continue", Value::Null);
                     self.session.push(message)?;
                     self.retry("hit the output limit and was cut off; continue from where it stopped")?;
                 }
