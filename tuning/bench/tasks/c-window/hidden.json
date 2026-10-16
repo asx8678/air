@@ -1,6 +1,0 @@
-{
-  "commit": "35a5383",
-  "parent": "35a5383^",
-  "file": "src/llm.rs",
-  "tests": 1
-}

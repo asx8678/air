@@ -1,6 +1,0 @@
-{
-  "commit": "5050a96",
-  "parent": "5050a96^",
-  "file": "src/worker.rs",
-  "tests": 1
-}

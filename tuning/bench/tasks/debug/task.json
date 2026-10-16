@@ -1,5 +1,0 @@
-{
-  "kind": "bugfix",
-  "timeout": 900,
-  "prompt": "`python3 -m unittest` fails. Fix the code so the tests pass; don't change the tests."
-}

@@ -1,5 +1,0 @@
-{
-  "kind": "refactor",
-  "timeout": 900,
-  "prompt": "Rename `calc_total` to `order_total` everywhere (code, tests and README). Keep `calc_total` importable from `shop.pricing` as a deprecated alias that emits a DeprecationWarning and returns the same result."
-}

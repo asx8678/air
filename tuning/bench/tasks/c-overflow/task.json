@@ -1,5 +1,0 @@
-{
-  "kind": "refactor",
-  "timeout": 1800,
-  "prompt": "The context window size is parsed from the overflow error in src/agent.rs, far from where the overflow is detected. Move WINDOW and window() to src/llm.rs next to OVERFLOW, and make ContextOverflow carry the window: a struct with a private `text: String` and a `pub window: Option<u64>`, built by `ContextOverflow::new(text: String)` and still displayed as `context window exceeded: <text>`. Agent::overflow then takes the window (`Option<u64>`) instead of the error text. Move window()'s test along with it."
-}

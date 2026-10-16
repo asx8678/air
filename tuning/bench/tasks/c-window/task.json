@@ -1,5 +1,0 @@
-{
-  "kind": "bugfix",
-  "timeout": 1800,
-  "prompt": "window() in src/llm.rs reads the context size out of a provider's overflow error, and it misreads two cases: `context length of 4096,max_tokens=10` comes back as 4,096,000,000 instead of 4096 (a comma not followed by a digit ends the number, so the `m` after it is no suffix), and `context length is 1 million tokens` comes back as 1 (anything under 1024 tokens is a misread, not a context window: return None). Fix window() and extend its test."
-}
