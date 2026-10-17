@@ -52,10 +52,26 @@ struct Cli {
 impl Cli {
     /// Exits on --help and --version, and with status 2 on an argument low does not take.
     fn parse() -> Self {
-        Self::args().unwrap_or_else(|e| {
+        Self::args().map_err(|e| e.to_string()).and_then(Self::combined).unwrap_or_else(|e| {
             eprintln!("error: {e}\n\n{USAGE}\n\nFor more information, try '--help'.");
             std::process::exit(2)
         })
+    }
+
+    /// Options that don't go together.
+    fn combined(self) -> Result<Self, String> {
+        let send = !self.serve && !self.resume && self.model.is_none() && self.tasks.is_none() && !self.yolo;
+        let refused = [
+            (self.send && self.task.is_none(), "--send needs a task: low --send \"<task>\""),
+            (self.send && !send, "--send takes only a task (and --session or --json); the server's session decides the rest"),
+            (self.json && self.task.is_none() && self.tasks.is_none(), "--json needs a task or --tasks; the REPL has no JSON"),
+            (self.json && self.serve, "--serve prints a log; use --json with --send instead"),
+            (self.tasks.is_some() && (self.task.is_some() || self.serve), "--tasks takes its tasks from the file only"),
+        ];
+        match refused.into_iter().find(|(bad, _)| *bad) {
+            Some((_, why)) => Err(why.into()),
+            None => Ok(self),
+        }
     }
 
     fn args() -> Result<Self, lexopt::Error> {
@@ -151,8 +167,6 @@ async fn start() -> Result<()> {
     let repo_dir = top.is_some();
     let root = top.map_or_else(std::env::current_dir, |t| Ok(PathBuf::from(t)))?.canonicalize()?;
     if cli.send {
-        let only = !cli.serve && !cli.resume && cli.model.is_none();
-        ensure!(only, "--send takes only a task (and --session or --json); the server's session decides the rest");
         let task = cli.task.as_deref().context("--send needs a task: low --send \"<task>\"")?;
         let result = serve::send(&home, &root, cli.session.as_deref(), task, cli.json).await?;
         std::process::exit(exit_code(&result));
@@ -184,7 +198,6 @@ async fn start() -> Result<()> {
         bail!("~/.config/low/config.toml sets search = \"{name}\", but providers.toml has no [{name}]");
     }
     let search = user.search.clone().or_else(|| providers.contains_key("deepseek").then(|| "deepseek".into()));
-    ensure!(cli.tasks.is_none() || cli.task.is_none() && !cli.serve, "--tasks takes its tasks from the file only");
     // A checklist names its session, so a later --tasks run continues it.
     let id = cli.session.clone().or_else(|| cli.tasks.as_deref().and_then(|file| tasks::session(&home, file)));
     let resume = cli.resume || id.is_some();

@@ -1052,7 +1052,6 @@ async fn grouped(mut cmd: tokio::process::Command) -> Result<(bool, String)> {
     Ok((status.success(), out))
 }
 
-/// An error as low shows and logs it: the whole chain, without control characters or secrets.
 /// The exit status for an error, as low gives it for a turn's outcome: see outcome().
 pub const ERROR: i64 = 3;
 
@@ -1075,6 +1074,7 @@ pub fn failed(last: &Value, e: &anyhow::Error) -> Value {
     result
 }
 
+/// An error as low shows and logs it: the whole chain, without control characters or secrets.
 pub fn error_text(e: &anyhow::Error) -> String {
     redact(&ui::printable(&format!("{e:#}"))).0
 }

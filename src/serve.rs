@@ -86,6 +86,9 @@ async fn answer(agent: &mut Agent, task: &str) -> Value {
     match task.trim() {
         "/stop" => json!({"stopped": true, "status": "stopped server", "exit": 0}),
         "" => agent::failed(&Value::Null, &anyhow::anyhow!("the task is empty")),
+        task if crate::COMMANDS.contains(&task.split_whitespace().next().unwrap_or_default()) => {
+            agent::failed(&Value::Null, &anyhow::anyhow!("{task} is a REPL command; low --send takes tasks and /stop"))
+        }
         task => match crate::unknown(task) {
             Some(why) => agent::failed(&Value::Null, &anyhow::anyhow!(why)),
             None => match agent.run(task).await {
