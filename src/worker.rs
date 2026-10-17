@@ -331,3 +331,58 @@ fn newest_python(dirs: impl Iterator<Item = PathBuf>) -> Option<PathBuf> {
     let found = entries.filter_map(|e| Some((minor(&e)?, e.path()))).filter(|(_, p)| runnable(p));
     found.min_by_key(|(minor, _)| std::cmp::Reverse(*minor)).map(|(_, p)| p)
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    /// Runs code the way the agent does, answering check() with a pass.
+    async fn run(worker: &mut super::Worker, code: &str) -> Value {
+        let mut reply = worker.run(code, &json!({})).await.unwrap();
+        while reply["needs_check"] == true {
+            reply = worker.resume(true, "[check passed: true]").await.unwrap();
+        }
+        reply
+    }
+
+    /// Drives the worker.py this build embeds through its helpers: low's own check runs no other code of it, and the
+    /// worker serving a session is the installed low's copy, which never reloads.
+    #[tokio::test]
+    async fn worker_helpers() {
+        let dir = std::env::temp_dir().join(format!("low-worker-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut worker = super::Worker::start(&dir, true, Some("true"), None).unwrap();
+        let whole = [
+            ("x = 41\nx + 1", "42\n"),
+            ("print(sh('echo hi; exit 3'))", "hi\n[exit 3]\n"),
+            (
+                "write('a.py', 'def f():\\n    return 1\\n')\nshow('a.py')",
+                "write a.py: ok\n[a.py: lines 1-2 of 2]\n1: def f():\n2:     return 1\n",
+            ),
+            ("edit('a.py', 'return 1', 'return 2')\ncheck()", "edit a.py: ok\n[check passed: true]\n"),
+            ("def ratio(a, b):\n    return a / b", "(no output)"),
+        ];
+        for (code, out) in whole {
+            assert_eq!(run(&mut worker, code).await["out"], out, "{code}");
+        }
+        let parts = [
+            (
+                "edit('a.py', [('return 2', 'return 3'), ('nope', 'x')])",
+                "old text not found in a.py (pair 2 of 2; nothing was changed)",
+            ),
+            ("total = 1\nratio(total, 0)", "ZeroDivisionError: division by zero"),
+            ("show = 1", "[show: low's helpers, restored before the next run]"),
+            (
+                "edit('a.py', 'return 2', 'return 4')\n1 / 0",
+                "[applied before the error: edit a.py; inspect before repeating them]",
+            ),
+        ];
+        for (code, part) in parts {
+            let reply = run(&mut worker, code).await;
+            assert!(reply["out"].as_str().is_some_and(|out| out.contains(part)), "{code}: {reply}");
+        }
+        assert!(std::fs::read_to_string(dir.join("a.py")).unwrap().contains("return 4"));
+        drop(worker);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
