@@ -87,6 +87,8 @@ low "the median of an even-length list is wrong; fix it"
 | `low --resume` | continues the latest session in this repository |
 | `low -m <model>` | picks the model for a new session; with `--resume`, switches the session to it |
 | `low --yolo` | turns the sandbox off: network on, writes anywhere (environment variables stay filtered) |
+| `low --serve ["<task>"]` | keeps the session open after the task and takes the next ones from `low --send`; while it waits, it re-sends the prompt so the provider keeps it cached (`keep_warm`) |
+| `low --send "<task>"` | gives the task to the `low --serve` running in this repository and prints its result, with the same exit status as `low "<task>"`; `low --send /stop` ends the server |
 
 In the REPL:
 
@@ -115,6 +117,7 @@ env = ["MY_VAR"]                     # environment variables passed into the san
 [models."deepseek-v4.1-flash"]       # sent with every request to this model
 temperature = 0.0
 compact_at = 200000                  # compact the context at this many prompt tokens
+keep_warm = 600                      # low --serve: re-send the prompt after this many idle seconds (default 600, 0: never)
 ```
 
 ## How it works

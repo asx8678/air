@@ -5,6 +5,7 @@ mod llm;
 mod providers;
 mod redact;
 mod render;
+mod serve;
 mod session;
 mod stats;
 mod ui;
@@ -27,6 +28,8 @@ Options:
       --resume         Resume the latest session in this repo
   -m, --model <MODEL>  Model for a new session; with --resume it switches the session to it (so does /models)
       --yolo           No sandbox: network on, writes anywhere (env vars stay filtered; env = [...] in ~/.config/low/config.toml passes more)
+      --serve          After the task, keep the session and take the next tasks from low --send, keeping the provider's prompt cache warm in between (from a script, start it without a task)
+      --send           Give the task to the low --serve running in this repo and print its result, with the same exit status; /stop ends that server
   -h, --help           Print help
   -V, --version        Print version";
 
@@ -35,6 +38,8 @@ struct Cli {
     resume: bool,
     model: Option<String>,
     yolo: bool,
+    serve: bool,
+    send: bool,
 }
 
 impl Cli {
@@ -48,7 +53,7 @@ impl Cli {
 
     fn args() -> Result<Self, lexopt::Error> {
         use lexopt::prelude::*;
-        let mut cli = Self { task: None, resume: false, model: None, yolo: false };
+        let mut cli = Self { task: None, resume: false, model: None, yolo: false, serve: false, send: false };
         let mut parser = lexopt::Parser::from_env();
         while let Some(arg) = parser.next()? {
             match arg {
@@ -56,6 +61,8 @@ impl Cli {
                 Long("resume") => cli.resume = true,
                 Short('m') | Long("model") => cli.model = Some(parser.value()?.string()?),
                 Long("yolo") => cli.yolo = true,
+                Long("serve") => cli.serve = true,
+                Long("send") => cli.send = true,
                 Short('h') | Long("help") => {
                     println!("{ABOUT}\n\n{USAGE}\n\n{HELP}");
                     std::process::exit(0)
@@ -115,6 +122,13 @@ async fn start() -> Result<()> {
     let top = top.ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
     let repo_dir = top.is_some();
     let root = top.map_or_else(std::env::current_dir, |t| Ok(PathBuf::from(t)))?.canonicalize()?;
+    if cli.send {
+        let only = !cli.serve && !cli.resume && cli.model.is_none();
+        ensure!(only, "--send takes only a task; the server's session decides the rest");
+        let task = cli.task.as_deref().context("--send needs a task: low --send \"<task>\"")?;
+        let good = serve::send(&home, &root, task).await?;
+        std::process::exit(i32::from(!good));
+    }
     let user = load(&providers::config_dir(&home).join("config.toml"))?;
     check_config(&user)?;
     let repo = load(&root.join("low.toml"))?;
@@ -155,6 +169,9 @@ async fn start() -> Result<()> {
     }
     if !cli.resume {
         eprintln!("[session {}]", agent.path().display());
+    }
+    if cli.serve {
+        return serve::serve(&mut agent, cli.task).await;
     }
     if let Some(task) = cli.task {
         let verified = agent.run(&task).await?;
@@ -280,6 +297,9 @@ fn check_config(user: &Config) -> Result<()> {
         }
         if let Some(value) = profile.get("compact_at").filter(|v| v.as_u64().is_none_or(|n| n < 1024)) {
             bail!("{at} sets compact_at = {value}; it takes a whole number of tokens, at least 1024");
+        }
+        if let Some(value) = profile.get("keep_warm").filter(|v| !v.is_u64()) {
+            bail!("{at} sets keep_warm = {value}; it takes a whole number of seconds, 0 to turn it off");
         }
     }
     Ok(())

@@ -16,6 +16,10 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 const COMPACT_AT: u64 = 100_000;
+/// Seconds an idle --serve session waits before re-sending its prompt to keep it cached; keep_warm in a model's
+/// profile overrides it. OpenCode Go, Zro and open design all still had a 10k-token prompt cached after 20 untouched
+/// minutes (2026-10-17), so ten minutes keeps a margin.
+const WARM_EVERY: u64 = 600;
 const MAX_REQUESTS: usize = 200;
 const FILES: usize = 200;
 const LISTING: usize = 8 * 1024;
@@ -61,6 +65,8 @@ pub struct Agent {
     passed: Option<(String, String)>,
     /// Whether the root is a git repository; outside one there are no snapshots and no undo.
     repo: bool,
+    /// The last turn's verdict, report rows and final answer, for a `low --send` client.
+    last: Value,
 }
 
 impl Agent {
@@ -114,6 +120,7 @@ impl Agent {
             broken: None,
             passed: None,
             repo,
+            last: Value::Null,
         };
         agent.record()?;
         Ok(agent)
@@ -133,6 +140,35 @@ impl Agent {
         }
         let provider = holding(&self.config.providers, model).cloned().unwrap_or_else(|| self.provider.clone());
         self.switch(&provider, model)
+    }
+
+    pub fn last(&self) -> &Value {
+        &self.last
+    }
+
+    /// How often an idle --serve session re-sends its prompt: keep_warm seconds from the model's profile, where 0 turns
+    /// it off, else WARM_EVERY.
+    pub fn keep_warm(&self) -> Option<Duration> {
+        let every = self.session.header()["keep_warm"].as_u64().unwrap_or(WARM_EVERY);
+        (every > 0).then(|| Duration::from_secs(every))
+    }
+
+    /// Re-sends the conversation so far, cut at one output token, so the provider keeps it cached for the next task.
+    /// Nothing is sent before the first reply or right after a compaction. The request is logged as a warm event with
+    /// its usage, so /cost counts it.
+    pub async fn warm(&mut self) -> Result<()> {
+        if self.session.last_prompt_tokens() == 0 {
+            return Ok(());
+        }
+        let meta = self.llm.warm(self.session.messages(), &tools()).await?;
+        let (prompt, cached) =
+            (meta["usage"]["prompt_tokens"].as_u64().unwrap_or(0), ui::cached(&meta["usage"]).unwrap_or(0));
+        ui::event(
+            "warm",
+            &format!("kept the prompt cache warm: {cached} of {prompt} tokens cached"),
+            json!({"meta": meta}),
+        );
+        self.session.flush()
     }
 
     pub fn path(&self) -> &Path {
@@ -790,6 +826,8 @@ impl Agent {
         rows.push(("cost", cost));
         let good = (!changed || checked || self.config.check.is_none()) && !stopped;
         ui::report(&rows, verdict, good);
+        let answer = turn.iter().rev().find(|e| e["role"] == "assistant").and_then(|e| e["content"].as_str());
+        self.last = json!({"verdict": verdict, "good": good, "rows": rows, "answer": answer});
         let changes: Vec<&str> = changes.lines().filter(|l| *l != "none").collect();
         self.session.push(json!({"report": {
             "verdict": verdict, "tree": tree, "changed": changed, "checked": checked, "stopped": stopped, "check_inputs": inputs, "outside": outside, "criteria": state.accepted,

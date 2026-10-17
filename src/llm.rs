@@ -15,6 +15,8 @@ const TOTAL: Duration = Duration::from_hours(1);
 const LINE_MAX: usize = 16 << 20;
 const BODY_MAX: usize = 2000;
 const FIELDS: [&str; 2] = ["reasoning_content", "reasoning"];
+/// The line a warm request adds after the conversation; its one-token reply is dropped.
+const WARM: &str = "Reply with one word: ok";
 const OVERFLOW: &[&str] = &[
     "context_length",
     "context length",
@@ -212,20 +214,57 @@ impl Llm {
         Ok(ids.map(String::from).collect())
     }
 
-    pub async fn complete(&self, mut messages: Vec<Value>, tools: &Value) -> Result<Value> {
+    /// A request's body: the session's parameters, the model, the messages with reasoning under the field this provider
+    /// uses, the tools, and a streamed reply that ends with its usage.
+    fn body(&self, mut messages: Vec<Value>, tools: &Value) -> serde_json::Map<String, Value> {
         let field = self.field.get();
         for fields in messages.iter_mut().filter(|_| field != FIELDS[0]).filter_map(Value::as_object_mut) {
             if let Some(reasoning) = fields.remove(FIELDS[0]) {
                 fields.insert(field.into(), reasoning);
             }
         }
-        let count = messages.len();
         let mut body = self.params.as_object().cloned().unwrap_or_default();
         body.insert("model".into(), self.model.as_str().into());
         body.insert("messages".into(), Value::Array(messages));
         body.insert("tools".into(), tools.clone());
         body.insert("stream".into(), true.into());
         body.insert("stream_options".into(), json!({"include_usage": true}));
+        body
+    }
+
+    /// Sends the conversation so far plus a throwaway line, cut at one output token, so the provider's prompt cache
+    /// keeps the prefix that the next task's first request shares. Returns the request's usage and time, as a reply's
+    /// meta.
+    pub async fn warm(&self, mut messages: Vec<Value>, tools: &Value) -> Result<Value> {
+        messages.push(json!({"role": "user", "content": WARM}));
+        let mut body = self.body(messages, tools);
+        body.insert("max_tokens".into(), 1.into());
+        let url = format!("{}/chat/completions", self.base);
+        let post = self.http.post(&url).header("content-type", "application/json").timeout(Duration::from_secs(120));
+        let start = Instant::now();
+        let mut response =
+            self.authorized(post.body(serde_json::to_vec(&body)?)).send().await.map_err(|e| anyhow!(chain(e)))?;
+        if !response.status().is_success() {
+            bail!("{}: {}", response.status(), head(response).await);
+        }
+        let (mut lines, mut usage) = (Lines::default(), Value::Null);
+        while let Some(chunk) = response.chunk().await.map_err(|e| anyhow!(chain(e)))? {
+            lines.push(&chunk);
+            while let Some(line) = lines.next() {
+                let event =
+                    line.trim().strip_prefix("data:").and_then(|d| serde_json::from_str::<Value>(d.trim()).ok());
+                if let Some(event) = event.filter(|e| e["usage"].is_object()) {
+                    usage = event["usage"].clone();
+                }
+            }
+        }
+        let asked = json!({"url": endpoint(&url), "model": self.model});
+        Ok(json!({"usage": usage, "timing": {"ms": crate::ui::ms(start)}, "request": asked}))
+    }
+
+    pub async fn complete(&self, messages: Vec<Value>, tools: &Value) -> Result<Value> {
+        let count = messages.len();
+        let body = self.body(messages, tools);
         let (url, bytes) = (format!("{}/chat/completions", self.base), serde_json::to_vec(&body)?);
         let asked = json!({"url": endpoint(&url), "model": self.model, "messages": count, "bytes": bytes.len()});
         let request = self.authorized(self.http.post(url).header("content-type", "application/json").body(bytes));
