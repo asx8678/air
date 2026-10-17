@@ -301,7 +301,7 @@ sys.meta_path.append(_Helpers())
 signal.signal(signal.SIGINT, signal.SIG_IGN)
 _outbox.write(json.dumps({"ready": True, "python": sys.version.split()[0]}) + "\n")
 _outbox.flush()
-for request in _inbox:
+for n, request in enumerate(_inbox, 1):
     request = json.loads(request)
     code, _state = request["code"], request.get("state") or {}
     _deadline = time.monotonic() + RUN_CAP
@@ -315,20 +315,22 @@ for request in _inbox:
     failed = False
     signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
-        linecache.cache["<run>"] = (len(code), None, code.splitlines(True), "<run>")
-        tree = ast.parse(code, "<run>")
+        # Each run's code under its own name, so a traceback through a function an earlier run defined shows its line.
+        name = f"<run {n}>"
+        linecache.cache[name] = (len(code), None, code.splitlines(True), name)
+        tree = ast.parse(code, name)
         tail = tree.body.pop() if tree.body and isinstance(tree.body[-1], ast.Expr) else None
-        exec(compile(tree, "<run>", "exec"), G)
+        exec(compile(tree, name, "exec"), G)
         if tail:
-            value = eval(compile(ast.Expression(tail.value), "<run>", "eval"), G)
+            value = eval(compile(ast.Expression(tail.value), name, "eval"), G)
             sys.stdout.flush()
             if value is not None and not os.fstat(1).st_size:
                 print(value)
     except BaseException as e:
         failed = True
         tb = traceback.extract_tb(e.__traceback__)
-        frames = [f for f in tb if f.filename == "<run>"]
-        misuse = isinstance(e, TypeError) and tb and tb[-1].filename == "<run>" and str(e).startswith(HELPERS)
+        frames = [f for f in tb if f.filename.startswith("<run ")]
+        misuse = isinstance(e, TypeError) and tb and tb[-1].filename.startswith("<run ") and str(e).startswith(HELPERS)
         rejected = isinstance(e, (SyntaxError, NameError)) or misuse
         _report["exception"], _report["rejected"] = type(e).__name__, bool(rejected)
         print("".join(traceback.format_list(frames) + traceback.format_exception_only(type(e), e)), end="")

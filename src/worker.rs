@@ -374,7 +374,7 @@ mod tests {
                 "edit('a.py', ['return 2', 'return 3'])",
                 "edit() takes (path, old, new) or (path, [(old, new), ...]) with string old and new",
             ),
-            ("total = 1\nratio(total, 0)", "ZeroDivisionError: division by zero"),
+            ("total = 1\nratio(total, 0)", "    return a / b"),
             ("show = 1", "[show: low's helpers, restored before the next run]"),
             (
                 "edit('a.py', 'return 2', 'return 4')\n1 / 0",
