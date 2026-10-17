@@ -1,4 +1,5 @@
 use crate::ui::{paint, printable, styled, width, wrap};
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Default)]
 pub struct Markdown {
@@ -119,7 +120,7 @@ fn visible(cell: &str) -> usize {
     for esc in ["\x1b[36m", "\x1b[39m", "\x1b[1m", "\x1b[22m"] {
         plain = plain.replace(esc, "");
     }
-    plain.chars().count()
+    plain.width()
 }
 
 pub fn inline(text: &str) -> String {

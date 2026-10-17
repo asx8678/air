@@ -6,6 +6,7 @@ use std::io::{IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 struct Bar {
     rows: u16,
@@ -32,6 +33,18 @@ pub fn styled() -> bool {
 
 pub fn paint(code: &str, text: &str) -> String {
     if styled() { format!("\x1b[{code}m{text}\x1b[0m") } else { text.to_string() }
+}
+
+/// The longest start of `text` that fits in `cols` terminal columns: wide characters (CJK, most emoji) take two.
+pub fn fit(text: &str, cols: usize) -> &str {
+    let mut used = 0;
+    for (i, c) in text.char_indices() {
+        used += c.width().unwrap_or(0);
+        if used > cols {
+            return &text[..i];
+        }
+    }
+    text
 }
 
 pub fn printable(text: &str) -> String {
@@ -138,7 +151,7 @@ fn draw() {
     let cache = (cached * 100).checked_div(prompt).map(|p| format!(" · {p}% cached")).unwrap_or_default();
     let lead = if bar.plan.is_empty() { bar.activity.clone() } else { format!("{} · {}", bar.plan, bar.activity) };
     let line = format!(" ▸ {lead} │ {}{cache} │ {} ", tokens(prompt), minutes(secs));
-    let line: String = line.chars().take(bar.cols.saturating_sub(1) as usize).collect();
+    let line = fit(&line, bar.cols.saturating_sub(1) as usize);
     print!("\x1b7\x1b[{};1H\x1b[2K\x1b[7m{line}\x1b[0m\x1b8", bar.rows);
     let _ = std::io::stdout().flush();
 }
@@ -203,7 +216,7 @@ pub fn width() -> usize {
 
 fn flat(text: &str, max: usize) -> String {
     let flat = printable(text).split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= max { flat } else { flat.chars().take(max).collect::<String>() + "…" }
+    if flat.width() <= max { flat } else { format!("{}…", fit(&flat, max)) }
 }
 
 /// The first line of code that says what it does: not blank, a comment or an import.
@@ -242,8 +255,8 @@ fn redraw(live: &mut Live) {
     let mut out = if live.drawn > 0 { format!("\x1b[{}A", live.drawn) } else { String::new() };
     let mut drawn = 0;
     for (style, text) in group.iter().chain(&live.rows) {
-        let text: String = text.chars().take(cols.saturating_sub(3)).collect();
-        out += &format!("\r\x1b[2K  {}\n", paint(style, &text));
+        let text = fit(text, cols.saturating_sub(3));
+        out += &format!("\r\x1b[2K  {}\n", paint(style, text));
         drawn += 1;
     }
     let stale = live.drawn.saturating_sub(drawn);
@@ -280,7 +293,7 @@ fn grouped(runs: usize, files: &[String]) -> String {
     let room = width().saturating_sub(16 + count.len()).max(20);
     let (mut list, mut shown) = (String::new(), 0);
     for file in files {
-        if shown > 0 && list.chars().count() + 2 + file.chars().count() > room {
+        if shown > 0 && list.width() + 2 + file.width() > room {
             break;
         }
         list += &format!("{}{file}", if shown > 0 { ", " } else { "" });
@@ -557,7 +570,7 @@ pub fn wrap(text: &str, room: usize) -> Vec<String> {
     for line in printable(text).lines() {
         let mut current = String::new();
         for word in line.split_whitespace() {
-            if !current.is_empty() && current.chars().count() + 1 + word.chars().count() > room {
+            if !current.is_empty() && current.width() + 1 + word.width() > room {
                 out.push(std::mem::take(&mut current));
             }
             if !current.is_empty() {
