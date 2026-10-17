@@ -163,22 +163,14 @@ def _forget():
             G.pop(key, None)
 
 
-def edit(path, old, new=None, *more):
+def edit(path, old, new=None):
     pair = lambda p: isinstance(p, (list, tuple)) and len(p) == 2 and all(isinstance(s, str) for s in p)  # noqa: E731
-    texts = isinstance(old, (list, tuple)) and all(isinstance(s, str) for s in old)
-    if isinstance(old, str) and isinstance(new, str) and not more:
+    if isinstance(old, str) and isinstance(new, str):
         pairs = [(old, new)]
-    elif new is None and pair(old):
-        pairs = [tuple(old)]  # one pair given as [old, new]
     elif new is None and isinstance(old, (list, tuple)) and old and all(pair(p) for p in old):
         pairs = [tuple(p) for p in old]
-    elif new is None and texts and len(old) >= 4 and len(old) % 2 == 0:
-        pairs = list(zip(old[::2], old[1::2]))  # [old1, new1, old2, new2, ...]
-    elif pair(old) and all(pair(p) for p in (new, *more)):
-        pairs = [tuple(p) for p in (old, new, *more)]  # edit(path, [old, new], [old, new], ...)
     else:
-        raise TypeError("edit() takes (path, old, new), (path, [(old, new), ...]), (path, [old1, new1, old2, new2, ...]) "
-                        "or (path, [old, new], [old, new], ...) with string old and new")
+        raise TypeError("edit() takes (path, old, new) or (path, [(old, new), ...]) with string old and new")
     def make(full, rel):
         with open(full, encoding="utf-8", newline="") as f:
             raw = f.read()

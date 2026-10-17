@@ -370,6 +370,10 @@ mod tests {
                 "edit('a.py', [('return 2', 'return 3'), ('nope', 'x')])",
                 "old text not found in a.py (pair 2 of 2; nothing was changed)",
             ),
+            (
+                "edit('a.py', ['return 2', 'return 3'])",
+                "edit() takes (path, old, new) or (path, [(old, new), ...]) with string old and new",
+            ),
             ("total = 1\nratio(total, 0)", "ZeroDivisionError: division by zero"),
             ("show = 1", "[show: low's helpers, restored before the next run]"),
             (
