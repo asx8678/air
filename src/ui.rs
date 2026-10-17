@@ -555,6 +555,25 @@ pub fn events() -> Vec<Value> {
     std::mem::take(&mut *EVENTS.lock().unwrap())
 }
 
+/// Sends what low shows to /dev/null until dropped, so that with --json stdout carries only the result.
+pub struct Quiet(rustix::fd::OwnedFd);
+
+impl Quiet {
+    pub fn start() -> std::io::Result<Self> {
+        std::io::stdout().flush()?;
+        let saved = rustix::io::dup(stdout())?;
+        rustix::stdio::dup2_stdout(std::fs::File::options().write(true).open("/dev/null")?)?;
+        Ok(Self(saved))
+    }
+}
+
+impl Drop for Quiet {
+    fn drop(&mut self) {
+        let _ = std::io::stdout().flush();
+        let _ = rustix::stdio::dup2_stdout(&self.0);
+    }
+}
+
 pub fn report(rows: &[(&str, String)], verdict: &str, good: bool) {
     settle();
     let head = format!("── {verdict} ") + &"─".repeat(36);

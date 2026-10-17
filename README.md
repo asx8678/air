@@ -82,10 +82,12 @@ low "the median of an even-length list is wrong; fix it"
 
 | command | does |
 |---|---|
-| `low "<task>"` | runs one task and exits: 1 if a configured check didn't pass on the final tree or the turn stopped short, else 0 |
+| `low "<task>"` | runs one task and exits: 0 done, 1 not verified (a configured check didn't pass on the final tree), 3 an error, 5 stopped short |
 | `low` | starts the REPL |
 | `low --resume` | continues the latest session in this repository |
-| `low -m <model>` | picks the model for a new session; with `--resume`, switches the session to it |
+| `low --session <id>` | continues that session of this repository |
+| `low --json "<task>"` | shows nothing while the task runs and prints its result as one JSON object (session, verdict, status, exit, answer, changes, check, tokens) |
+| `low -m <model>` | picks the model for a new session; with `--resume`, switches the session to it. `provider:model` picks the provider too, for an id several providers list |
 | `low --yolo` | turns the sandbox off: network on, writes anywhere (environment variables stay filtered) |
 | `low --serve ["<task>"]` | keeps the session open after the task and takes the next ones from `low --send`; while it waits, it re-sends the prompt so the provider keeps it cached (`keep_warm`) |
 | `low --send "<task>"` | gives the task to the `low --serve` running in this repository and prints its result, with the same exit status as `low "<task>"`; `low --send /stop` ends the server |

@@ -69,13 +69,16 @@ impl Session {
         self.entries.iter().rev().find_map(|e| e.get("switch")).unwrap_or(&self.entries[0])
     }
 
-    pub fn resume(home: &Path, root: &Path, context: Map<String, Value>) -> Result<Self> {
+    /// The newest session of this repository, or the one `id` names (its id, or its log's path).
+    pub fn resume(home: &Path, root: &Path, context: Map<String, Value>, id: Option<&str>) -> Result<Self> {
+        let id = id.map(|id| Path::new(id).file_stem().and_then(|s| s.to_str()).unwrap_or(id));
         let mut paths: Vec<PathBuf> = fs::read_dir(home.join(".low/sessions"))
             .into_iter()
             .flatten()
             .flatten()
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+            .filter(|p| id.is_none_or(|id| p.file_stem().is_some_and(|s| s == id)))
             .collect();
         paths.sort();
         for path in paths.into_iter().rev() {
@@ -101,7 +104,10 @@ impl Session {
                 return Ok(session);
             }
         }
-        bail!("no session to resume for {}", root.display())
+        match id {
+            Some(id) => bail!("no session {id} for {}", root.display()),
+            None => bail!("no session to resume for {}", root.display()),
+        }
     }
 
     pub fn push(&mut self, entry: Value) -> Result<()> {

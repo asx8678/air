@@ -84,13 +84,13 @@ fn next(dir: &Path) -> Result<Option<(String, String)>> {
 /// Runs one task a client sent; the reply carries the turn's verdict, report rows and answer, or why there is none.
 async fn answer(agent: &mut Agent, task: &str) -> Value {
     match task.trim() {
-        "/stop" => json!({"stopped": true}),
-        "" => json!({"error": "the task is empty"}),
+        "/stop" => json!({"stopped": true, "status": "stopped server", "exit": 0}),
+        "" => agent::failed(&Value::Null, &anyhow::anyhow!("the task is empty")),
         task => match crate::unknown(task) {
-            Some(why) => json!({"error": why}),
+            Some(why) => agent::failed(&Value::Null, &anyhow::anyhow!(why)),
             None => match agent.run(task).await {
                 Ok(_) => agent.last().clone(),
-                Err(e) => json!({"error": agent::error_text(&e)}),
+                Err(e) => agent::failed(agent.last(), &e),
             },
         },
     }
@@ -101,14 +101,16 @@ fn locked(session: &Path) -> bool {
     File::options().append(true).open(session).is_ok_and(|f| f.try_lock().is_err())
 }
 
-/// The newest session served for this repository; stale inboxes of servers that died are removed on the way.
-fn served(home: &Path, root: &Path) -> Option<PathBuf> {
+/// The newest session served for this repository, or the one named; stale inboxes of servers that died are removed on
+/// the way.
+fn served(home: &Path, root: &Path, id: Option<&str>) -> Option<PathBuf> {
     let mut inboxes: Vec<PathBuf> = fs::read_dir(home.join(".low/sessions"))
         .into_iter()
         .flatten()
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == "inbox"))
+        .filter(|p| id.is_none_or(|id| p.file_stem().is_some_and(|s| s == id)))
         .collect();
     inboxes.sort();
     inboxes.into_iter().rev().find_map(|inbox| {
@@ -129,11 +131,16 @@ fn served(home: &Path, root: &Path) -> Option<PathBuf> {
     })
 }
 
-/// Gives the task to the newest session served for this repository and prints its result as a one-shot run would;
-/// true when the verdict is good.
-pub async fn send(home: &Path, root: &Path, task: &str) -> Result<bool> {
-    let Some(session) = served(home, root) else {
-        bail!("no low --serve is running in {}: start one there first", root.display())
+/// Gives the task to the newest session served for this repository (or the one named) and prints its result as a
+/// one-shot run would, or as JSON; returns the result.
+pub async fn send(home: &Path, root: &Path, id: Option<&str>, task: &str, json: bool) -> Result<Value> {
+    let Some(session) = served(home, root, id) else {
+        match id {
+            Some(id) => {
+                bail!("session {id} is not served in {}: start it with low --session {id} --serve", root.display())
+            }
+            None => bail!("no low --serve is running in {}: start one there first", root.display()),
+        }
     };
     let dir = session.with_extension("inbox");
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
@@ -152,12 +159,17 @@ pub async fn send(home: &Path, root: &Path, task: &str) -> Result<bool> {
         }
         tokio::time::sleep(POLL).await;
     };
+    if json {
+        println!("{reply}");
+        return Ok(reply);
+    }
     if let Some(error) = reply["error"].as_str() {
-        bail!("{error}");
+        eprintln!("error: {error}");
+        return Ok(reply);
     }
     if reply["stopped"] == true {
         eprintln!("[the server stopped]");
-        return Ok(true);
+        return Ok(reply);
     }
     if let Some(answer) = reply["answer"].as_str().filter(|a| !a.trim().is_empty()) {
         let mut markdown = crate::render::Markdown::default();
@@ -166,7 +178,6 @@ pub async fn send(home: &Path, root: &Path, task: &str) -> Result<bool> {
     }
     let rows: Vec<(String, String)> = serde_json::from_value(reply["rows"].clone()).unwrap_or_default();
     let rows: Vec<(&str, String)> = rows.iter().map(|(label, value)| (label.as_str(), value.clone())).collect();
-    let good = reply["good"] == true;
-    crate::ui::report(&rows, reply["verdict"].as_str().unwrap_or("?"), good);
-    Ok(good)
+    crate::ui::report(&rows, reply["verdict"].as_str().unwrap_or("?"), reply["good"] == true);
+    Ok(reply)
 }

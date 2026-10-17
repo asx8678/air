@@ -22,14 +22,16 @@ const ABOUT: &str = "A low-entropy, code-mode coding agent. Without a task it st
 const USAGE: &str = "Usage: low [OPTIONS] [TASK]";
 const HELP: &str = "\
 Arguments:
-  [TASK]  Run this task once and exit (status 1 when a configured check did not pass on the final tree or the turn stopped short)
+  [TASK]  Run this task once and exit: 0 done, 1 not verified (a configured check did not pass on the final tree), 3 an error, 5 stopped short (2 is a bad argument)
 
 Options:
       --resume         Resume the latest session in this repo
+      --session <ID>   Resume this session of this repo (its id, as in [session ...])
   -m, --model <MODEL>  Model for a new session; with --resume it switches the session to it (so does /models)
       --yolo           No sandbox: network on, writes anywhere (env vars stay filtered; env = [...] in ~/.config/low/config.toml passes more)
       --serve          After the task, keep the session and take the next tasks from low --send, keeping the provider's prompt cache warm in between (from a script, start it without a task)
       --send           Give the task to the low --serve running in this repo and print its result, with the same exit status; /stop ends that server
+      --json           Show nothing while the task runs and print its result as one JSON object (with --send too)
   -h, --help           Print help
   -V, --version        Print version";
 
@@ -40,6 +42,8 @@ struct Cli {
     yolo: bool,
     serve: bool,
     send: bool,
+    json: bool,
+    session: Option<String>,
 }
 
 impl Cli {
@@ -53,7 +57,16 @@ impl Cli {
 
     fn args() -> Result<Self, lexopt::Error> {
         use lexopt::prelude::*;
-        let mut cli = Self { task: None, resume: false, model: None, yolo: false, serve: false, send: false };
+        let mut cli = Self {
+            task: None,
+            resume: false,
+            model: None,
+            yolo: false,
+            serve: false,
+            send: false,
+            json: false,
+            session: None,
+        };
         let mut parser = lexopt::Parser::from_env();
         while let Some(arg) = parser.next()? {
             match arg {
@@ -63,6 +76,8 @@ impl Cli {
                 Long("yolo") => cli.yolo = true,
                 Long("serve") => cli.serve = true,
                 Long("send") => cli.send = true,
+                Long("json") => cli.json = true,
+                Long("session") => cli.session = Some(parser.value()?.string()?),
                 Short('h') | Long("help") => {
                     println!("{ABOUT}\n\n{USAGE}\n\n{HELP}");
                     std::process::exit(0)
@@ -106,13 +121,19 @@ async fn main() {
     // reqwest brings no crypto of its own: every client, the agent's and /providers', uses ring.
     let _ = rustls::crypto::ring::default_provider().install_default();
     if let Err(e) = start().await {
-        eprintln!("error: {}", agent::error_text(&e));
-        std::process::exit(1);
+        if std::env::args().any(|a| a == "--json") {
+            println!("{}", agent::failed(&serde_json::Value::Null, &e));
+        } else {
+            eprintln!("error: {}", agent::error_text(&e));
+        }
+        std::process::exit(agent::ERROR as i32);
     }
 }
 
 async fn start() -> Result<()> {
     let cli = Cli::parse();
+    // With --json, nothing low shows reaches stdout until the result: not the startup notes either.
+    let quiet = (cli.json && !cli.send && !cli.serve).then(ui::Quiet::start).transpose()?;
     let home = PathBuf::from(std::env::var("HOME")?);
     ensure!(
         cli.task.as_deref().is_none_or(|t| !t.trim().is_empty()),
@@ -124,10 +145,10 @@ async fn start() -> Result<()> {
     let root = top.map_or_else(std::env::current_dir, |t| Ok(PathBuf::from(t)))?.canonicalize()?;
     if cli.send {
         let only = !cli.serve && !cli.resume && cli.model.is_none();
-        ensure!(only, "--send takes only a task; the server's session decides the rest");
+        ensure!(only, "--send takes only a task (and --session or --json); the server's session decides the rest");
         let task = cli.task.as_deref().context("--send needs a task: low --send \"<task>\"")?;
-        let good = serve::send(&home, &root, task).await?;
-        std::process::exit(i32::from(!good));
+        let result = serve::send(&home, &root, cli.session.as_deref(), task, cli.json).await?;
+        std::process::exit(exit_code(&result));
     }
     let user = load(&providers::config_dir(&home).join("config.toml"))?;
     check_config(&user)?;
@@ -152,7 +173,8 @@ async fn start() -> Result<()> {
         warn("low.toml: env is ignored; set env in ~/.config/low/config.toml");
     }
     let providers = providers::load(&home)?.unwrap_or_default();
-    let picked = cli.model.clone().filter(|_| cli.resume);
+    let resume = cli.resume || cli.session.is_some();
+    let picked = cli.model.clone().filter(|_| resume);
     let config = Config {
         model: cli.model.or(user.model),
         base_url: None,
@@ -163,20 +185,28 @@ async fn start() -> Result<()> {
         providers,
     };
     worker::allow_env(config.env.clone());
-    let mut agent = agent::Agent::new(&root, &home, config, cli.resume, cli.yolo, repo_dir)?;
+    let mut agent = agent::Agent::new(&root, &home, config, resume, cli.session.as_deref(), cli.yolo, repo_dir)?;
     if let Some(model) = picked {
         agent.resume_with(&model)?;
     }
-    if !cli.resume {
+    if !resume {
         eprintln!("[session {}]", agent.path().display());
     }
     if cli.serve {
         return serve::serve(&mut agent, cli.task).await;
     }
     if let Some(task) = cli.task {
-        let verified = agent.run(&task).await?;
-        drop(agent);
-        std::process::exit(i32::from(!verified));
+        let result = match agent.run(&task).await {
+            Ok(_) => agent.last().clone(),
+            Err(e) => agent::failed(agent.last(), &e),
+        };
+        drop((quiet, agent));
+        match result["error"].as_str() {
+            _ if cli.json => println!("{result}"),
+            Some(error) => eprintln!("error: {error}"),
+            None => {}
+        }
+        std::process::exit(exit_code(&result));
     }
     let mut editor = rustyline::DefaultEditor::new()?;
     loop {
@@ -252,7 +282,7 @@ async fn pick(agent: &mut agent::Agent, editor: &mut rustyline::DefaultEditor, f
         Ok(n) => Some(*models.get(n.wrapping_sub(1)).with_context(|| format!("no model numbered {n}"))?),
         Err(_) => all
             .iter()
-            .find(|(p, m, _)| p == agent.provider() && *m == choice)
+            .find(|(p, m, _)| (p == agent.provider() && *m == choice) || format!("{p}:{m}") == choice)
             .or_else(|| all.iter().find(|(_, m, _)| *m == choice)),
     };
     let (provider, model) = match listed {
@@ -266,6 +296,11 @@ async fn pick(agent: &mut agent::Agent, editor: &mut rustyline::DefaultEditor, f
         return Ok(());
     }
     agent.switch(&provider, &model)
+}
+
+/// A task result's exit status (agent::outcome), an error's when it has none.
+fn exit_code(result: &serde_json::Value) -> i32 {
+    result["exit"].as_i64().unwrap_or(agent::ERROR) as i32
 }
 
 const COMMANDS: &[&str] = &["/compact", "/cost", "/think", "/models", "/providers"];

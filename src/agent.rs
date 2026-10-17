@@ -70,11 +70,19 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(root: &Path, home: &Path, config: Config, resume: bool, yolo: bool, repo: bool) -> Result<Self> {
+    pub fn new(
+        root: &Path,
+        home: &Path,
+        config: Config,
+        resume: bool,
+        id: Option<&str>,
+        yolo: bool,
+        repo: bool,
+    ) -> Result<Self> {
         guard_git(root);
         let context = context(root, &config, yolo);
-        let session = if resume {
-            Session::resume(home, root, context)?
+        let session = if resume || id.is_some() {
+            Session::resume(home, root, context, id)?
         } else {
             let model = config
                 .model
@@ -84,8 +92,12 @@ impl Agent {
                     "no model: pass -m, set model in ~/.config/low/config.toml, or list one under a provider in \
                      ~/.config/low/providers.toml",
                 )?;
+            let (named, model) = match qualified(&config.providers, &model) {
+                Some((provider, id)) => (Some(provider), id.to_string()),
+                None => (None, model.clone()),
+            };
             let only = config.providers.keys().next().filter(|_| config.providers.len() == 1);
-            let Some(provider) = holding(&config.providers, &model).or(only) else {
+            let Some(provider) = named.as_ref().or(holding(&config.providers, &model)).or(only) else {
                 if config.providers.is_empty() {
                     anyhow::bail!("no provider for {model}: {}", crate::providers::example(&model));
                 }
@@ -135,10 +147,13 @@ impl Agent {
     }
 
     pub fn resume_with(&mut self, model: &str) -> Result<()> {
-        if model == self.model() {
+        let (provider, model) = match qualified(&self.config.providers, model) {
+            Some((provider, id)) => (provider, id),
+            None => (holding(&self.config.providers, model).cloned().unwrap_or_else(|| self.provider.clone()), model),
+        };
+        if provider == self.provider && model == self.model() {
             return Ok(());
         }
-        let provider = holding(&self.config.providers, model).cloned().unwrap_or_else(|| self.provider.clone());
         self.switch(&provider, model)
     }
 
@@ -233,6 +248,7 @@ impl Agent {
     }
 
     pub async fn run(&mut self, task: &str) -> Result<bool> {
+        self.last = Value::Null;
         let _bar = ui::Turn::start();
         let finished = tokio::select! {
             biased;
@@ -827,8 +843,15 @@ impl Agent {
         let good = (!changed || checked || self.config.check.is_none()) && !stopped;
         ui::report(&rows, verdict, good);
         let answer = turn.iter().rev().find(|e| e["role"] == "assistant").and_then(|e| e["content"].as_str());
-        self.last = json!({"verdict": verdict, "good": good, "rows": rows, "answer": answer});
         let changes: Vec<&str> = changes.lines().filter(|l| *l != "none").collect();
+        let (status, exit) = outcome(good, stopped);
+        let undo = rows.iter().find(|(label, _)| *label == "undo").map(|(_, undo)| undo);
+        self.last = json!({
+            "session": self.session.path, "id": self.session.header()["id"], "status": status, "exit": exit,
+            "verdict": verdict, "good": good, "answer": answer, "criteria": state.accepted, "plan": state.plan,
+            "check": check, "changes": changes, "undo": undo, "requests": requests,
+            "tokens": {"prompt": prompt, "cached": cached, "out": out}, "cost": totals["cost"], "ms": ms, "rows": rows,
+        });
         self.session.push(json!({"report": {
             "verdict": verdict, "tree": tree, "changed": changed, "checked": checked, "stopped": stopped, "check_inputs": inputs, "outside": outside, "criteria": state.accepted,
             "plan_steps": steps, "plan_done": done, "changes": changes, "requests": requests, "runs": runs,
@@ -909,6 +932,12 @@ fn web(name: &str, base_url: &str) -> Result<()> {
     Ok(())
 }
 
+/// `provider:model` naming a configured provider: that provider and the model id. Anything else, such as an id with a
+/// colon of its own (qwen3:8b), is a plain model id.
+fn qualified<'a>(providers: &Providers, model: &'a str) -> Option<(String, &'a str)> {
+    model.split_once(':').filter(|(provider, _)| providers.contains_key(*provider)).map(|(p, m)| (p.to_string(), m))
+}
+
 /// The provider that lists a model.
 fn holding<'a>(providers: &'a Providers, model: &str) -> Option<&'a String> {
     providers.iter().find(|(_, p)| p.models.iter().any(|m| m == model)).map(|(name, _)| name)
@@ -973,6 +1002,26 @@ async fn grouped(mut cmd: tokio::process::Command) -> Result<(bool, String)> {
 }
 
 /// An error as low shows and logs it: the whole chain, without control characters or secrets.
+/// The exit status for an error, as low gives it for a turn's outcome: see outcome().
+pub const ERROR: i64 = 3;
+
+/// What a turn came to and the exit status low gives it, the same for a one-shot run, low --send and --tasks:
+/// 0 done, 1 not verified, 5 stopped short. 2 is a bad argument and 3 an error (ERROR).
+fn outcome(good: bool, stopped: bool) -> (&'static str, i64) {
+    match (stopped, good) {
+        (true, _) => ("stopped", 5),
+        (false, true) => ("done", 0),
+        (false, false) => ("unverified", 1),
+    }
+}
+
+/// The result of a task that ended in an error: the turn's report if one was written, marked as the error.
+pub fn failed(last: &Value, e: &anyhow::Error) -> Value {
+    let mut result = if last.is_object() { last.clone() } else { json!({}) };
+    (result["status"], result["exit"], result["error"]) = ("error".into(), ERROR.into(), error_text(e).into());
+    result
+}
+
 pub fn error_text(e: &anyhow::Error) -> String {
     redact(&ui::printable(&format!("{e:#}"))).0
 }
