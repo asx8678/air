@@ -2,7 +2,7 @@
 //! build, git and sandbox. Each later line is one of
 //! - a message {role, content, tool_calls?, reasoning_content?, meta}: an assistant's meta holds the request's
 //!   usage, timing, request and response; a tool's meta holds the run's actions, commands, errors and ms
-//! - {event, text, ...}: retries, cut streams, nudges, the notes shown to the user, connects, commands
+//! - {event, text, ...}: retries, cut streams, nudges, cache misses, the notes shown to the user, connects, commands
 //! - {check}, {report} per turn, {compact}, {switch}, {resume}, and {end} with this run's totals
 //!
 //! Every line has a wall-clock `at` in ms, in meta for messages since meta never goes on the wire. Nothing secret

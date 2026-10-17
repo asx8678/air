@@ -319,6 +319,7 @@ impl Agent {
             spent += usage["prompt_tokens"].as_u64().unwrap_or(0) * attempts
                 + usage["completion_tokens"].as_u64().unwrap_or(0);
             ui::usage(usage);
+            self.cache_miss(usage);
             let calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
             let empty = calls.is_empty() && message["content"].as_str().is_none_or(|c| c.trim().is_empty());
             let cut = calls.is_empty() && !empty && message["meta"]["finish"] == "length";
@@ -411,6 +412,27 @@ impl Agent {
 
     fn sent(&self) -> u64 {
         serde_json::to_string(&self.session.messages()).map_or(0, |m| m.len() as u64) / 4
+    }
+
+    /// Logs a request that found less than half of the previous request's prompt in the provider's cache, with the cause
+    /// when low knows it: a compaction, a model switch, or a new task.
+    fn cache_miss(&self, usage: &Value) {
+        let entries = &self.session.entries;
+        let Some(prev) = entries.iter().rposition(|e| e["meta"]["usage"]["prompt_tokens"].is_u64()) else { return };
+        let expected = entries[prev]["meta"]["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
+        let Some(cached) = ui::cached(usage).filter(|&c| expected >= 1024 && c * 2 < expected) else { return };
+        let since = &entries[prev + 1..];
+        let cause = if since.iter().any(|e| e["compact"].is_object()) {
+            "compaction"
+        } else if since.iter().any(|e| e["switch"].is_object()) {
+            "model switch"
+        } else if since.iter().any(|e| e["role"] == "user" && e["meta"]["host"].is_null()) {
+            "new task"
+        } else {
+            "unexplained"
+        };
+        let text = format!("{cached} of the previous request's {expected} prompt tokens were cached ({cause})");
+        ui::record("cache_miss", &text, json!({"cause": cause, "cached": cached, "expected": expected}));
     }
 
     /// The next request's size in tokens: the provider's count for the last one plus what has been added since, or
