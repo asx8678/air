@@ -156,16 +156,17 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
     let check_output: Vec<String> =
         failing_check.map(|i| format!("#{i}\n{}", quote(tail(text(i), 1536)))).into_iter().collect();
 
+    // (entry, what happened)
     let mut events = vec![];
     for i in range {
         match role(i) {
             "user" => {
                 let who = if entries[i]["meta"]["host"].is_null() { "user" } else { "host" };
-                events.push(format!("#{i} {who}: {}", line(text(i), 100)));
+                events.push((i, format!("{who}: {}", line(text(i), 100))));
             }
             "assistant" => {
                 if said(i) {
-                    events.push(format!("#{i} assistant: {}", line(text(i), 100)));
+                    events.push((i, format!("assistant: {}", line(text(i), 100))));
                 }
                 for call in entries[i]["tool_calls"].as_array().into_iter().flatten() {
                     let name = call["function"]["name"].as_str().unwrap_or_default();
@@ -186,15 +187,28 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
                             } else {
                                 out
                             };
-                            format!("#{r} {}", line(shown, 80))
+                            line(shown, 80)
                         },
                     );
-                    events.push(format!("#{i} {name} {what} → {outcome}"));
+                    events.push((i, format!("{name} {what} → {outcome}")));
                 }
             }
             _ => {}
         }
     }
+    // Events that read the same back to back, as when a model stuck in a loop makes the same call and gets the same
+    // result, show once with their count, which leaves the window to the events around them.
+    let mut events: Vec<String> = events
+        .chunk_by(|a, b| a.1 == b.1)
+        .map(|run| {
+            let ((first, event), last) = (&run[0], run[run.len() - 1].0);
+            let at = if last > *first { format!("#{first}-#{last}") } else { format!("#{first}") };
+            match run.len() {
+                1 => format!("{at} {event}"),
+                n => format!("{at} {event} ({n} times)"),
+            }
+        })
+        .collect();
     let events = events.split_off(events.len().saturating_sub(40));
 
     let footer = format!("\n[Entries #1-#{} are summarized here. Continue the task.]", keep - 1);
