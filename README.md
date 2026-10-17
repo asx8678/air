@@ -82,10 +82,11 @@ low "the median of an even-length list is wrong; fix it"
 
 | command | does |
 |---|---|
-| `low "<task>"` | runs one task and exits: 0 done, 1 not verified (a configured check didn't pass on the final tree), 3 an error, 5 stopped short |
+| `low "<task>"` | runs one task and exits: 0 done, 1 not verified (a configured check didn't pass on the final tree), 3 an error, 4 the model asked a question (answer it as the next task, e.g. `low --resume "<answer>"`), 5 stopped short |
 | `low` | starts the REPL |
 | `low --resume` | continues the latest session in this repository |
 | `low --session <id>` | continues that session of this repository |
+| `low --tasks <file>` | works through the open tasks of a markdown checklist (`- [ ] task`) in one session, marking each `[x]` done, `[!]` not verified or `[?]` asked a question, with its result under it; an `  - answer: …` line under a `[?]` task is sent next; stops at the first task not done |
 | `low --json "<task>"` | shows nothing while the task runs and prints its result as one JSON object (session, verdict, status, exit, answer, changes, check, tokens) |
 | `low -m <model>` | picks the model for a new session; with `--resume`, switches the session to it. `provider:model` picks the provider too, for an id several providers list |
 | `low --yolo` | turns the sandbox off: network on, writes anywhere (environment variables stay filtered) |
@@ -115,6 +116,7 @@ A `config.toml` example:
 ```toml
 model = "deepseek-v4.1-flash"        # default model
 env = ["MY_VAR"]                     # environment variables passed into the sandbox
+search = "deepseek"                  # the provider whose key search() and fetch() use (default: one named deepseek)
 
 [models."deepseek-v4.1-flash"]       # sent with every request to this model
 temperature = 0.0
@@ -134,6 +136,8 @@ Inside `run(code)`, the model has a few helpers:
 | `write(path, content)` | creates a new file |
 | `check()` | runs the repository's `check` inside the sandbox |
 | `accept(criteria)` · `plan(steps)` · `done()` | record what done means and track progress for the turn report |
+| `finish(report)` · `ask(question)` | end the turn with the final report, or with a question for you that the next task answers |
+| `search(query)` · `fetch(url)` | web search and a page as markdown, through [DeepSeek's search API](https://api-docs.deepseek.com/guides/search/); low makes the request, since the sandbox has no network. Only when a provider is set up for it (below) |
 
 Repository files change only through `edit` and `write`, so low knows exactly what the model touched. A turn that changed files without using either is asked once to clean up its scratch output.
 

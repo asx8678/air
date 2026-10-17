@@ -7,6 +7,7 @@ mod redact;
 mod render;
 mod serve;
 mod session;
+mod tasks;
 mod stats;
 mod ui;
 mod worker;
@@ -22,7 +23,7 @@ const ABOUT: &str = "A low-entropy, code-mode coding agent. Without a task it st
 const USAGE: &str = "Usage: low [OPTIONS] [TASK]";
 const HELP: &str = "\
 Arguments:
-  [TASK]  Run this task once and exit: 0 done, 1 not verified (a configured check did not pass on the final tree), 3 an error, 5 stopped short (2 is a bad argument)
+  [TASK]  Run this task once and exit: 0 done, 1 not verified (a configured check did not pass on the final tree), 3 an error, 4 the model asked a question (answer it as the next task), 5 stopped short (2 is a bad argument)
 
 Options:
       --resume         Resume the latest session in this repo
@@ -31,6 +32,7 @@ Options:
       --yolo           No sandbox: network on, writes anywhere (env vars stay filtered; env = [...] in ~/.config/low/config.toml passes more)
       --serve          After the task, keep the session and take the next tasks from low --send, keeping the provider's prompt cache warm in between (from a script, start it without a task)
       --send           Give the task to the low --serve running in this repo and print its result, with the same exit status; /stop ends that server
+      --tasks <FILE>   Work through the open tasks of a markdown checklist (- [ ] task) in one session, marking each line with its result; stops at the first task not done
       --json           Show nothing while the task runs and print its result as one JSON object (with --send too)
   -h, --help           Print help
   -V, --version        Print version";
@@ -44,6 +46,7 @@ struct Cli {
     send: bool,
     json: bool,
     session: Option<String>,
+    tasks: Option<PathBuf>,
 }
 
 impl Cli {
@@ -66,6 +69,7 @@ impl Cli {
             send: false,
             json: false,
             session: None,
+            tasks: None,
         };
         let mut parser = lexopt::Parser::from_env();
         while let Some(arg) = parser.next()? {
@@ -78,6 +82,7 @@ impl Cli {
                 Long("send") => cli.send = true,
                 Long("json") => cli.json = true,
                 Long("session") => cli.session = Some(parser.value()?.string()?),
+                Long("tasks") => cli.tasks = Some(parser.value()?.into()),
                 Short('h') | Long("help") => {
                     println!("{ABOUT}\n\n{USAGE}\n\n{HELP}");
                     std::process::exit(0)
@@ -100,6 +105,8 @@ pub struct Config {
     pub base_url: Option<String>,
     pub check: Option<String>,
     pub fmt: Option<String>,
+    /// The provider whose API key search() and fetch() use (DeepSeek's tools API); a provider named deepseek if unset.
+    pub search: Option<String>,
     #[serde(default)]
     pub env: Vec<String>,
     #[serde(default)]
@@ -173,19 +180,27 @@ async fn start() -> Result<()> {
         warn("low.toml: env is ignored; set env in ~/.config/low/config.toml");
     }
     let providers = providers::load(&home)?.unwrap_or_default();
-    let resume = cli.resume || cli.session.is_some();
+    if let Some(name) = user.search.as_deref().filter(|name| !providers.contains_key(*name)) {
+        bail!("~/.config/low/config.toml sets search = \"{name}\", but providers.toml has no [{name}]");
+    }
+    let search = user.search.clone().or_else(|| providers.contains_key("deepseek").then(|| "deepseek".into()));
+    ensure!(cli.tasks.is_none() || cli.task.is_none() && !cli.serve, "--tasks takes its tasks from the file only");
+    // A checklist names its session, so a later --tasks run continues it.
+    let id = cli.session.clone().or_else(|| cli.tasks.as_deref().and_then(|file| tasks::session(&home, file)));
+    let resume = cli.resume || id.is_some();
     let picked = cli.model.clone().filter(|_| resume);
     let config = Config {
         model: cli.model.or(user.model),
         base_url: None,
         check: repo.check.or(user.check).filter(|c| !c.trim().is_empty()),
         fmt: repo.fmt.or(user.fmt),
+        search,
         env: user.env,
         models: user.models,
         providers,
     };
     worker::allow_env(config.env.clone());
-    let mut agent = agent::Agent::new(&root, &home, config, resume, cli.session.as_deref(), cli.yolo, repo_dir)?;
+    let mut agent = agent::Agent::new(&root, &home, config, resume, id.as_deref(), cli.yolo, repo_dir)?;
     if let Some(model) = picked {
         agent.resume_with(&model)?;
     }
@@ -194,6 +209,14 @@ async fn start() -> Result<()> {
     }
     if cli.serve {
         return serve::serve(&mut agent, cli.task).await;
+    }
+    if let Some(file) = &cli.tasks {
+        let result = tasks::run(&mut agent, file).await?;
+        drop((quiet, agent));
+        if cli.json {
+            println!("{result}");
+        }
+        std::process::exit(exit_code(&result));
     }
     if let Some(task) = cli.task {
         let result = match agent.run(&task).await {

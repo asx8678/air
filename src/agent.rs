@@ -35,7 +35,11 @@ const RETRY: &str = "Send one run() now with the next step, or a shorter answer.
 const STRAY: &str = "This turn changed files without edit() or write():";
 const STRAY_END: &str = "Delete the ones that are scratch output from running code, keep any that are part of your answer, \
                          then finish again.";
-const HELPERS: &[&str] = &["sh", "show", "accept", "edit", "write", "check", "plan", "done", "finish"];
+const HELPERS: &[&str] =
+    &["sh", "show", "accept", "edit", "write", "check", "plan", "done", "finish", "ask", "search", "fetch"];
+/// The helpers that reach the web, in the prompt only when config.toml's search names a provider.
+const WEB: &str = "search(query, count=10) -> list  # web search: [{title, url, summary, date, site_name}]; site:, \"phrase\", \
+                   after:2025 work\nfetch(url) -> str             # a web page as markdown\n";
 const SANDBOX: &str = "\n\n## Sandbox\nYour code runs in a sandbox. Writes outside the repo and temp dirs fail, as do \
                        writes into any .git directory and reads of credentials and private data in the home directory \
                        (ssh and cloud keys, shell history, browser data, other tools' configs). Only a fixed set of \
@@ -67,6 +71,8 @@ pub struct Agent {
     repo: bool,
     /// The last turn's verdict, report rows and final answer, for a `low --send` client.
     last: Value,
+    /// The question an ask() ended the turn with, for its report.
+    question: Option<String>,
 }
 
 impl Agent {
@@ -109,7 +115,7 @@ impl Agent {
             };
             web(provider, &config.providers[provider].base_url)?;
             let profile = config.models.get(&model).cloned().unwrap_or_default();
-            let system = system_prompt(root, yolo, config.check.as_deref(), repo);
+            let system = system_prompt(root, yolo, config.check.as_deref(), repo, config.search.is_some());
             Session::create(home, root, provider, &model, &system, profile, context)?
         };
         let (provider, llm) = connect(&config.providers, session.header())?;
@@ -133,6 +139,7 @@ impl Agent {
             passed: None,
             repo,
             last: Value::Null,
+            question: None,
         };
         agent.record()?;
         Ok(agent)
@@ -239,7 +246,8 @@ impl Agent {
         anyhow::ensure!(self.config.providers.contains_key(provider), "no provider named {provider}");
         web(provider, &self.config.providers[provider].base_url)?;
         let profile = self.config.models.get(model).cloned().unwrap_or_default();
-        let system = system_prompt(&self.root, self.yolo, self.config.check.as_deref(), self.repo);
+        let web = self.config.search.is_some();
+        let system = system_prompt(&self.root, self.yolo, self.config.check.as_deref(), self.repo, web);
         self.session.switch(provider, model, &system, profile)?;
         (self.provider, self.llm) = connect(&self.config.providers, self.session.header())?;
         self.compact_at = self.session.header()["compact_at"].as_u64().unwrap_or(COMPACT_AT);
@@ -407,10 +415,11 @@ impl Agent {
                 retries = 0;
             }
             self.session.push(message)?;
-            let mut finished = None;
+            let (mut finished, mut asked) = (None, None);
             for (i, call) in calls.iter().enumerate() {
                 self.pending = Some(call["id"].clone());
                 let (mut content, mut meta) = self.call(call).await;
+                asked = meta["ask"].as_str().map(String::from).or(asked);
                 if let Some(report) = meta["finish"].as_str() {
                     match self.finishing(began, &meta, i + 1 == calls.len()) {
                         Ok(()) => finished = Some(report.to_string()),
@@ -426,6 +435,17 @@ impl Agent {
             }
             if let Some(why) = self.broken.take() {
                 anyhow::bail!(why);
+            }
+            // The model waits for an answer, which comes as the next task: no nudges or check gate before it.
+            if let Some(question) = asked {
+                ui::prose();
+                let mut markdown = crate::render::Markdown::default();
+                markdown.push(&question);
+                markdown.finish();
+                self.session.push(json!({"role": "assistant", "content": question, "meta": {"via": "ask()"}}))?;
+                self.question = Some(question);
+                let changed = self.changed(&start, began).await;
+                return self.report(Some(changed), false, false, began, clock).await;
             }
             if let Some(report) = finished {
                 ui::prose();
@@ -631,6 +651,11 @@ impl Agent {
         let ran = async {
             let mut reply = self.worker()?.run(code, &state).await?;
             while reply["needs_check"] == true {
+                if reply["web"].is_object() {
+                    let (ok, out) = self.web(&reply["web"]).await;
+                    reply = self.worker()?.resume(ok, &out).await?;
+                    continue;
+                }
                 if stale(&reply) {
                     self.passed = None;
                 }
@@ -664,6 +689,29 @@ impl Agent {
                 (out, json!({"tool": "run", "error": true, "ms": ui::ms(clock)}))
             }
         }
+    }
+
+    /// A search() or fetch() from a run, made here since the sandbox has no network: DeepSeek's tools API, with the
+    /// provider that config.toml's search names.
+    async fn web(&self, request: &Value) -> (bool, String) {
+        let Some(provider) = self.config.search.as_ref().and_then(|name| self.config.providers.get(name)) else {
+            return (false, "web search is not set up: config.toml's search names no provider".into());
+        };
+        let (tool, body, what) = match request["fetch"].as_str() {
+            Some(url) => ("fetch", json!({"url": url}), format!("fetch {url}")),
+            None => (
+                "search",
+                json!({"query": request["search"], "count": request["count"]}),
+                format!("search {}", request["search"]),
+            ),
+        };
+        let result = llm::tool(&provider.base_url, provider.api_key.as_deref(), tool, &body).await;
+        let (ok, out) = match result {
+            Ok(text) => (true, text),
+            Err(e) => (false, format!("{tool} failed: {e:#}")),
+        };
+        ui::record("web", &what, json!({"request": body, "ok": ok, "bytes": out.len()}));
+        (ok, out)
     }
 
     fn worker(&mut self) -> Result<&mut Worker> {
@@ -776,7 +824,9 @@ impl Agent {
             path == "low.toml" || words.map(|w| w.trim_start_matches("./")).any(|w| w == path)
         };
         let inputs: Vec<String> = changes.lines().filter_map(path).filter(|p| named(p)).collect();
+        let question = self.question.take();
         let (check, verdict) = match (changed, checked, &self.config.check) {
+            _ if question.is_some() => ("not run: the model asked a question", "QUESTION"),
             (false, _, _) => ("-", "NO CHANGES"),
             (true, true, _) if !inputs.is_empty() => ("passed, but this turn changed what it runs", "UNVERIFIED"),
             (true, true, _) => ("passed on the final tree", "VERIFIED"),
@@ -844,11 +894,12 @@ impl Agent {
         ui::report(&rows, verdict, good);
         let answer = turn.iter().rev().find(|e| e["role"] == "assistant").and_then(|e| e["content"].as_str());
         let changes: Vec<&str> = changes.lines().filter(|l| *l != "none").collect();
-        let (status, exit) = outcome(good, stopped);
+        let (status, exit) = outcome(good, stopped, question.is_some());
         let undo = rows.iter().find(|(label, _)| *label == "undo").map(|(_, undo)| undo);
         self.last = json!({
             "session": self.session.path, "id": self.session.header()["id"], "status": status, "exit": exit,
-            "verdict": verdict, "good": good, "answer": answer, "criteria": state.accepted, "plan": state.plan,
+            "verdict": verdict, "good": good, "answer": answer, "question": question, "criteria": state.accepted,
+            "plan": state.plan,
             "check": check, "changes": changes, "undo": undo, "requests": requests,
             "tokens": {"prompt": prompt, "cached": cached, "out": out}, "cost": totals["cost"], "ms": ms, "rows": rows,
         });
@@ -1006,9 +1057,11 @@ async fn grouped(mut cmd: tokio::process::Command) -> Result<(bool, String)> {
 pub const ERROR: i64 = 3;
 
 /// What a turn came to and the exit status low gives it, the same for a one-shot run, low --send and --tasks:
-/// 0 done, 1 not verified, 5 stopped short. 2 is a bad argument and 3 an error (ERROR).
-fn outcome(good: bool, stopped: bool) -> (&'static str, i64) {
+/// 0 done, 1 not verified, 4 a question waiting for its answer, 5 stopped short. 2 is a bad argument and 3 an error
+/// (ERROR).
+fn outcome(good: bool, stopped: bool, question: bool) -> (&'static str, i64) {
     match (stopped, good) {
+        _ if question => ("question", 4),
         (true, _) => ("stopped", 5),
         (false, true) => ("done", 0),
         (false, false) => ("unverified", 1),
@@ -1115,8 +1168,11 @@ fn finish(mut meta: Value) -> (String, Value) {
     (out, meta)
 }
 
-fn system_prompt(root: &Path, yolo: bool, check: Option<&str>, repo: bool) -> String {
+fn system_prompt(root: &Path, yolo: bool, check: Option<&str>, repo: bool, web: bool) -> String {
     let mut prompt = include_str!("prompt.md").to_string();
+    if !web {
+        prompt = prompt.replace(WEB, "");
+    }
     prompt += &match check {
         Some(check) => format!("\ncheck() runs `{}`.", redact(check).0),
         None => "\nNo check command is configured, so check() runs nothing.".into(),

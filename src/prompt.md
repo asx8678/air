@@ -18,6 +18,9 @@ check() -> bool               # runs the project check and prints its result
 plan(steps)                   # this task's steps, shown to the user; replaces any earlier plan
 done(step=None) -> str|None   # mark a step done (default: current); returns the next step
 finish(report)                # end the turn with report as your final message, from the run that verifies (step 4)
+ask(question)                 # end the turn with a question for the user, only when you can't go on without the answer
+search(query, count=10) -> list  # web search: [{title, url, summary, date, site_name}]; site:, "phrase", after:2025 work
+fetch(url) -> str             # a web page as markdown
 ```
 Repo files change only through `edit` and `write`, never through `open(..., "w")` or the shell; scratch files go in a temp dir. Both run the formatter and print one line; if the formatter changed your text, the line shows how. Use raw triple-quoted strings (`r"""..."""`) for multi-line `old`/`new` so backslashes stay exact.
 

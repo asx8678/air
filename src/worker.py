@@ -301,8 +301,33 @@ def finish(report):
     _report["finish"] = str(report)
 
 
+def ask(question):
+    _report["ask"] = str(question)
+
+
+def _web(request):
+    # The sandbox has no network: the host makes the request and sends back the response, or why it failed.
+    _report.setdefault("web", []).append(request)
+    _outbox.write(json.dumps({"needs_check": True, "web": request}) + "\n")
+    _outbox.flush()
+    answer = json.loads(_inbox.readline() or "{}")
+    if answer.get("ok") is not True:
+        raise RuntimeError(answer.get("out") or "the web request failed")
+    return json.loads(answer["out"])
+
+
+def search(query, count=10):
+    found = _web({"search": str(query), "count": int(count)})
+    keep = ("title", "url", "summary", "date", "site_name")
+    return [{k: r.get(k) for k in keep} for r in found.get("results") or []]
+
+
+def fetch(url):
+    return _web({"fetch": str(url)}).get("content") or ""
+
+
 TOOLS = {"sh": sh, "show": show, "edit": edit, "write": write, "accept": accept, "plan": plan, "done": done, "check": check,
-         "finish": finish}
+         "finish": finish, "ask": ask, "search": search, "fetch": fetch}
 G = {"__name__": "__main__", **TOOLS}
 HELPERS = tuple(f"{name}()" for name in TOOLS)
 

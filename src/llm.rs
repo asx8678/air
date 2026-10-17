@@ -129,6 +129,22 @@ fn window(error: &str) -> Option<u64> {
     })
 }
 
+/// One call to DeepSeek's tools API (search or fetch) at this provider: the response body, or why it failed.
+pub async fn tool(base_url: &str, key: Option<&str>, name: &str, body: &Value) -> Result<String> {
+    let base = base_url.trim_end_matches('/').trim_end_matches("/v1");
+    let http = reqwest::Client::builder().user_agent(USER_AGENT).timeout(Duration::from_secs(60)).build()?;
+    let mut request = http.post(format!("{base}/v1/tools/{name}")).header("content-type", "application/json");
+    if let Some(key) = key {
+        request = request.bearer_auth(key);
+    }
+    let response = request.body(serde_json::to_vec(body)?).send().await.map_err(|e| anyhow!(chain(e)))?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!("{status}: {}", head(response).await);
+    }
+    response.text().await.map_err(|e| anyhow!(chain(e)))
+}
+
 pub fn key_file() -> std::path::PathBuf {
     crate::providers::config_dir(&crate::worker::home()).join("api_key")
 }
