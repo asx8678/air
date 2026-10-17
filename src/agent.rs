@@ -823,7 +823,8 @@ impl Agent {
 
     pub fn think(&self) {
         let mut entries = self.session.entries.iter().enumerate().rev();
-        let stored = entries.find_map(|(i, e)| e["reasoning_content"].as_str().map(|r| (i, r)));
+        let stored =
+            entries.find_map(|(i, e)| e["reasoning_content"].as_str().filter(|r| !r.is_empty()).map(|r| (i, r)));
         let last = match (&self.discarded, stored) {
             (Some((at, lost)), stored) if stored.is_none_or(|(i, _)| *at > i) => Some(lost.as_str()),
             (_, stored) => stored.map(|(_, r)| r),

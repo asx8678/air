@@ -354,7 +354,7 @@ impl Llm {
             return Err(Interrupted(why, lost).into());
         }
         reply.shown.done();
-        if let Some(field) = reply.via {
+        if let Some(field) = reply.via.or(reply.echo) {
             self.field.set(field);
         }
         Ok(reply.message(sent, served))
@@ -488,6 +488,10 @@ struct Reply {
     thinking: String,
     /// The field this provider sends reasoning in, once it has sent some.
     via: Option<&'static str>,
+    /// The reasoning field the stream carried, if only empty. The reply goes back with it, since a DeepSeek upstream of
+    /// OpenCode Go refuses a tool-call reply without it in the history with a 400, and it names the field from then
+    /// on, so the empty one is sent under the same name in every request.
+    echo: Option<&'static str>,
     calls: Calls,
     usage: Value,
     finished: bool,
@@ -516,6 +520,7 @@ impl Reply {
             content => content.as_str().unwrap_or_default().to_string(),
         };
         let field = FIELDS.into_iter().find(|f| delta[*f].as_str().is_some_and(|t| !t.is_empty()));
+        self.echo = self.echo.or(FIELDS.into_iter().find(|f| delta[*f].is_string()));
         let tools = delta["tool_calls"].as_array().filter(|c| !c.is_empty());
         let reasoning = field.and_then(|f| delta[f].as_str()).unwrap_or_default();
         if !reasoning.is_empty() {
@@ -558,7 +563,7 @@ impl Reply {
         });
         let meta = json!({"usage": self.usage, "timing": timing, "finish": self.reason, "response": served});
         let mut message = json!({"role": "assistant", "content": self.text, "meta": meta});
-        if !self.thinking.is_empty() {
+        if !self.thinking.is_empty() || self.echo.is_some() {
             message["reasoning_content"] = self.thinking.into();
         }
         if let Some(field) = self.via {
