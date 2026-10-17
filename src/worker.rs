@@ -386,6 +386,9 @@ mod tests {
             assert!(reply["out"].as_str().is_some_and(|out| out.contains(part)), "{code}: {reply}");
         }
         assert!(std::fs::read_to_string(dir.join("a.py")).unwrap().contains("return 4"));
+        let reply = run(&mut worker, "edit('a.py', 'return 4', 'return 5')\nassert check()\nfinish('done')").await;
+        assert_eq!((&reply["finish"], &reply["own"], &reply["check"]), (&json!("done"), &json!(0), &json!(true)));
+        assert_eq!(run(&mut worker, "print('x')\nfinish('done')").await["own"], 2);
         drop(worker);
         let _ = std::fs::remove_dir_all(&dir);
     }

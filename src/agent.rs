@@ -31,7 +31,7 @@ const RETRY: &str = "Send one run() now with the next step, or a shorter answer.
 const STRAY: &str = "This turn changed files without edit() or write():";
 const STRAY_END: &str = "Delete the ones that are scratch output from running code, keep any that are part of your answer, \
                          then finish again.";
-const HELPERS: &[&str] = &["sh", "show", "accept", "edit", "write", "check", "plan", "done"];
+const HELPERS: &[&str] = &["sh", "show", "accept", "edit", "write", "check", "plan", "done", "finish"];
 const SANDBOX: &str = "\n\n## Sandbox\nYour code runs in a sandbox. Writes outside the repo and temp dirs fail, as do \
                        writes into any .git directory and reads of credentials and private data in the home directory \
                        (ssh and cloud keys, shell history, browser data, other tools' configs). Only a fixed set of \
@@ -351,9 +351,19 @@ impl Agent {
                 retries = 0;
             }
             self.session.push(message)?;
-            for call in &calls {
+            let mut finished = None;
+            for (i, call) in calls.iter().enumerate() {
                 self.pending = Some(call["id"].clone());
-                let (content, meta) = self.call(call).await;
+                let (mut content, mut meta) = self.call(call).await;
+                if let Some(report) = meta["finish"].as_str() {
+                    match self.finishing(began, &meta, i + 1 == calls.len()) {
+                        Ok(()) => finished = Some(report.to_string()),
+                        Err(why) => {
+                            content += &format!("\n[finish() ignored: {why}; reply when you are ready]");
+                            meta["finish_ignored"] = why.into();
+                        }
+                    }
+                }
                 self.session
                     .push(json!({"role": "tool", "tool_call_id": call["id"], "content": content, "meta": meta}))?;
                 self.pending = None;
@@ -361,7 +371,13 @@ impl Agent {
             if let Some(why) = self.broken.take() {
                 anyhow::bail!(why);
             }
-            if !calls.is_empty() {
+            if let Some(report) = finished {
+                ui::prose();
+                let mut markdown = crate::render::Markdown::default();
+                markdown.push(&report);
+                markdown.finish();
+                self.session.push(json!({"role": "assistant", "content": report, "meta": {"via": "finish()"}}))?;
+            } else if !calls.is_empty() {
                 ui::activity("waiting for the model");
                 continue;
             }
@@ -404,6 +420,28 @@ impl Agent {
         self.current = None;
         let changed = self.changed(&start, began).await;
         self.report(Some(changed), false, true, began, clock).await
+    }
+
+    /// Whether finish() may end the turn in place of a reply: only where the check covers the report's claims and the
+    /// model has read everything the run printed. In a turn without edits nothing checks the report, and an answer
+    /// written in the run that gathers its evidence was written before reading it.
+    fn finishing(&self, began: usize, meta: &Value, last: bool) -> Result<(), &'static str> {
+        let edits = edited(meta) || self.session.entries[began..].iter().any(|e| edited(&e["meta"]));
+        if meta["error"] == true {
+            Err("the run raised")
+        } else if !last {
+            Err("more code ran after it in this reply")
+        } else if !edits {
+            Err("this turn changed no files, so no check covers the report")
+        } else if self.config.check.is_none() {
+            Err("no check is configured")
+        } else if meta["check"] != true {
+            Err("check() did not pass in this run")
+        } else if meta["own"].as_u64().is_none_or(|own| own > 0) {
+            Err("this run printed output you have not read")
+        } else {
+            Ok(())
+        }
     }
 
     async fn changed(&self, start: &str, began: usize) -> bool {

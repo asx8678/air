@@ -17,6 +17,7 @@ write(path, content)          # create a new file; raises if it exists
 check() -> bool               # runs the project check and prints its result
 plan(steps)                   # this task's steps, shown to the user; replaces any earlier plan
 done(step=None) -> str|None   # mark a step done (default: current); returns the next step
+finish(report)                # end the turn with report as your final message, from the run that verifies (step 4)
 ```
 Repo files change only through `edit` and `write`, never through `open(..., "w")` or the shell; scratch files go in a temp dir. Both run the formatter and print one line; if the formatter changed your text, the line shows how. Use raw triple-quoted strings (`r"""..."""`) for multi-line `old`/`new` so backslashes stay exact.
 
@@ -32,7 +33,8 @@ show("src/date.rs", 40, 100)
 ```python
 accept("parse_date accepts ISO week dates such as 2026-W41-2; other inputs behave as before")
 edit("src/date.rs", r"""    let parts = s.split('-');""", r"""    let parts = s.split(['-', 'W']);""")
-check()
+assert check()
+finish("parse_date splits on 'W' as well as '-', so ISO week dates such as 2026-W41-2 parse; the project check passes.")
 ```
 
 ## Workflow
@@ -42,7 +44,8 @@ For a review or a question, answer with file:line evidence and change no files u
    For anything bigger than a one-line fix, also call plan([...]) with 2-6 short steps there, and done() in the run that finishes each step.
    accept(), plan() and done() return nothing worth reading: never spend a run on them alone.
 3. check() must pass after your last change; if it fails, fix and run it again.
-   check() is evidence only for what it runs. If it does not exercise your change (no check configured, or it only builds or lints), also run the changed code directly (import it, run the command, replay the failing case) and print what shows each criterion holds.
+   check() is evidence only for what it runs. If it does not exercise your change (no check configured, or it only builds or lints), also run the changed code directly (import it, run the command, replay the failing case) and print or assert what shows each criterion holds.
 4. End with a short report: what changed, how you verified it, and what is still open. If check() cannot pass, say why in one line.
+   When nothing is left to read, end the run that verifies with `assert check()`, asserts for your criteria, and finish(report) instead of a separate reply. low takes finish() only when check() passed in that run, the turn changed files, and the run printed nothing else; otherwise it tells you why and you reply as usual.
 
 Don't repeat steps that worked, don't re-read files you already have, and don't commit: git is the undo.

@@ -18,6 +18,7 @@ os.dup2(_null, 0)
 _report = {}
 _state = {}
 _checked = None
+_said = 0  # bytes this run printed through edit, write and check, the output the model can predict
 _groups = set()
 _deadline = time.monotonic() + RUN_CAP
 
@@ -90,6 +91,16 @@ def _rel(path):
     return os.path.relpath(os.path.join(ROOT, path), ROOT)
 
 
+def _say(text):
+    """Prints a helper's own line and counts it, so finish() can tell what else the run printed."""
+    global _said
+    sys.stdout.flush()
+    before = os.fstat(1).st_size
+    print(text)
+    sys.stdout.flush()
+    _said += os.fstat(1).st_size - before
+
+
 def _change(tool, path, make):
     rel = _rel(path)
     real = os.path.realpath(os.path.join(ROOT, rel))
@@ -124,7 +135,7 @@ def _change(tool, path, make):
     if after != written:
         diff = difflib.unified_diff(written.splitlines(True), after.splitlines(True), n=1)
         note += "; the formatter changed it:\n" + "".join(list(diff)[2:]).rstrip("\n")
-    print(f"{tool} {rel}: ok{note}")
+    _say(f"{tool} {rel}: ok{note}")
 
 
 def _forget():
@@ -247,7 +258,7 @@ def check():
     _checked = _tree() if ok else None
     _report["check"] = ok
     _report.setdefault("actions", []).append({"tool": "check", "ok": ok, "cmds": ran})
-    print(answer.get("out") or f"[check {'passed' if ok else 'FAILED'}]")
+    _say(answer.get("out") or f"[check {'passed' if ok else 'FAILED'}]")
     return ok
 
 
@@ -278,7 +289,12 @@ def done(step=None):
     return p["steps"][rest[0] - 1] if rest else None
 
 
-TOOLS = {"sh": sh, "show": show,"edit": edit, "write": write, "accept": accept, "plan": plan, "done": done, "check": check}
+def finish(report):
+    _report["finish"] = str(report)
+
+
+TOOLS = {"sh": sh, "show": show, "edit": edit, "write": write, "accept": accept, "plan": plan, "done": done, "check": check,
+         "finish": finish}
 G = {"__name__": "__main__", **TOOLS}
 HELPERS = tuple(f"{name}()" for name in TOOLS)
 
@@ -306,6 +322,7 @@ for n, request in enumerate(_inbox, 1):
     code, _state = request["code"], request.get("state") or {}
     _deadline = time.monotonic() + RUN_CAP
     _report.clear()
+    _said = 0
     os.chdir(ROOT)
     G.update(TOOLS)
     capture = tempfile.TemporaryFile()
@@ -346,6 +363,8 @@ for n, request in enumerate(_inbox, 1):
         _report["check"] = False
         print("[check no longer applies: files changed after it passed; run check() again]")
     sys.stdout.flush()
+    if "finish" in _report:
+        _report["own"] = os.fstat(1).st_size - _said
     os.dup2(_null, 1)
     os.dup2(_null, 2)
     text = ANSI.sub("", _read(capture).decode("utf-8", "replace"))
