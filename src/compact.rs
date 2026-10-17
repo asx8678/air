@@ -175,7 +175,7 @@ pub fn summary(entries: &[Value], keep: usize) -> String {
                     let code = args["code"].as_str().unwrap_or_default();
                     let what = line(crate::ui::headline(code).unwrap_or_default(), 80);
                     let result = (i + 1..keep)
-                        .take_while(|&r| role(r) == "tool")
+                        .take_while(|&r| matches!(role(r), "tool" | ""))
                         .find(|&r| entries[r]["tool_call_id"] == call["id"]);
                     let outcome = result.map_or_else(
                         || "no result".into(),
