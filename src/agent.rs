@@ -998,7 +998,9 @@ fn connect(providers: &Providers, header: &Value) -> Result<(String, Llm)> {
     let model = header["model"].as_str().unwrap_or_default();
     let recorded = header["provider"].as_str();
     let listed = holding(providers, model).map(String::as_str);
-    let fallback = providers.keys().next().map(String::as_str);
+    // A provider that lists models, not one there only for search() (such as [deepseek]), unless none does.
+    let serving = providers.iter().find(|(_, p)| !p.models.is_empty()).map(|(name, _)| name.as_str());
+    let fallback = serving.or(providers.keys().next().map(String::as_str));
     let name = recorded
         .filter(|n| providers.contains_key(*n))
         .or(listed)
