@@ -149,7 +149,7 @@ impl Session {
         let mut open: Vec<Value> = vec![];
         for (i, entry) in self.entries.iter().enumerate().skip(keep) {
             let Some(role) = entry["role"].as_str() else { continue };
-            let message = crate::compact::wire(entry, i, newest);
+            let message = crate::compact::wire(entry);
             if role == "tool" {
                 if let Some(i) = open.iter().position(|id| *id == message["tool_call_id"]) {
                     open.remove(i);

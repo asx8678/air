@@ -442,9 +442,8 @@ impl Agent {
         let compacted = entries.iter().rposition(|e| e["compact"].is_object()).map_or(0, |i| i + 1);
         let counted = (compacted..entries.len()).rev().find(|&i| entries[i]["meta"]["usage"]["prompt_tokens"].is_u64());
         let Some(i) = counted else { return self.sent() };
-        let newest = compact::newest_task(entries);
         let added = (i..entries.len()).filter(|&j| entries[j]["role"].is_string());
-        let added: u64 = added.map(|j| compact::wire(&entries[j], j, newest).to_string().len() as u64).sum();
+        let added: u64 = added.map(|j| compact::wire(&entries[j]).to_string().len() as u64).sum();
         entries[i]["meta"]["usage"]["prompt_tokens"].as_u64().unwrap_or(0) + added / 4
     }
 

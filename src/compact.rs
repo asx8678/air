@@ -14,16 +14,15 @@ pub fn baked(u: usize) -> String {
     format!("[Latest task when this summary was written, entry #{u}]")
 }
 
-/// Entry `i` as the model sees it: no meta, and reasoning only from the newest task on, cut to its head and tail.
-/// All of it follows from the log alone, so every request and every resume sends the same bytes for an entry and the
-/// prompt prefix stays cached.
-pub fn wire(entry: &Value, i: usize, newest: Option<usize>) -> Value {
+/// An entry as the model sees it: no meta, and reasoning cut to its head and tail. It follows from the entry alone, so
+/// every request and every resume sends the same bytes for it and the prompt prefix stays cached. Earlier tasks keep
+/// their reasoning too, until a compaction summarizes them: dropping it at a new task broke the cache from the first
+/// earlier reply on (DeepSeek on OpenCode Go reused 34% of the prompt instead of 99%).
+pub fn wire(entry: &Value) -> Value {
     let mut message = entry.clone();
     if let Some(fields) = message.as_object_mut() {
         fields.remove("meta");
-        if newest.is_some_and(|u| i < u) {
-            fields.remove("reasoning_content");
-        } else if let Some(Value::String(r)) = fields.get_mut("reasoning_content")
+        if let Some(Value::String(r)) = fields.get_mut("reasoning_content")
             && r.len() > REPLAY
         {
             let (start, end) = (clip(r, REPLAY / 4), tail(r, REPLAY * 3 / 4));
@@ -34,11 +33,10 @@ pub fn wire(entry: &Value, i: usize, newest: Option<usize>) -> Value {
 }
 
 pub fn cut(entries: &[Value], prev: usize, keep_tokens: usize, whole: bool) -> usize {
-    let newest = newest_task(entries);
     let (mut tail, mut keep) = (0, entries.len());
     for i in (prev + 1..entries.len()).rev() {
         let Some(role) = entries[i]["role"].as_str() else { continue };
-        tail += wire(&entries[i], i, newest).to_string().len() / 4;
+        tail += wire(&entries[i]).to_string().len() / 4;
         if tail > keep_tokens && (whole || keep < entries.len()) {
             break;
         }
