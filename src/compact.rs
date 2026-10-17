@@ -32,6 +32,9 @@ pub fn wire(entry: &Value) -> Value {
     message
 }
 
+/// The entry the kept tail starts at: the earliest reply from which the rest fits in `keep_tokens`, and without `whole`
+/// at least the last reply. Without `whole` it is `prev`, nothing to compact, when all of it fits: compaction keeps that
+/// much as it is. `whole` follows an overflow, which shows the estimate ran short, so it cuts anyway.
 pub fn cut(entries: &[Value], prev: usize, keep_tokens: usize, whole: bool) -> usize {
     let (mut tail, mut keep) = (0, entries.len());
     for i in (prev + 1..entries.len()).rev() {
@@ -44,7 +47,7 @@ pub fn cut(entries: &[Value], prev: usize, keep_tokens: usize, whole: bool) -> u
             keep = i;
         }
     }
-    keep
+    if tail > keep_tokens || whole { keep } else { prev }
 }
 
 pub fn summary(entries: &[Value], keep: usize) -> String {

@@ -769,7 +769,8 @@ impl Agent {
         let prev = self.session.keep();
         let keep = compact::cut(&self.session.entries, prev, keep_tokens, whole);
         if keep <= prev {
-            ui::note("nothing to compact");
+            let kept = ui::tokens(keep_tokens as u64);
+            ui::note(&format!("nothing to compact: the conversation fits in the {kept} compaction keeps"));
             return Ok(());
         }
         let summary = compact::summary(&self.session.entries, keep);
