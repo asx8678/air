@@ -268,6 +268,10 @@ impl Agent {
         // The push first writes what the snapshot logged, so the turn begins at the task itself.
         let began = self.session.entries.len() - 1;
         self.current = Some((began, clock));
+        if let Some(moved) = self.moved_since(&start).await {
+            ui::event("moved", &moved, Value::Null);
+            self.session.push(json!({"role": "user", "content": format!("[{moved}]"), "meta": {"host": true}}))?;
+        }
         let (mut nudged, mut overflowed, mut retries, mut stalled, mut strayed) = (false, false, 0, false, false);
         let ceiling = self.compact_at * TURN_BUDGET;
         let mut spent = 0;
@@ -442,6 +446,34 @@ impl Agent {
         } else {
             Ok(())
         }
+    }
+
+    /// The files that changed between the end of the last turn and the start of this one, outside the conversation: the
+    /// user's editor, a pull, a branch switch. None when nothing did or the last turn's tree is unknown.
+    async fn moved_since(&self, start: &str) -> Option<String> {
+        let last = self.session.entries.iter().rev().find_map(|e| e["report"]["tree"].as_str())?;
+        let (last, now) = (last.split(' ').next()?.to_string(), start.split(' ').next()?.to_string());
+        if last == now || now.is_empty() {
+            return None;
+        }
+        let (root, args) = (self.root.clone(), ["diff-tree", "-r", "--name-status", "--no-renames", "-z", &last, &now]);
+        let args = args.map(String::from);
+        let out = tokio::task::spawn_blocking(move || git(&root, None, &args)).await.ok()?.ok()?;
+        let fields: Vec<&str> = out.split('\0').filter(|f| !f.is_empty()).collect();
+        let files: Vec<String> = fields
+            .chunks(2)
+            .filter_map(|pair| match pair {
+                ["A", path] => Some(format!("{path} (new)")),
+                ["D", path] => Some(format!("{path} (deleted)")),
+                [_, path] => Some(path.to_string()),
+                _ => None,
+            })
+            .collect();
+        let more = files.len().saturating_sub(20);
+        let more = if more > 0 { format!(" and {more} more") } else { String::new() };
+        let shown = files.iter().take(20).cloned().collect::<Vec<_>>().join(", ");
+        (!files.is_empty())
+            .then(|| format!("Files changed since your last turn, outside this conversation: {shown}{more}"))
     }
 
     async fn changed(&self, start: &str, began: usize) -> bool {
@@ -665,6 +697,8 @@ impl Agent {
         clock: Instant,
     ) -> Result<bool> {
         self.session.flush()?;
+        // The next turn compares its starting tree with this one to tell the model what moved in between.
+        let tree = if self.repo { self.tree().await.ok() } else { None };
         let changes = if self.repo {
             self.diff(began, std::time::SystemTime::now() - clock.elapsed()).await?
         } else {
@@ -758,7 +792,7 @@ impl Agent {
         ui::report(&rows, verdict, good);
         let changes: Vec<&str> = changes.lines().filter(|l| *l != "none").collect();
         self.session.push(json!({"report": {
-            "verdict": verdict, "changed": changed, "checked": checked, "stopped": stopped, "check_inputs": inputs, "outside": outside, "criteria": state.accepted,
+            "verdict": verdict, "tree": tree, "changed": changed, "checked": checked, "stopped": stopped, "check_inputs": inputs, "outside": outside, "criteria": state.accepted,
             "plan_steps": steps, "plan_done": done, "changes": changes, "requests": requests, "runs": runs,
             "prompt": prompt, "cached": cached, "out": out, "ms": ms,
         }}))?;
