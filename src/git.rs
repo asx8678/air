@@ -70,16 +70,9 @@ pub fn git<S: AsRef<str>>(root: &Path, index: Option<&Path>, args: &[S]) -> Resu
 }
 
 /// A git command that failed: its exit code, and the command with what git printed.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{1}")]
 struct GitExit(Option<i32>, String);
-
-impl std::fmt::Display for GitExit {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.write_str(&self.1)
-    }
-}
-
-impl std::error::Error for GitExit {}
 
 /// The private index is a cache: a leftover lock is dropped, and an index git can no longer use is rebuilt, once.
 pub fn snapshot(root: &Path, index: &Path) -> Result<String> {

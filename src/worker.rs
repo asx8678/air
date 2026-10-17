@@ -31,14 +31,9 @@ pub fn allow_env(names: Vec<String>) {
     let _ = EXTRA_ENV.set(names);
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("the worker could not start")]
 pub struct StartFailed;
-
-impl std::fmt::Display for StartFailed {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.write_str("the worker could not start")
-    }
-}
 
 pub struct Worker {
     stdin: ChildStdin,

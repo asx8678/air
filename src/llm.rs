@@ -43,7 +43,8 @@ const CHUNK: &[&str] = &["choices", "object", "created", "usage", "error", "obfu
 const HEADERS: &[&str] = &["request-id", "cf-ray", "server", "via", "retry-after", "server-timing"];
 
 /// The provider refused the request as too long; `window` is the context size its error states, if any.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("context window exceeded: {text}")]
 pub struct ContextOverflow {
     text: String,
     pub window: Option<u64>,
@@ -54,14 +55,6 @@ impl ContextOverflow {
         Self { window: window(&text), text }
     }
 }
-
-impl std::fmt::Display for ContextOverflow {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "context window exceeded: {}", self.text)
-    }
-}
-
-impl std::error::Error for ContextOverflow {}
 
 #[derive(Debug, Default)]
 pub struct Lost {
@@ -89,16 +82,9 @@ pub fn lost(e: &anyhow::Error) -> Option<&Lost> {
     e.downcast_ref::<Interrupted>().map(|i| &i.1)
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("stream interrupted: {0}")]
 pub struct Interrupted(String, Lost);
-
-impl std::fmt::Display for Interrupted {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "stream interrupted: {}", self.0)
-    }
-}
-
-impl std::error::Error for Interrupted {}
 
 pub fn params(header: &Value) -> Value {
     match &header["params"] {
